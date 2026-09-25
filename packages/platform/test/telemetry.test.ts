@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { type Attributes, type SpanAttributeValue, type SpanContext, type Tracer } from '@opentelemetry/api';
+import {
+  type Attributes,
+  type SpanAttributeValue,
+  type SpanContext,
+  type Tracer,
+  trace,
+} from '@opentelemetry/api';
 import { castId, type ActorId, type EventId, type UserId } from '@been-there/core';
 import {
   SPAN_SINK_CLEARANCE,
@@ -105,9 +111,11 @@ function recordingTracer(): { tracer: Tracer; spans: RecordingSpan[] } {
   const tracer: Tracer = {
     startSpan(name, options, context) {
       counter += 1;
-      const parent = context?.getValue(Symbol.for('OpenTelemetry Context Key SPAN')) as
-        | SpanContext
-        | undefined;
+      // `trace.getSpanContext` is the supported accessor. Reading the context
+      // key by its string form works only while the implementation happens to
+      // use that symbol, and returns an empty object when it does not - which
+      // is how a correct parent link can look absent.
+      const parent = context === undefined ? undefined : trace.getSpanContext(context);
       const span = new RecordingSpan(name, options?.kind ?? 0, options?.attributes ?? {}, parent, counter, {
         name,
         kind: options?.kind ?? 0,
@@ -203,11 +211,17 @@ describe('span attributes are redacted at the sink', () => {
     const record = restrictedEvidenceRead();
     const context = contextFor('case.decide');
 
-    const asSpan = spanAttributes(record).attributes;
-    const asLog = JSON.parse(requestLogEntry(context, record).body) as Record<string, unknown>;
+    // Compared like for like: both sinks receive the *envelope plus* the same
+    // classified record. Comparing a bare span against a log that already
+    // includes its envelope compares two different things and fails for the
+    // wrong reason.
+    const { tracer, spans } = recordingTracer();
+    const telemetry = new Telemetry({ tracer });
+    const span: SpanRecorder = telemetry.startRequestSpan(context, record);
+    span.end(context);
 
-    // The intersection of the two is the whole point: the span carries the
-    // internal fields and nothing the log line would have dropped.
+    const asSpan = spans[0]?.attributes ?? {};
+    const asLog = JSON.parse(requestLogEntry(context, record).body) as Record<string, unknown>;
     expect(Object.keys(asSpan).toSorted()).toEqual(Object.keys(asLog).toSorted());
     expect(asSpan['case_origin']).toBe('user_report');
   });
@@ -236,7 +250,11 @@ describe('span attributes are redacted at the sink', () => {
     const span = spanAttributes(nested);
 
     expect(span.attributes).toEqual({});
-    expect(span.withheldFields).toEqual(['profile']);
+    // Both the container and the leaf it flattened into are withheld. The leaf
+    // is the interesting one: it passed the clearance check on its own, so a
+    // filter that only looked at the top level would have delivered it, and a
+    // dotted name is the shape that leaks a structure nobody inspected whole.
+    expect(span.withheldFields).toEqual(['profile.display_name', 'profile']);
   });
 
   it('writes at a clearance the caller cannot raise', () => {
@@ -306,10 +324,10 @@ describe('the correlation chain becomes the trace', () => {
 
   it('roots a span with no causation under its own correlation', () => {
     const context = parentContextFor({ correlationId: correlationId('solo') });
-    const value = context.getValue(Symbol.for('OpenTelemetry Context Key SPAN')) as SpanContext;
+    const value = trace.getSpanContext(context);
 
-    expect(value.spanId).toBe(spanIdFor(correlationId('solo')));
-    expect(value.isRemote).toBe(true);
+    expect(value?.spanId).toBe(spanIdFor(correlationId('solo')));
+    expect(value?.isRemote).toBe(true);
   });
 
   it('carries the event identity on the span and nothing from its payload', () => {

@@ -105,7 +105,17 @@ export function spanAttributes(record: ClassifiedRecord): SpanAttributeRecord {
   const withheldFields: string[] = [];
 
   for (const field of redacted.fields) {
+    // A nested `ClassifiedRecord` is not a span attribute, and `redact` has
+    // already emitted its leaves under dotted names. Delivering the outer field
+    // as well would put a value in the span that no clearance check inspected
+    // as a whole - which is the one transformation that turns this function
+    // from a filter into a pass-through. The leaves are delivered under their
+    // own dotted names; the container is withheld.
     const value = redacted.visible[field.name];
+    if (typeof value === 'object' && value !== null) {
+      withheldFields.push(field.name);
+      continue;
+    }
     const attribute = field.delivered && value !== undefined ? toAttributeValue(value) : undefined;
     if (attribute === undefined) {
       withheldFields.push(field.name);
