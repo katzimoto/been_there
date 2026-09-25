@@ -1,0 +1,28 @@
+{
+  "name": "been-there",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Been There — verified, safe dating core. Architecture and domain contracts.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --build --pretty",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run test",
+    "format": "prettier --write \"**/*.{ts,md,json}\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
+    "prettier": "^3.4.2"
+  }
+}
