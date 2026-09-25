@@ -13,14 +13,14 @@ concurrency:
 permissions:
   contents: read
 
+jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     # The database suites must run in CI, not skip. A suite that silently passes
     # because it connected to nothing is the same failure mode as a green run
-    # against stale compiled code, and it is worse here: there is no local
-    # equivalent to notice.
+    # against stale compiled code, and there is no local equivalent to notice.
     services:
       postgres:
         image: postgres:17-alpine
@@ -39,9 +39,6 @@ permissions:
 
     env:
       DATABASE_URL: postgres://been_there:been_there_local_only@127.0.0.1:55432/been_there
-  verify:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
@@ -71,11 +68,6 @@ permissions:
             echo "::endgroup::"
           done
 
-      # The schema has to exist before the suites run, or every database test
-      # skips on a missing table and the job is green for the wrong reason.
-      - name: Migrate
-        run: node packages/database/scripts/migrate.mjs
-
       - name: Test
         run: npm test
 
@@ -92,3 +84,8 @@ permissions:
 
       - name: Check the lockfile covers every workspace package
         run: node scripts/dev/check-workspace-lockfile.mjs
+
+      # The schema has to exist before the suites run, or every database test
+      # skips on a missing table and the job is green for the wrong reason.
+      - name: Migrate
+        run: node packages/database/scripts/migrate.mjs
