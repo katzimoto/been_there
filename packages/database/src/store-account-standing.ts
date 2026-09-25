@@ -53,6 +53,7 @@ import { clientOf } from './transaction.js';
  * direction that surfaces the gap.
  */
 const ACCOUNT_STATES: readonly string[] = accountMachine.states;
+
 /**
  * Every fault leaves here as a `StoreError`, classified.
  *
@@ -168,7 +169,6 @@ function toStandingRow(raw: QueryResultRow): AccountStandingRow {
   };
 }
 
-
 /**
  * `AccountStandingStore` on Postgres.
  *
@@ -244,7 +244,7 @@ export class PgAccountStandingStore implements AccountStandingStore {
     expectedGeneration: number | null,
     tx: Transaction,
   ): Promise<boolean> {
-    if (!isAccountState(row.state)) {
+    if (!ACCOUNT_STATES.includes(row.state)) {
       // Refused before the statement rather than left to the CHECK: a check
       // violation aborts the caller's transaction, so learning your state was
       // invalid would cost a replay of the decision and its audit row.
@@ -300,18 +300,3 @@ export class PgAccountStandingStore implements AccountStandingStore {
   }
 }
 
-/** The columns a caller has to supply; named here so the port and the SQL agree. */
-export const ACCOUNT_STANDING_COLUMNS: readonly (keyof AccountStandingRow)[] = [
-  'userId',
-  'state',
-  'capabilities',
-  'visibleInProduct',
-  'caseId',
-  'decisionId',
-  'generation',
-  'updatedAt',
-];
-
-/** Kept beside the class so a caller can build a row without restating the port. */
-export type { AccountStandingRow, AccountStandingStore };
-export { CAPABILITIES_COLUMNS as ACCOUNT_STANDING_READABLE_COLUMNS };

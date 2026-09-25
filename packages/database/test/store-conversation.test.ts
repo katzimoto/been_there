@@ -159,6 +159,33 @@ describeIfDb('ConversationStore, against Postgres', () => {
     expect(stored.rows[0]?.body).toBe('hello');
   });
 
+  it('stores the state a message was appended with and reads back the state it now has', async () => {
+    const [a, b] = await twoUsers();
+    const matchId = await aMatch([a, b]);
+    const conversation = aConversation(matchId, [a, b], at(0));
+    await transaction.run((tx) => store.create(conversation, tx));
+    const message = aMessage(conversation.conversationId, a, at(1));
+
+    await transaction.run((tx) => store.appendMessage(message, tx));
+    const asAppended = await transaction.run((tx) =>
+      store.findMessages(conversation.conversationId, { limit: 10, offset: 0 }, b, tx),
+    );
+    expect(asAppended.items[0]?.state).toBe('sent');
+
+    // The state moves after the fact, by a writer this store does not own —
+    // a delivery receipt, a moderation deletion. A store that hard-coded
+    // 'sent' would still typecheck against the port and would be wrong here,
+    // so the read has to come from the column rather than from a constant.
+    await client.query('UPDATE app.messages SET state = $2 WHERE message_id = $1', [
+      message.messageId,
+      'read',
+    ]);
+    const afterReceipt = await transaction.run((tx) =>
+      store.findMessages(conversation.conversationId, { limit: 10, offset: 0 }, b, tx),
+    );
+    expect(afterReceipt.items[0]?.state).toBe('read');
+  });
+
   it('reports a second conversation for one match as a conflict, not a fault', async () => {
     const [a, b] = await twoUsers();
     const matchId = await aMatch([a, b]);

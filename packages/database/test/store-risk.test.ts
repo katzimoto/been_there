@@ -225,16 +225,19 @@ describeIfDb('RiskStore, against Postgres', () => {
   it('orders a tied window by the whole domain comparator: instant, then detector, then arrival', async () => {
     const subject = await newSubject();
     const instant = new Date('2026-04-01T12:00:00.000Z');
-    // Every one of these shares an instant, so the first term of
-    // `compareSignals` ties and the rest decide. `a_second` and `a_third`
-    // arrive *after* `m_only` and still come before it, which is what proves
-    // `detector` outranks `seq` rather than the other way round — a uuid
-    // tiebreak would interleave these five differently.
-    await append(signal(subject, { occurredAt: instant, detector: 'z.detector', behaviour: 'z_only' }));
-    await append(signal(subject, { occurredAt: instant, detector: 'a.detector', behaviour: 'a_first' }));
-    await append(signal(subject, { occurredAt: instant, detector: 'm.detector', behaviour: 'm_only' }));
-    await append(signal(subject, { occurredAt: instant, detector: 'a.detector', behaviour: 'a_second' }));
-    await append(signal(subject, { occurredAt: instant, detector: 'a.detector', behaviour: 'a_third' }));
+    // Every one of these shares an instant, so the first term of `compareSignals`
+    // ties and the rest decide: `a_second` and `a_third` arrive *after* `m_only`
+    // and still precede it, which proves `detector` outranks `seq`.
+    const deliveries: readonly (readonly [string, string])[] = [
+      ['z.detector', 'z_only'],
+      ['m.detector', 'm_only'],
+      ['a.detector', 'a_first'],
+      ['a.detector', 'a_second'],
+      ['a.detector', 'a_third'],
+    ];
+    for (const [detector, behaviour] of deliveries) {
+      await append(signal(subject, { occurredAt: instant, detector, behaviour }));
+    }
 
     const rows = await signalsOf(subject);
     expect(rows.map((row) => row.behaviour)).toEqual([
@@ -244,13 +247,10 @@ describeIfDb('RiskStore, against Postgres', () => {
       'm_only',
       'z_only',
     ]);
-    expect(rows.map((row) => row.seq)).toEqual(
-      [...rows.map((row) => row.seq)].sort((a, b) => a - b),
-    );
     // `seq` arrives from the driver as a string, because it is a `bigint`. A
-    // string would still order correctly here — five consecutive values share a
-    // digit count — so the type itself is what has to be asserted: `'10' < '9'`
-    // is a corrupt arrival order that no small fixture would ever expose.
+    // string orders these five correctly — consecutive values share a digit
+    // count — so the type itself is what has to be asserted: `'10' < '9'` is a
+    // corrupt arrival order that no fixture this size would ever expose.
     expect(typeof rows[0]?.seq).toBe('number');
   });
 

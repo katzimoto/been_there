@@ -1,22 +1,41 @@
 import type { Pool } from 'pg';
 import type { Stores } from '@been-there/contracts';
+import { PgAccountStandingStore } from './store-account-standing.js';
+import { PgConversationStore } from './store-conversation.js';
+import { PostgresIdentityStore } from './store-users-identity.js';
+import { PostgresInteractionStore } from './store-interaction.js';
+import { createModerationStore } from './store-moderation.js';
+import { PgRiskStore } from './store-risk.js';
+import { PgVerificationAttemptStore } from './store-verification-attempts.js';
+import { PostgresUserStore } from './store-users-identity.js';
 
 /**
- * The composition root: one function that turns a pool into the set of stores
- * the service composes against.
+ * The composition root: one function that turns a pool into the stores the
+ * service composes against.
  *
- * This exists so the service never imports a concrete store directly. It takes
- * the `Stores` port, builds every implementation, and hands back the port. A
- * test that wants to substitute a store can do so at this one seam rather than
- * at every call site.
+ * The service imports this rather than any concrete store, so the wiring lives
+ * in exactly one place. A composition root inside the service package would be
+ * a second place, and the second place is where it would be changed and the
+ * first one forgotten.
  *
- * It is not written yet: the five store implementations are being built in
- * parallel, and wiring them together before they exist would be a stub. The
- * signature is settled so the service can code against it now.
+ * Every store is zero-argument and resolves its connection from the caller's
+ * `Transaction`, so this assembles them without a pool being passed to any of
+ * them. The `pool` parameter is what makes the composition *checkable* — a
+ * missing store is a type error at this line rather than an undefined property
+ * somewhere in a request handler.
  */
-export function createStores(_pool: Pool): Stores {
-  throw new Error(
-    'createStores is not wired yet: the store implementations are landing separately. ' +
-      'This signature is the contract the service codes against.',
-  );
+export function createStores(pool: Pool): Stores {
+  if (pool === undefined || typeof pool.connect !== 'function') {
+    throw new Error('createStores needs a pg Pool; it assembles stores, it does not create one');
+  }
+  return {
+    users: new PostgresUserStore(),
+    identity: new PostgresIdentityStore(),
+    interaction: new PostgresInteractionStore(),
+    conversations: new PgConversationStore(),
+    risk: new PgRiskStore(),
+    moderation: createModerationStore(),
+    accountStanding: new PgAccountStandingStore(),
+    verificationAttempts: new PgVerificationAttemptStore(),
+  };
 }

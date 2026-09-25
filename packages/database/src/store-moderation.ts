@@ -76,19 +76,94 @@ function readCount(result: QueryResult): number {
 }
 
 /**
- * A store fault, labelled by the class of failure. The kind is in the message
- * because the port's `StoreError` carries no code and a caller that must handle
- * a conflict has no other way to tell one from a fault; the driver error stays
- * reachable as `cause`, where `isConflict` and `isRetryable` still read its
- * SQLSTATE.
+ * Why a moderation write was refused, as a closed vocabulary.
+ *
+ * These are integrity outcomes the database enforced, not business decisions
+ * the domain made: a caller that caught them as a domain error would have to
+ * parse prose or enumerate constraint names to tell them apart. A caller
+ * branches on `reason` and never on the message.
+ */
+export type ModerationConflictReason =
+  | 'report_id_taken'
+  | 'case_id_taken'
+  | 'decision_id_taken'
+  | 'subject_does_not_exist'
+  | 'reporter_does_not_exist'
+  | 'case_does_not_exist'
+  | 'reverses_unknown_decision'
+  | 'action_not_recognised'
+  | 'constraint_unrecognised';
+
+/**
+ * A refusal the caller must handle, distinct from a fault whose answer is
+ * unknown. Extends the contracts' `StoreError` rather than replacing it, so a
+ * caller catching `StoreError` still catches this, and the driver error stays
+ * on `cause` where `isConflict` reads its SQLSTATE.
+ */
+export class ModerationStoreError extends StoreError {
+  readonly reason: ModerationConflictReason;
+  constructor(reason: ModerationConflictReason, message: string, cause: unknown) {
+    super(message, { retryable: false, cause });
+    this.name = 'ModerationStoreError';
+    this.reason = reason;
+  }
+}
+
+/**
+ * The constraints these statements can violate, read from the live database
+ * rather than assumed from Postgres' naming rules, so a renamed constraint
+ * surfaces as `constraint_unrecognised` instead of silently reading as some
+ * other reason. A violation nobody anticipated still gets a closed reason; it
+ just gets the honest one.
+ */
+const CONFLICT_REASON_BY_CONSTRAINT: Readonly<Record<string, ModerationConflictReason>> = {
+  reports_pkey: 'report_id_taken',
+  reports_subject_id_fkey: 'subject_does_not_exist',
+  reports_reporter_id_fkey: 'reporter_does_not_exist',
+  cases_pkey: 'case_id_taken',
+  cases_subject_id_fkey: 'subject_does_not_exist',
+  decisions_pkey: 'decision_id_taken',
+  decisions_case_id_fkey: 'case_does_not_exist',
+  decisions_subject_id_fkey: 'subject_does_not_exist',
+  decisions_reverses_fkey: 'reverses_unknown_decision',
+  decisions_action_check: 'action_not_recognised',
+};
+
+/**
+ * The constraint a driver error names, or `null`. `errors.ts` narrows a driver
+ * error to its SQLSTATE and keeps that helper private; this reads the sibling
+ * field, and belongs beside it if the two are ever generalised together.
+ */
+function constraintOf(error: unknown): string | null {
+  if (typeof error === 'object' && error !== null && 'constraint' in error) {
+    const constraint = (error as { constraint?: unknown }).constraint;
+    return typeof constraint === 'string' && constraint.length > 0 ? constraint : null;
+  }
+  return null;
+}
+
+/**
+ * A store fault, labelled by the class of failure. A conflict the caller must
+ * handle becomes a `ModerationStoreError` with a reason to branch on; anything
+ * else keeps its classification in the message, because there is nothing for a
+ * caller to do about it but surface it.
  */
 function storeFault(operation: string, error: unknown): StoreError {
   if (error instanceof StoreError) {
     return error;
   }
-  const kind = isConflict(error) ? 'conflict' : isRetryable(error) ? 'retryable fault' : 'fault';
+  if (isConflict(error)) {
+    const constraint = constraintOf(error);
+    const reason =
+      constraint === null
+        ? 'constraint_unrecognised'
+        : (CONFLICT_REASON_BY_CONSTRAINT[constraint] ?? 'constraint_unrecognised');
+    return new ModerationStoreError(reason, `${operation}: ${reason}`, error);
+  }
+  const kind = isRetryable(error) ? 'retryable fault' : 'fault';
   return new StoreError(`${operation}: ${kind}`, { retryable: isRetryable(error), cause: error });
 }
+
 
 export function createModerationStore(): ModerationStore {
   async function findAuditPage(

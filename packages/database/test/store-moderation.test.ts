@@ -23,7 +23,7 @@ import { castId, type CaseId, type ReportId, type UserId } from '@been-there/cor
 import { StoreError, type ModerationStore, type Transaction } from '@been-there/contracts';
 import { isConflict } from '../src/errors.js';
 import { clientOf, createTransaction } from '../src/transaction.js';
-import { createModerationStore } from '../src/store-moderation.js';
+import { ModerationStoreError, createModerationStore } from '../src/store-moderation.js';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const ENV_FILE = join(REPO_ROOT, '.env');
@@ -257,11 +257,41 @@ describeIfDb('ModerationStore, against Postgres', () => {
     const failure = await captureFailure(() => run((tx) => store.insertDecision(dangling, tx)));
 
     // A conflict the caller must handle, not a fault: the difference is the
-    // whole reason a bad appeal cannot be mistaken for an outage.
+    // whole reason a bad appeal cannot be mistaken for an outage. The reason is
+    // a closed value to branch on, not prose, and the driver error stays on
+    // `cause` for anything that needs the SQLSTATE.
+    expect(failure).toBeInstanceOf(ModerationStoreError);
     expect(failure).toBeInstanceOf(StoreError);
+    expect((failure as ModerationStoreError).reason).toBe('reverses_unknown_decision');
     expect((failure as StoreError).retryable).toBe(false);
     expect(isConflict((failure as StoreError).cause)).toBe(true);
     expect(await run((tx) => store.findDecisionsFor(caseId, tx))).toHaveLength(0);
+  });
+
+  it('names the constraint it refused on, so a caller branches without reading prose', async () => {
+    const subjectId = await aSubject();
+    const caseId = aCaseId();
+    const caseRow = aCase(subjectId, { caseId });
+    await run((tx) => store.insertCase(caseRow, tx));
+
+    const duplicateCase = await captureFailure(() => run((tx) => store.insertCase(caseRow, tx)));
+    const unknownSubject = await captureFailure(() =>
+      run((tx) => store.insertCase(aCase(castId<'UserId'>(randomUUID())), tx)),
+    );
+    const unknownAction = await captureFailure(() =>
+      run((tx) => store.insertDecision(aDecision(subjectId, caseId, { action: 'obliterate' }), tx)),
+    );
+
+    // Three different refusals, three different reasons, none of them "the
+    // insert failed". A caller answering an appeal can tell a duplicate from a
+    // dangling subject from a malformed action without a single string match.
+    for (const failure of [duplicateCase, unknownSubject, unknownAction]) {
+      expect(failure).toBeInstanceOf(ModerationStoreError);
+      expect(isConflict((failure as StoreError).cause)).toBe(true);
+    }
+    expect((duplicateCase as ModerationStoreError).reason).toBe('case_id_taken');
+    expect((unknownSubject as ModerationStoreError).reason).toBe('subject_does_not_exist');
+    expect((unknownAction as ModerationStoreError).reason).toBe('action_not_recognised');
   });
 
   it('retains two reversals of one decision and leaves the original exactly as it was', async () => {

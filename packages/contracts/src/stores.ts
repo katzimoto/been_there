@@ -102,8 +102,20 @@ export interface AccountStandingStore {
    * Writes the standing a decision produced. `generation` is checked, as in
    * `IdentityStore.update`, so two concurrent writers cannot silently
    * last-write-wins over a sanction.
+   *
+   * `expectedGeneration: null` means "no row was read", so this inserts. It has
+   * to: `generation` is NOT NULL in the schema, so before the first sanction
+   * there is nothing to read and nothing to pass. Without the null the first
+   * write would either be impossible or skip the check — and two concurrent
+   * *first* sanctions would both take the skipping path, which is precisely
+   * the silent last-write-wins this comment denies. Same shape as
+   * `RiskStore.upsertAssessment`.
    */
-  upsert(row: AccountStandingRow, expectedGeneration: number, tx: Transaction): Promise<boolean>;
+  upsert(
+    row: AccountStandingRow,
+    expectedGeneration: number | null,
+    tx: Transaction,
+  ): Promise<boolean>;
 }
 
 export interface AccountStandingRow {

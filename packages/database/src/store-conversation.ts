@@ -137,8 +137,30 @@ function toMessageRow(raw: QueryResultRow): MessageRow {
     senderId: castId<'UserId'>(readString(raw['sender_id'], 'sender_id')),
     body: readString(raw['body'], 'body'),
     createdAt: readTimestamp(raw['created_at'], 'created_at'),
-    state: 'sent',
+    state: readMessageState(raw['state']),
   };
+}
+
+/** The port's own vocabulary for a message state, read off `MessageRow`. */
+type MessageState = MessageRow['state'];
+
+const MESSAGE_STATES: readonly MessageState[] = ['sent', 'delivered', 'read', 'failed', 'deleted'];
+
+/**
+ * The message state, validated rather than cast.
+ *
+ * The column carries a CHECK, so an unknown value cannot be stored today — but
+ * the CHECK is one migration away from being loosened, and a cast would turn
+ * that day into a state the port does not name, arriving in a service as if it
+ * were one it had been told about. Narrowing here fails loudly instead.
+ */
+function readMessageState(value: unknown): MessageState {
+  const state = readString(value, 'state');
+  const found = MESSAGE_STATES.find((candidate) => candidate === state);
+  if (found === undefined) {
+    throw malformed('state', `is ${JSON.stringify(state)}, which is not a message state`);
+  }
+  return found;
 }
 
 /**
@@ -182,7 +204,7 @@ async function storeQuery<T>(work: () => Promise<T>): Promise<T> {
 const CONVERSATION_COLUMNS =
   'conversation_id, match_id, participants, state, opened_at, state_changed_at, last_message_at';
 
-const MESSAGE_COLUMNS = 'message_id, conversation_id, sender_id, body, created_at';
+const MESSAGE_COLUMNS = 'message_id, conversation_id, sender_id, body, created_at, state';
 
 /**
  * `ConversationStore` on Postgres.
@@ -322,10 +344,10 @@ export class PgConversationStore implements ConversationStore {
     return storeQuery(async () => {
       const inserted = await client.query<{ message_id: string }>(
         `INSERT INTO app.messages (${MESSAGE_COLUMNS})
-         VALUES ($1, $2, $3, $4, $5)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (message_id) DO NOTHING
          RETURNING message_id`,
-        [row.messageId, row.conversationId, row.senderId, row.body, row.createdAt],
+        [row.messageId, row.conversationId, row.senderId, row.body, row.createdAt, row.state],
       );
       const created = inserted.rowCount === 1;
       if (created) {
@@ -369,7 +391,7 @@ export class PgConversationStore implements ConversationStore {
         [conversationId, reader],
       );
       const result = await client.query<QueryResultRow>(
-        `SELECT m.message_id, m.conversation_id, m.sender_id, m.body, m.created_at
+        `SELECT m.message_id, m.conversation_id, m.sender_id, m.body, m.created_at, m.state
            FROM app.messages m
            JOIN app.conversations c ON c.conversation_id = m.conversation_id
           WHERE m.conversation_id = $1 AND $2 = ANY(c.participants)
