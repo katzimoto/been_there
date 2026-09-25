@@ -48,20 +48,21 @@ describeIfDb('schema guarantees, against Postgres', () => {
     return { a, b };
   }
 
-  it('refuses a second live like for the same pair, whichever direction it came from', async () => {
+  it('refuses a second live like from the same person to the same person', async () => {
+    // Idempotence is per *ordered* pair. It was once per unordered pair, which
+    // made reciprocal likes — and therefore every match — unrepresentable; the
+    // test that asserted that is deliberately gone rather than inverted,
+    // because the regression it would guard is one nobody wants back.
     const { a, b } = await twoUsers();
     await client.query(
       'INSERT INTO app.likes (like_id, from_user_id, to_user_id) VALUES ($1,$2,$3)',
       [randomUUID(), a, b],
     );
-    // The reverse direction is the same pair. Without the canonical-pair index
-    // this would succeed and a reciprocal like would become a second like
-    // rather than a match.
     await expect(
       client.query('INSERT INTO app.likes (like_id, from_user_id, to_user_id) VALUES ($1,$2,$3)', [
         randomUUID(),
-        b,
         a,
+        b,
       ]),
     ).rejects.toThrow();
   });
@@ -83,18 +84,53 @@ describeIfDb('schema guarantees, against Postgres', () => {
     ).resolves.toBeDefined();
   });
 
+  it('writes both reciprocal likes, because a match is two of them', async () => {
+    // The regression this pins: `likes_live_pair` once indexed the *unordered*
+    // pair, so A->B and B->A collided and the second like of every pair was
+    // unrepresentable. A match is exactly two reciprocal live likes, so that one
+    // index made the whole matching flow unreachable.
+    const { a, b } = await twoUsers();
+    await client.query(
+      'INSERT INTO app.likes (like_id, from_user_id, to_user_id) VALUES ($1,$2,$3)',
+      [randomUUID(), a, b],
+    );
+    await expect(
+      client.query('INSERT INTO app.likes (like_id, from_user_id, to_user_id) VALUES ($1,$2,$3)', [
+        randomUUID(),
+        b,
+        a,
+      ]),
+    ).resolves.toBeDefined();
+  });
+
+  it('still refuses a duplicate like in the same direction', async () => {
+    // The guarantee the index exists for, in the direction it applies to.
+    const { a, b } = await twoUsers();
+    await client.query(
+      'INSERT INTO app.likes (like_id, from_user_id, to_user_id) VALUES ($1,$2,$3)',
+      [randomUUID(), a, b],
+    );
+    await expect(
+      client.query('INSERT INTO app.likes (like_id, from_user_id, to_user_id) VALUES ($1,$2,$3)', [
+        randomUUID(),
+        a,
+        b,
+      ]),
+    ).rejects.toThrow();
+  });
+
   it('gives a pair at most one match, so two concurrent reciprocal likes converge', async () => {
     const { a, b } = await twoUsers();
     const pairKey = [a, b].sort().join('|');
     const row = (matchId) => [matchId, pairKey, [a, b], [randomUUID()], ['active', 'active']];
     await client.query(
       'INSERT INTO app.matches (match_id, pair_key, participants, like_ids, standings) VALUES ($1,$2,$3,$4,$5)',
-      row(randomUUID()),
+      row('match:x|y'),
     );
     await expect(
       client.query(
         'INSERT INTO app.matches (match_id, pair_key, participants, like_ids, standings) VALUES ($1,$2,$3,$4,$5)',
-        row(randomUUID()),
+        row('match:x|y-2'),
       ),
     ).rejects.toThrow();
   });

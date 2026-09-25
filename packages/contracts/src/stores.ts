@@ -33,6 +33,13 @@ export interface UserStore {
   create(record: UserRecord, tx: Transaction): Promise<void>;
   find(userId: UserId, tx: Transaction): Promise<UserRecord | null>;
   findByAccount(accountId: AccountId, tx: Transaction): Promise<UserRecord | null>;
+  /**
+   * A page of candidate ids for discovery. Exists so discovery pages the
+   * population rather than filtering whatever the request happened to supply —
+   * a candidate set taken from the request is a filtered list wearing a page's
+   * name. Eligibility is the domain's call, not this one's.
+   */
+  listCandidateIds(page: Page, tx: Transaction): Promise<readonly UserId[]>;
 }
 
 /**
@@ -59,6 +66,48 @@ export interface IdentityStore {
   update(row: IdentityRecordRow, expectedGeneration: number, tx: Transaction): Promise<boolean>;
 }
 
+/**
+ * A verification attempt is a first-class aggregate with its own lifecycle, not
+ * a transient flag on the identity row. It has to survive between "submit" and
+ * "record the provider's result", which means it has to survive a restart: a
+ * user who starts verification and loses the process would otherwise start over
+ * at the gate into the product.
+ */
+export interface VerificationAttemptStore {
+  insert(attempt: Readonly<Record<string, unknown>>, tx: Transaction): Promise<void>;
+  find(attemptId: string, tx: Transaction): Promise<Readonly<Record<string, unknown>> | null>;
+  findOpenFor(userId: UserId, tx: Transaction): Promise<Readonly<Record<string, unknown>> | null>;
+  update(attemptId: string, patch: Readonly<Record<string, unknown>>, tx: Transaction): Promise<boolean>;
+}
+
+/**
+ * Account standing: what the product surfaces read to decide what an account
+ * may do, and whether it is visible in the product at all.
+ *
+ * Without it a ban has no effect on the product — the decision is recorded in
+ * moderation and the account keeps its capabilities.
+ */
+export interface AccountStandingStore {
+  find(userId: UserId, tx: Transaction): Promise<AccountStandingRow | null>;
+  /**
+   * Writes the standing a decision produced. `generation` is checked, as in
+   * `IdentityStore.update`, so two concurrent writers cannot silently
+   * last-write-wins over a sanction.
+   */
+  upsert(row: AccountStandingRow, expectedGeneration: number, tx: Transaction): Promise<boolean>;
+}
+
+export interface AccountStandingRow {
+  readonly userId: UserId;
+  readonly state: string;
+  readonly capabilities: readonly string[];
+  readonly visibleInProduct: boolean;
+  readonly caseId: string | null;
+  readonly decisionId: string | null;
+  readonly generation: number;
+  readonly updatedAt: Date;
+}
+
 /** Dating: profiles, preferences, likes, passes, blocks, matches. */
 export interface ProfileRow {
   readonly profileId: string;
@@ -73,6 +122,20 @@ export interface InteractionStore {
   findProfile(userId: UserId, tx: Transaction): Promise<ProfileRow | null>;
   upsertPreferences(userId: UserId, preferences: Readonly<Record<string, unknown>>, tx: Transaction): Promise<void>;
   findPreferences(userId: UserId, tx: Transaction): Promise<Readonly<Record<string, unknown>> | null>;
+
+  /**
+   * The live like ledger for one user, ordered by creation. Every like-taking
+   * domain function — `recordLike`, `resolveMatch`, `relationshipView`,
+   * `evidenceForReport` — takes the ledger as an argument, so a store that
+   * cannot read it leaves the whole matching flow with nothing to pass.
+   */
+  findLikesFor(userId: UserId, tx: Transaction): Promise<readonly Readonly<Record<string, unknown>>[]>;
+  /**
+   * Moves a like to its decided state. `isCurrentLike` counts both states so
+   * behaviour is unchanged either way, but a stored state that disagrees with
+   * what the domain decided is a trap for the next reader.
+   */
+  updateLike(likeId: string, state: 'matched' | 'withdrawn', tx: Transaction): Promise<boolean>;
 
   /**
    * Appends a like, or returns the existing row unchanged when the same
@@ -198,6 +261,10 @@ export interface Stores {
   readonly conversations: ConversationStore;
   readonly risk: RiskStore;
   readonly moderation: ModerationStore;
+  /** What the product reads to enforce a sanction. */
+  readonly accountStanding: AccountStandingStore;
+  /** Verification attempts, so the flow survives a restart. */
+  readonly verificationAttempts: VerificationAttemptStore;
 }
 
 import type { ActorId } from '@been-there/core';
