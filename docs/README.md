@@ -57,10 +57,28 @@ One specification per MVP feature issue, in `features/`:
 External, evidence-backed research with sources and dates. Conclusions are marked
 as adopted, rejected, or open.
 
-- [Agent workflow research](./research/agent-workflow-research.md)
+- [Agent workflow research](./research/agent-workflow-research.md) — context
+  engineering, verification loops, tool selection, multi-agent orchestration
+- [Agent memory and learning across sessions](./research/agent-memory-and-learning.md)
+  — what persists, and which failures a written note cannot fix
+- [Multi-agent precision](./research/multi-agent-precision.md) — partitioning,
+  briefing, and detecting a subagent failure
 - [Trust & safety and verification reference research](./research/trust-safety-reference-research.md)
-- [Session review, 2026-09-25 — architecture baseline](./research/session-reviews/2026-09-25-architecture-baseline.md):
-  what was verified, what was assumed, what broke, and what to do next
+
+### Session reviews
+
+Each records what was verified, what was assumed, what broke, and what became a
+lasting check rather than a note.
+
+- [2026-09-25 — architecture baseline](./research/session-reviews/2026-09-25-architecture-baseline.md)
+- [2026-09-25 — review findings](./research/session-reviews/2026-09-25-review-findings.md)
+
+## Development
+
+- [Local environment](./development/local-environment.md) — bring up the
+  dependencies, seed a dataset, and observe the safety model from a REPL
+- [`AGENTS.md`](../AGENTS.md) — the working agreement, and [`skills/`](../skills/)
+  for the procedures it points to
 
 ## Document conventions
 

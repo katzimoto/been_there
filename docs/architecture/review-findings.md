@@ -20,6 +20,70 @@
 > against the source as of the first green run.
 >
 > This document records findings. It fixes nothing.
+>
+> ---
+>
+> ## Resolution
+>
+> **All Blocker findings are closed.** The six landed in #19; the remaining
+> Major and Minor findings landed in #25. Tracked as
+> [#20](https://github.com/katzimoto/been_there/issues/20) and children
+> [#21](https://github.com/katzimoto/been_there/issues/21) dating,
+> [#22](https://github.com/katzimoto/been_there/issues/22) platform,
+> [#23](https://github.com/katzimoto/been_there/issues/23) moderation and identity,
+> [#24](https://github.com/katzimoto/been_there/issues/24) local infrastructure.
+>
+> **Two findings were argued back and the review was wrong on both.**
+>
+> | Finding | Resolution |
+> |---|---|
+> | B-1 restriction could strip `report`/`block` | Code. `UNRESTRICTABLE_CAPABILITIES` moved to `core` beside the capability record, enforced where the grant is computed and refused at the intake valve. |
+> | B-2 a user could demand another user's re-verification | Code. Authority checked first, so a refused caller learns nothing about the target. The refusal is logged and repeats raise an anomaly against the offender. |
+> | B-3 `lift_restriction` required no moderator | Code. One-line guard. |
+> | B-4 a shadowed transition row | Code, twice. Rows reordered, then a test that no machine offers the same event twice from any state. |
+> | B-5 no producer for the observation vocabulary | **Still open.** See below. |
+> | B-6 no counterpart-side messaging check | **Still open.** See below. |
+> | B-7 three packages imported core undeclared | Code, and `check-workspace-lockfile.mjs` now fails on it. |
+> | B-9 nine audit actions threw | Code. All sixteen covered; `append` returns a `Result` instead of throwing. |
+> | B-10 the router dropped every moderation event | Code. A `moderation.` prefix, and an unroutable event is reported rather than discarded. |
+> | B-11 the unrestrictable list was a second vocabulary | Code. One list, in `core`. |
+> | C-1 … C-48 doc/code divergences | Mixed, per finding. The larger changes: passes expire after 30 days; `MatchRecord` carries per-party standings; `account_state.changed` publishes the removed-capability set; a 21-row notification registry exists; `verification` is a non-suppressible category; blocked-pair notification suppression is representable. |
+> | §4.2a 35 of 55 analytics events missing | Code and document. The catalogue now holds only events with a producer, and sample rates moved into the catalogue so they cannot drift per call site. |
+>
+> ### Two findings the review got wrong
+>
+> **C-14** named the feature specification as the outlier on whether a like after
+> a pass can match. The specification was right: `resolveMatch` tested for the
+> *existence* of a pass rather than whether one was *in effect*, so it modelled
+>> neither supersession nor expiry. The liker's own pass is now superseded by
+> their like; a counterpart's live pass still refuses, because one person's like
+>> cannot speak for the other party's pass.
+>
+> **C-36** called `needs_human` an invented fifth media state and deferred to
+> the architecture document on precedence — a document-precedence argument, not a
+> product one. The state was needed: without it the specification's "routed to a
+> moderator rather than auto-approved or auto-rejected" has nowhere to live, and
+>> a held photo is not servable. It is now reachable only from an `inconclusive`
+> scan, so an undecidable screening result can never be auto-rejected.
+>
+> ### Still open
+>
+> Two findings are not fixed, and the review was right about both:
+>
+> - **B-5** — trust-safety declares ten `ObservationKind`s and no domain emits
+>   any of them. Nothing converts a published event into an `Observation`, so the
+>   reduction seam ADR 0003 describes has no owner. Until a reduction layer
+>   exists, the detectors documented in `trust-safety.md` §5 describe an input no
+>   producer supplies.
+> - **B-6** — the restriction spec states the refusal is symmetric, and `canSend`
+>   reads only the sender's capabilities. A `limited` user as the *counterparty*
+>>   in a thread can still send into it, so the "cannot be probed" argument in
+>>   that spec is unimplemented and a client will behave asymmetrically.
+>
+> Both are real and neither was cheap to fix correctly: B-5 needs a decision about
+> where the reduction lives, and B-6 needs the counterpart's standing to reach
+> communication as a projection, which is a contract change. They are recorded
+> here rather than quietly dropped.
 
 ## 1. Summary
 
