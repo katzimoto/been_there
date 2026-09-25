@@ -73,7 +73,7 @@ Non-negotiable inherited from the overview:
 | `match.status` (`active` / `ended_unmatched`) | Dating Core | versioned read-model projection + `match.changed` event |
 | block state (none / blocked-by / blocking) | Moderation & Enforcement | `block.changed` event at `user` clearance + read-model |
 | `AccountState` + capability set | Moderation & Enforcement | `account_state.changed` event at `public` clearance, read-model |
-| `IdentityState` | Identity & Verification | `identity_status.changed` at `public` clearance |
+| `IdentityState` | Identity & Verification | `identity.status_changed` at `public` clearance |
 | Risk state | Trust & Safety | **not consumed.** Communication must not branch on risk. |
 
 `account_state.changed` carries the state and the *capability surface*, never the

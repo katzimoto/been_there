@@ -35,7 +35,7 @@ personalisation; any automated irreversible action.
 | `AccountState` (`active`/`limited`/`suspended`/`banned`) | Moderation & Enforcement | reads only, via `account_state.changed` + capability projection |
 | The capability surface per state | Moderation & Enforcement (`packages/core/src/states/account.ts`) | **read, never restated in code** — see §4 |
 | The capabilities no restriction may remove | Moderation & Enforcement, same file: `UNRESTRICTABLE_CAPABILITIES`, declared next to `CAPABILITIES_BY_ACCOUNT_STATE` | **read, never restated in code** — see §4. One file for both, deliberately: two homes for one capability vocabulary is how a capability gets added to the base table and forgotten in the list that protects it |
-| `IdentityState` and the re-verification decision | Identity & Verification | reads `identity_status.changed`; may *request* re-verification, never enforce |
+| `IdentityState` and the re-verification decision | Identity & Verification | reads `identity.status_changed`; may *request* re-verification, never enforce |
 | `RiskState` | Trust & Safety | **not read by any product surface.** A product client must not be able to infer a risk state, so no `risk.*` event reaches a product projection |
 | Which capabilities a specific restriction removes | Moderation & Enforcement (the `caseId`-bearing `restrict` event) | read from the capability projection, which is the state plus the removed set |
 | Re-verification flow UI | Identity & Verification, surfaced here | — |
@@ -306,7 +306,7 @@ only `lift_ban` / `reinstate` changes account state.
 ### 7.3 The flow
 
 1. A trigger fires; Identity moves the subject to `pending` and publishes
-   `identity_status.changed` at `public` clearance.
+   `identity.status_changed` at `public` clearance.
 2. Every product surface that requires `verified` — discovery, messaging
    composer, likes — re-evaluates. A non-`verified` identity is undiscoverable
    *by construction* (`isDiscoverableIdentity`), so this is not a product rule;

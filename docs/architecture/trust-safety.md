@@ -46,7 +46,7 @@ name an account state, a case, or a moderator.
 
 ```
  Identity & Dating & Communication events
- (identity_status.changed, unmatch_initiated, message_reported, …)
+ (identity.status_changed, unmatch_initiated, message_reported, …)
         │
         │  reduced on arrival to metadata only:
         │  { kind, actorId, subjectId, counterpartyId?, entityId?, count? }

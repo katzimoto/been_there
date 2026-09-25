@@ -396,7 +396,7 @@ names both.
 
 | This domain needs | It reads | It never does |
 |-------------------|----------|---------------|
-| Is this user discoverable? | `identity_status.changed` → `IdentityStandingProjection { state, generation }` | Read `latestVerificationId` or any evidence |
+| Is this user discoverable? | `identity.status_changed` → `IdentityStandingProjection { state, generation }` | Read `latestVerificationId` or any evidence |
 | What may this account do? | `account_state.changed` → `AccountStandingProjection { state, capabilities, visibleInProduct }` | Write `AccountState`, call an enforcement command, or learn a reason |
 | Where is this user? | A `DistanceBand` on the candidate card | Request, store or log a coordinate |
 | Is this pair blocked? | Its own `BlockListProjection` | Ask Trust & Safety to decide |
@@ -457,7 +457,7 @@ Published by this domain (`DATING_EVENT_CATALOGUE`, all version 1):
 | `block.released` | `internal` | A block was released; the record is retained |
 
 Consumed by this domain (`CONSUMED_EVENT_CATALOGUE`, both `public`):
-`identity_status.changed`, `account_state.changed`. Their payload types are
+`identity.status_changed`, `account_state.changed`. Their payload types are
 declared locally so the contract is reviewable in one block; the events are
 published by Identity and Moderation respectively.
 

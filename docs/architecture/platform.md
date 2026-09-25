@@ -207,7 +207,7 @@ They look like the same table with different retention. They are not.
    (`identity.`, `moderation.`, `communication.`, `case.`, `account_state.`,
    `auth.`) with an explicit exception list for the safety facts whose type name
    carries no prefix (`verification.anomaly`, `risk.changed`). The legacy
-   spelling `identity_status.changed` is on that list only until the rename in
+   spelling `identity.status_changed` is on that list only until the rename in
    the feature specs lands; it is the row to delete, and not before.
 3. **An event no sink may hold is reported, not discarded.** A `sensitive` event
    that is not an audit fact comes back `{ audit: false, analytics: false,
