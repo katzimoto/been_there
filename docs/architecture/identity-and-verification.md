@@ -301,13 +301,29 @@ repeatedly hidden, not to protect the vendor's budget.
 
 ### Check order
 
-Authority, then subject eligibility, then in-flight attempts, then the
-30-day cap, then the cooldown, and last the kernel's state machine. The order is
-a privacy property: an unauthorised caller is refused before any of the later
-checks run, so it cannot learn whether a subject has an attempt in flight, how
-many re-verifications they have had, or what state they are in. A test asserts
-that a `dating_core` caller with a live attempt still receives `permission_denied`
-rather than `conflict`.
+1. **Reason and requester kind** — is this requester entitled to ask at all?
+2. **Cross-subject authority** — if the requester kind is `subject`, the actor
+   must be the subject. A user demanding another user's re-verification is
+   refused here, before any check that could describe the target.
+3. Subject eligibility (`REVERIFICATION_POLICY.subjectMayRequestOnlyWhen`).
+4. In-flight attempts.
+5. The 30-day cap.
+6. The cooldown.
+7. The kernel's state machine.
+
+The order is a privacy property: an unauthorised caller is refused before any of
+the later checks run, so it cannot learn whether a subject has an attempt in
+flight, how many re-verifications they have had, or what state they are in. The
+cross-subject refusal in particular returns a byte-identical error whatever the
+target's state, so it is not a probe for that state. Tests assert both.
+
+**Every refusal is recorded** in a `ReverificationRefusalLog` before the error is
+returned, carrying the actor, the intended subject, the requester kind, the
+reason and the error code. `detectReverificationAbuse` groups cross-subject
+demands per actor and raises a `cross_subject_reverification_demand` anomaly
+finding against the **offender**, routed through the existing
+`proposeReview` → `flag_for_review` path. The offender is reviewable by a human;
+nothing here changes an account state.
 
 A plan contains an identity move and nothing else. It cannot carry an account
 state, because the type has no field for one.

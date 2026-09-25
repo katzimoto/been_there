@@ -338,7 +338,7 @@ the subject to re-enter a product surface.
 
 | # | Rule | Justification |
 |---|---|---|
-| R1 | `reverify_requested` is legal only from `verified`, `expired`, or `review_required`. A subject who is already `unverified` or `verification_failed` gets no further requests. | The transition table is the enforcement point. |
+| R1 | A subject may only *ask* for their own re-verification, and only while `expired` or `verification_failed` — never while already `verified`, and never for anyone else. `REVERIFICATION_POLICY.subjectMayRequestOnlyWhen` enforces the request; the identity transition table enforces the event. | See R2 for who else may ask and R3 for the cross-subject refusal. |
 | R2 | Automated re-verification requests are rate-capped per subject per rolling window. Past the cap, Trust & Safety raises a signal and stops requesting. | ADR 0004: automation is allowed to apply reversible friction, and the *rate* is the revisitable part. |
 | R3 | **No user can request another user's re-verification.** There is no "report as unverified", no "flag this person's age", and no product action that writes `reverify_requested` on a subject's behalf. | A user-triggered verification request is a harassment and an escalation-abuse vector, and it would be automation acting on a user's accusation. |
 | R4 | A re-verification request never changes `AccountState` and never restores a removed capability. | Independence of the three state machines. |
