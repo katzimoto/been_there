@@ -1,0 +1,223 @@
+import type { IdentityState, UserId } from '@been-there/core';
+import { activeBlockBetween } from './blocks.js';
+import { type DistanceBand, isWithinDistanceLimit } from './location.js';
+import { areMutuallyCompatible, type CompatibilitySide } from './preferences.js';
+import type {
+  CandidateCardProjection,
+  DatingReadModel,
+  RelationshipProjection,
+  SubjectStandingProjection,
+} from './read-models.js';
+
+/**
+ * Discovery eligibility — the central gate of this domain (commitment 1).
+ *
+ * Shape of the rule: a deny-list evaluated in a fixed priority order, first
+ * match wins. A candidate is shown to a viewer only when no rule fires, so
+ * adding a new disqualifying condition is one table entry rather than a new
+ * `if` in a query builder, and "why was this person not shown?" has exactly
+ * one answer per request instead of one per code path.
+ *
+ * Order rationale: safety and legality first (is the viewer allowed to browse
+ * at all, is the candidate a verified person, is the candidate visible to the
+ * product), then the relationship layer (block, then self, then anything the
+ * viewer already decided), then preference filters. Preference rules come last
+ * because they are the only ones that can change without anyone being unsafe:
+ * a preference change is a product decision, a standing change is not.
+ *
+ * The reason codes are `internal`. They are diagnostic, never rendered, and a
+ * user is told "no new people right now" rather than which rule fired — the
+ * reason set must not become a side channel for inferring another user's
+ * identity state, account standing or block.
+ */
+
+/** The only identity state that makes a user discoverable. */
+export const DISCOVERABLE_IDENTITY_STATE: IdentityState = 'verified';
+
+/** Capability the viewer needs to be served a discovery page at all. */
+export const DISCOVERY_CAPABILITY = 'browse_discovery';
+
+export type EligibilityReason =
+  | 'viewer_identity_not_verified'
+  | 'viewer_lacks_discovery_capability'
+  | 'viewer_profile_not_complete'
+  | 'candidate_identity_not_verified'
+  | 'candidate_profile_not_complete'
+  | 'candidate_account_not_visible'
+  | 'blocked'
+  | 'self_view'
+  | 'already_passed'
+  | 'already_liked'
+  | 'already_matched'
+  | 'age_out_of_range'
+  | 'beyond_distance_limit'
+  | 'not_mutually_compatible';
+
+export type EligibilityDecision =
+  | { readonly eligible: true }
+  | { readonly eligible: false; readonly reason: EligibilityReason };
+
+export interface DiscoverySnapshot {
+  readonly viewer: SubjectStandingProjection;
+  readonly candidate: SubjectStandingProjection;
+  readonly relationship: RelationshipProjection;
+  /** Coarse separation, resolved by the platform bucketing rule. */
+  readonly distance: DistanceBand | null;
+}
+
+export interface EligibilityRule {
+  readonly reason: EligibilityReason;
+  readonly disqualifies: (snapshot: DiscoverySnapshot) => boolean;
+}
+
+function compatibilitySide(subject: SubjectStandingProjection): CompatibilitySide {
+  return {
+    age: subject.profile.age,
+    genderIdentities: subject.profile.genderIdentities,
+    preferences: subject.preferences,
+  };
+}
+
+/**
+ * Every disqualifying condition, in priority order. Nothing else may exclude a
+ * candidate: if a reason is not in this table, it is not a rule.
+ */
+export const ELIGIBILITY_RULES: readonly EligibilityRule[] = [
+  {
+    reason: 'viewer_identity_not_verified',
+    disqualifies: (s) => s.viewer.identity.state !== DISCOVERABLE_IDENTITY_STATE,
+    // note: serving discovery to an unverified viewer is the leak commitment 1 forbids.
+  },
+  {
+    reason: 'viewer_lacks_discovery_capability',
+    disqualifies: (s) => !s.viewer.account.capabilities.includes(DISCOVERY_CAPABILITY),
+  },
+  {
+    reason: 'viewer_profile_not_complete',
+    disqualifies: (s) => s.viewer.profile.state !== 'complete',
+  },
+  {
+    reason: 'candidate_identity_not_verified',
+    disqualifies: (s) => s.candidate.identity.state !== DISCOVERABLE_IDENTITY_STATE,
+    // note: unconditional and first among candidate rules — no preference, standing
+    // or relationship state may make an unverified user discoverable.
+  },
+  {
+    reason: 'candidate_profile_not_complete',
+    disqualifies: (s) => s.candidate.profile.state !== 'complete',
+  },
+  {
+    reason: 'candidate_account_not_visible',
+    disqualifies: (s) =>
+      !s.candidate.account.visibleInProduct ||
+      !s.candidate.account.capabilities.includes(DISCOVERY_CAPABILITY),
+  },
+  {
+    reason: 'blocked',
+    disqualifies: (s) =>
+      activeBlockBetween(s.viewer.userId, s.candidate.userId, s.relationship.blocks) !== null,
+  },
+  { reason: 'self_view', disqualifies: (s) => s.viewer.userId === s.candidate.userId },
+  {
+    reason: 'already_passed',
+    disqualifies: (s) =>
+      s.relationship.passes.some(
+        (pass) => pass.from === s.viewer.userId && pass.to === s.candidate.userId,
+      ),
+  },
+  {
+    reason: 'already_liked',
+    disqualifies: (s) =>
+      s.relationship.likes.some(
+        (like) => like.from === s.viewer.userId && like.to === s.candidate.userId,
+      ),
+  },
+  {
+    reason: 'already_matched',
+    // note: an unmatched or block-ended match does not block rediscovery; only a live
+    // match does, because the two people are already in each other's inbox.
+    disqualifies: (s) => s.relationship.match?.status === 'active',
+  },
+  {
+    reason: 'age_out_of_range',
+    // note: the viewer's own filter. The mutual test below additionally requires
+    // both sides to agree, but a viewer's own range is not up for negotiation.
+    disqualifies: (s) => {
+      const range = s.viewer.preferences.ageRange;
+      const age = s.candidate.profile.age;
+      if (range === null || age === null) {
+        return false;
+      }
+      return age < range.min || age > range.max;
+    },
+  },
+  {
+    reason: 'beyond_distance_limit',
+    disqualifies: (s) => !isWithinDistanceLimit(s.distance ?? 'unknown', s.viewer.preferences.maxDistanceKm),
+  },
+  {
+    reason: 'not_mutually_compatible',
+    disqualifies: (s) =>
+      !areMutuallyCompatible(compatibilitySide(s.viewer), compatibilitySide(s.candidate), s.distance)
+        .compatible,
+  },
+];
+
+/**
+ * Pure gate over a read-model snapshot. The candidate's verified identity is
+ * re-checked after the table rather than being trusted to rule 4 alone: if a
+ * future edit dropped or reordered that rule, the eligible branch would still
+ * be unreachable for a non-verified candidate. `rules` is injectable only so
+ * that this property is testable; production callers use the table.
+ */
+export function evaluateEligibility(
+  snapshot: DiscoverySnapshot,
+  rules: readonly EligibilityRule[] = ELIGIBILITY_RULES,
+): EligibilityDecision {
+  for (const rule of rules) {
+    if (rule.disqualifies(snapshot)) {
+      return { eligible: false, reason: rule.reason };
+    }
+  }
+  if (snapshot.candidate.identity.state !== DISCOVERABLE_IDENTITY_STATE) {
+    return { eligible: false, reason: 'candidate_identity_not_verified' };
+  }
+  return { eligible: true };
+}
+
+/**
+ * What discovery actually serves. Unranked and in the order the candidate
+ * store returned: eligibility is a filter, and choosing an order is a ranking
+ * decision that is not made here (see open questions in the design doc).
+ */
+export function selectEligibleCards(
+  viewerId: UserId,
+  model: DatingReadModel,
+  candidateIds: readonly UserId[],
+): CandidateCardProjection[] {
+  const viewer = model.standingFor(viewerId);
+  if (viewer === null) {
+    return [];
+  }
+  const cards: CandidateCardProjection[] = [];
+  for (const candidateId of candidateIds) {
+    if (candidateId === viewerId) {
+      continue;
+    }
+    const candidate = model.standingFor(candidateId);
+    const card = model.cardFor(viewerId, candidateId);
+    if (candidate === null || card === null) {
+      continue;
+    }
+    const decision = evaluateEligibility({
+      viewer,
+      candidate,
+      relationship: model.relationshipFor(viewerId, candidateId),
+      distance: card.distance,
+    });
+    if (decision.eligible) {
+      cards.push(card);
+    }
+  }
+  return cards;
+}

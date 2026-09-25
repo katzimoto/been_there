@@ -1,0 +1,488 @@
+# Preferences & Discovery
+
+> Issue [#11 — MVP Feature: Preferences & Discovery](https://github.com/katzimoto/been_there/issues/11). Parent: [#1](https://github.com/katzimoto/been_there/issues/1).
+> Depends on [`docs/architecture/00-overview.md`](../architecture/00-overview.md). If this
+> document contradicts it, the overview wins and this document is wrong.
+> Related: #3 (identity), #4 (Dating Core domain design), #6 (Trust & Safety), #8 (Platform/privacy),
+> #10 (Profile), #18 (measurement).
+
+## 1. Goal and done-when
+
+Users browse an appropriate set of eligible profiles without exposing anyone who
+should not be discoverable.
+
+Concretely, when this issue is done:
+
+- A verified user can open discovery and receive a page of eligible candidates.
+- Every candidate on that page is `verified`, in good account standing, not
+  blocked with the viewer in either direction, and not someone the viewer has
+  already decided on.
+- No unverified, hidden, suspended, banned, or blocked person appears on any
+  page, in any ordering, at any page depth, including as "filler".
+- When the eligible pool is genuinely empty, the product says so.
+
+## 2. Boundaries
+
+### 2.1 What this feature owns
+
+| Owned | Notes |
+|-------|-------|
+| The discovery preference record and its validation | Per-user, `user` sensitivity |
+| The candidate eligibility rule set and its evaluation order | Pure function of read-model inputs |
+| Eligibility reason codes | `internal`; never rendered to a user |
+| The browse session: page assembly, page size, ordering, the end-of-page state | |
+| The viewer's suppression set (what they have already seen and decided on) | Owned here; the underlying like/pass records are owned by Likes & Matching, same domain |
+| Discovery funnel events for #18 | |
+
+### 2.2 What this feature never owns
+
+| Never owns | Owner instead |
+|-----------|---------------|
+| Identity state, verification evidence, `IdentityRecord` fields | Identity & Verification (#3). This feature may only read `isDiscoverableIdentity` over a projection, or the `identity_status.changed` event |
+| `AccountState` and capability decisions | Moderation & Enforcement (#7). This feature reacts to `account_state.changed` |
+| Writing a `banned`/`suspended`/`limited` state | Never. Product domains have no enforcement write path at all |
+| Blocks as an action | User Safety Controls (#14). This feature only reads the block edges |
+| Like/pass/match *semantics* | Likes & Matching (#12) |
+| Exact coordinates | Platform (#8). Only a coarse distance bucket is ever read or emitted |
+| Risk state | Trust & Safety (#6). Risk never hides a user from discovery; only identity and account state do |
+| Copy for a restriction the viewer did not cause | The owning feature. A viewer is told a capability is unavailable, never "you were reported" |
+
+### 2.3 Which domain owns each piece of state
+
+| State | Owner | How this feature learns about it |
+|-------|-------|----------------------------------|
+| `IdentityState` | Identity & Verification | `identity_status.changed` → `DiscoveryStandingProjection` |
+| `AccountState` + removed capabilities | Moderation & Enforcement | `account_state.changed` → `AccountStandingProjection` |
+| Block edges (both directions) | User Safety Controls | block events → `BlockListProjection` |
+| Profile content and publish state | Profile (#10) | `profile.published` / `profile.state_changed` (`draft\|incomplete\|live\|paused\|hidden`) consumed as a projection; the boolean completeness gate is Dating Core's own `profile.completed` |
+| `InteractionLedger` (likes/passes/matches) | Dating Core | `InteractionLedgerProjection` |
+| Preferences | Dating Core, this feature | local record |
+| Coarse location bucket | Platform (#8) | Platform read-model; the raw coordinate is `sensitive` and is never requested |
+
+## 3. Discovery preferences
+
+### 3.1 Contract sketch
+
+> Sketch only. Field semantics are normative; the type is illustrative and the
+> shape may differ once `packages/dating` lands.
+
+```ts
+/** Every axis is three-valued. `null` means unbounded, never "match nobody". */
+interface DiscoveryPreferences {
+	readonly ageRange: { readonly minAge: number | null; readonly maxAge: number | null } | null;
+	readonly maxDistanceKm: number | null;
+	readonly seekingGenders: readonly Gender[] | null;      // null = any
+	readonly openTo: readonly OrientationGroup[] | null;    // null = default openness
+	readonly locationPrecision: CoarseBucket;               // coarsening only
+	readonly hidden: boolean;                               // pause discovery
+	readonly verifiedOnly: true;                            // not user-configurable
+```
+
+### 3.2 The axes
+
+| Preference | Meaning | Validation | Default | Unset behaviour |
+|-----------|---------|-----------|---------|------------------|
+| `ageRange` | Inclusive age window | Both ends integers 18–120 (the 18+ gate is the floor, at every end). `minAge <= maxAge`. Width at least 5 years. | `null` | Unbounded: every eligible age in 18–120. The platform never narrows on the user's behalf |
+| `maxDistanceKm` | Maximum coarse-distance bucket | One of the published bucket edges: 1, 5, 15, 50, 100 km. Not a free number. | `null` | Unbounded |
+| `seekingGenders` | Genders the viewer wants to see | Non-empty subset of the enum. Saving a set that currently matches nobody is allowed, but the user is warned before saving and is never auto-reset | `null` (any) | Any gender, including the viewer's own |
+| `openTo` | Gender/orientation groups the viewer is open to being matched with | Non-empty subset of the enum. Always at least the viewer's own declared group | `null` → resolves to the viewer's own declared group(s) plus the set the user explicitly adds on their profile | See §3.4 |
+| `locationPrecision` | How coarse the viewer's own location is presented | Bucket ids only. May only be *coarser* than the platform default; a request to refine is rejected with `validation_failed` | Platform default bucket | Not unset by construction |
+| `hidden` | Pause being discoverable | Boolean | `false` | `false` |
+| `verifiedOnly` | Show only verified users | Fixed `true`. Not present as a user-facing toggle; changing it is not a supported operation | `true` | Never unset |
+
+### 3.3 The unset rule
+
+> **No preference axis is ever interpreted as an empty set. `null` means
+> unbounded on that axis and nothing else.**
+
+An unset axis is stored as `null`, renders in the UI as "Everyone", and widens
+rather than narrows. There is no "cleared" state that produces zero candidates,
+because the only way to produce zero candidates by configuration would be a
+filter the user cannot see the effect of.
+
+The symmetric rule, which matters as much: **the system never silently widens
+either.** Widening is always an explicit user action with a visible one-tap
+"widen this filter" affordance in the empty state (§6). There is no automatic
+relaxation, no "we loosened your filters to keep you browsing", no adaptive
+re-query. If a filter yields nothing, the user is told it yields nothing.
+
+### 3.4 Gender and orientation compatibility
+
+Compatibility is **symmetric and evaluated from both sides**. Two users are
+orientation-compatible iff each one's declared group is in the other's
+`openTo` set. Compatibility is a property of the pair, never of one user's
+settings, and it is evaluated identically in discovery (§4, rule P4) and in
+matching (#12), so a like can never lead to a pair that discovery would have
+refused.
+
+The system never infers orientation, never infers gender, and never widens
+`openTo` to make a pool look healthier. A user who has declared nothing is
+treated as open to their own declared group only, and is shown that as a
+sentence in settings rather than as an empty preference.
+
+## 4. Candidate eligibility
+
+### 4.1 The rule
+
+Eligibility is a **deny-list**: a candidate is admitted only if it survives
+every deny rule below. There is no allow-list, no score, and no per-rule
+weighting. The evaluation order is fixed and normative.
+
+Two stages, in this order:
+
+**Stage 0 — viewer gate (page level, before any candidate is considered).**
+
+- G1. The viewer is discoverable (`isDiscoverableIdentity` over
+  `DiscoveryStandingProjection`). If not, discovery is closed entirely.
+- G2. The viewer holds the `browse_discovery` capability
+  (`AccountStandingProjection`). If not, discovery is closed entirely.
+
+The gate is first because evaluating candidates for a viewer who is not
+themselves eligible is work over data that viewer has no right to see, and
+because the honest answer to "you cannot browse" is a specific state (§6), not
+an empty page.
+
+**Stage 1 — candidate rules, in strict priority order.**
+
+| # | Rule | Denies when | Why it sits here |
+|---|------|-----------|------------------|
+| R1 | **Identity** | The candidate's identity is not `verified` | Unconditional and first. This is commitment 1: the only discoverable identity state is `verified`. No preference, no rank, no experimental flag can precede it, and no other rule may be evaluated on behalf of a candidate that failed R1 |
+| R2 | **Account standing** | The candidate's account is `banned` or `suspended`, or lacks `browse_discovery` (may appear), or lacks `like` (may reciprocate) | After R1 because a candidate's standing is meaningless without a verified identity, and before everything relational because a candidate who cannot appear or cannot reciprocate is not a useful page slot. Risk state is **not** consulted: `high`/`critical` risk does not remove a candidate from discovery |
+| R3 | **Block, either direction** | A block edge exists between viewer and candidate in *either* direction | Early, because a block is absolute and undiscussable. It outranks every preference and every earlier decision by both parties, including a like the other party already gave |
+| R4 | **Self** | Candidate is the viewer | Absolute, cheap, and independent of any data drift |
+| R5 | **Already decided** | The viewer has an active like on the candidate, or a pass on the candidate within the suppression window (§5.2) | The viewer's own prior decision is the strongest product signal available and must never be overridden by a later page |
+| R6 | **Already matched** | A match exists between viewer and candidate | A match is a resolved relationship; re-showing the profile invites a duplicate like and a duplicate match |
+| R7 | **Hidden / paused** | The candidate's profile is not `live`, or they have set `hidden` (the profile state machine's `live\|paused\|hidden` transitions) | Candidate-side, and therefore weaker than viewer-side state: it is the last fact about the candidate to consider. This consumes a *boolean* — is the profile presentable — never a completeness score, and never a rank |
+| P1 | **Age** | The candidate's age band falls outside `ageRange` | Preference filter |
+| P2 | **Distance** | The candidate's coarse bucket exceeds `maxDistanceKm` | Preference filter |
+| P3 | **Gender** | The candidate's gender is not in `seekingGenders` | Preference filter |
+| P4 | **Orientation** | The pair is not orientation-compatible per §3.4 | Preference filter |
+
+**Why denies precede filters.** Every deny rule is an absolute platform or user
+protection rule. Every filter is a preference. Running denies first means a
+candidate who is blocked can never be *counted* into a pool estimate, a
+diagnostic, or an "end of results" message that would otherwise leak the
+existence of people the viewer is not allowed to know about. It also means the
+exhaustion signal in §5.3 is computed over the set the viewer may actually see,
+which is the only set whose emptiness is safe to report.
+
+Filters are evaluated in the order P1→P4 purely for cost; among themselves they
+are commutative and the product makes no claim about which one is "responsible"
+for an empty page. The UI says which axes are active, never which one was
+applied first.
+
+### 4.2 Reason codes
+
+Each exclusion produces exactly one reason code, the **first** one that
+matched. Codes are `internal` and are never shown to a user, never included in
+any user-visible message, and never inferable from timing or page size.
+
+```ts
+type ExclusionReason =
+	| 'not_discoverable'      // R1
+	| 'account_standing'      // R2
+	| 'blocked'               // R3
+	| 'self'                  // R4
+	| 'already_decided'       // R5
+	| 'already_matched'       // R6
+	| 'candidate_hidden'      // R7
+	| 'preference_age'        // P1
+	| 'preference_distance'   // P2
+	| 'preference_gender'     // P3
+	| 'preference_orientation';// P4
+```
+
+Aggregates of these codes are what #18 measures. They are not what the user
+sees.
+
+### 4.3 Freshness
+
+Eligibility is evaluated against the current projections at page-assembly time.
+There is no positive cache of "this candidate is eligible". Invalidation is by
+event: `identity_status.changed`, `account_state.changed`, a block edge, a like,
+a pass, or a match all invalidate the affected rows. A page already served to a
+client is not rewritten; a profile that loses eligibility after it was served
+simply stops appearing on subsequent pages, and any action taken against it is
+re-checked at action time (#12).
+
+## 5. The browse experience
+
+### 5.1 What a page is
+
+- **Page size: 10 candidates.** A fixed, reviewable constant, not a tuning knob.
+- A page is assembled server-side per request. The client requests `cursor`,
+  receives up to 10 cards, and requests the next page only when it asks.
+- **Ordering is deterministic and non-adaptive.** Default order is by
+  `verifiedAt` descending (most recently verified first), tie-broken by
+  `subjectId` ascending so that pagination is stable across identical requests.
+  There is no scoring model, no recommendation, no personalisation: those are
+  explicitly out of scope in issue #1. A/B-ordering is a v0.2 question, not a
+  v0.1 behaviour.
+- **Card contents only** (the `CandidateCardProjection`): display name, age
+  band, coarse distance bucket, bio, photo references. No exact location, no
+  identity artefacts, no risk or moderation signal, no "liked by" count, no
+  verification *reason*.
+
+### 5.2 What the user can do, and what counts as a decision
+
+| Action | Recorded | Effect on the candidate's next appearance |
+|--------|----------|-----------------------------------------|
+| **Like** | Yes, a live like is written | Suppressed until the like is withdrawn or a match exists. Never shown again as a browse candidate |
+| **Pass** | Yes | Suppressed for the **pass suppression window: 30 days** from the pass, measured from the moment the pass was recorded, not from the browse session |
+| **Undecided** — the user closed the page, backgrounded the app, or the session expired before reaching the card | **No** | Not suppressed. The card remains eligible and may be re-presented |
+
+**Undecided is not a decision.** This is the important half of the rule. A card
+is consumed only by an explicit like or an explicit pass. A user who opens
+discovery, looks at three cards and closes the app has made no decision about
+anyone, and inventing one would silently and permanently remove real people
+from their pool.
+
+To prevent an undecided card from dominating a later page, undecided cards are
+ranked **after** every never-seen eligible candidate on the next page, and the
+suppression window does not apply to them. This re-presentation is a queue
+property, not a decision record.
+
+### 5.3 Repeat-profile avoidance and pool exhaustion
+
+> This section exists because it is where the safety thesis is easiest to break.
+> Every mainstream failure mode of "we ran out of people" is a decision to show
+> the user someone they should not see.
+
+Three mechanisms, in order of strength:
+
+1. **Persistent suppression.** Every like and every unexpired pass removes the
+   candidate from the viewer's eligible pool permanently or for 30 days. This is
+   the viewer's decision and is never revisited by the system.
+2. **Session de-duplication.** Within a single browse session a candidate
+   appears at most once, including across page boundaries. A re-presented
+   undecided card is therefore the *only* way a profile can recur inside one
+   session, and it appears exactly once.
+3. **Pool exhaustion is reported, never padded.**
+
+**The exhaustion rule.** When the eligible pool for a viewer is smaller than the
+requested page, the remaining slots are **not** filled with ineligible
+candidates. There is no "people you may have missed", no "outside your
+distance", no "widen your search" auto-relax, no sponsored or boosted filler,
+and no fallback ordering that relaxes R1–R7. Every commitment in the overview is
+a hard filter, and a hard filter that is relaxed under growth pressure is not a
+hard filter.
+
+The response to a short or empty pool is a **state**, not a substitution:
+
+| Pool | Response |
+|------|----------|
+| ≥ 10 eligible | Full page |
+| 1–9 eligible | Short page plus an end-of-page state reading "That's everyone available right now" |
+| 0 eligible | Empty state (§6) with the active filter axes named and a one-tap widen action |
+
+**The honesty rule.** A user who reaches the end of the eligible pool is told
+so, explicitly, in plain language, and is never handed a profile as filler to
+avoid that message. Concretely this forbids, at the code level: any query path
+that drops or reorders R1–R7; any "expand" flag on the page request; any
+secondary ranking that runs on a relaxed filter set; and any test fixture that
+asserts a page size of 10 without also asserting that every card on it passed
+the full rule list.
+
+## 6. Empty and closed states
+
+Five states. Each is a real state a user will hit, each is a distinct screen,
+and each says what happened and what the user can do next. None of them
+discloses the existence, count, or standing of anyone else.
+
+| State | Trigger | Copy (verbatim) | Actions offered |
+|-------|---------|-----------------|-----------------|
+| **Filters too narrow** | Pool is empty, viewer passes the page gate, and ≥ 1 preference axis is active | "Your filters are set so there are no people to show right now. Widening them doesn't change who can see you — only who you see." | One tap per active axis: "Include all ages", "Include everyone within 50 km", "Include any gender", "Include all orientations". Never a silent apply |
+| **No eligible people nearby** | Pool is empty, viewer passes the page gate, and no preference axis is active | "There are no verified people available in your area right now. We'll let you know when that changes." | "Notify me" (opt-in), "Adjust my location bucket" |
+| **Verification not current** | Viewer gate G1 fails: `unverified`, `pending`, `review_required`, `verification_failed`, or `expired` | "Verify your identity to start discovering people." / for `expired`: "Your verification has expired. Re-verify to keep discovering." | Resume or start verification. The copy names the *state the user is in* and never mentions a report, a case, or a review outcome |
+| **Account restricted** | Viewer gate G2 fails: `suspended` (no `browse_discovery`), or `limited` with `browse_discovery` removed | "You can't browse right now. You can still report a problem or block someone." | Report, block, contact support, view what is restricted. The removed capabilities are named — a restriction is always explainable |
+| **Banned** | Viewer is `banned` | "This account has been permanently closed. You can still submit a report or appeal." | Report, `appeal_request`, `delete_account` — exactly the `banned` capability set. No browse, no matches list, no messages |
+
+A page that is merely **short** is not an empty state: it renders the cards it
+has plus the end-of-page line, and the "end of list" line is only shown when
+the pool is genuinely exhausted (§5.3).
+
+**Copy rule.** Every state names the user's own condition and the action
+available to them. No state says or implies that another user was blocked,
+reported, restricted, or is at fault, because the product read-model does not
+contain that information in the first place (overview §4).
+
+## 7. Evaluation budget
+
+Eligibility is a multi-source check: four projection lookups, one block-graph
+membership test, one ledger index, and an indexed candidate query. That has a
+cost, and the product has to make a promise about it, because a discovery page
+that takes four seconds is indistinguishable from a broken app.
+
+| Guarantee | Value | Scope |
+|-----------|-------|-------|
+| Page assembly, server-side, warm cache | p50 ≤ 150 ms | 10 candidates |
+| Page assembly, server-side | **p95 ≤ 400 ms** | The promise. p99 ≤ 800 ms, measured, and exceeding it is an alert, not an accepted outcome |
+| Candidate examinations per page request | **≤ 200** hard cap | See below |
+| Gate rejection (G1/G2 fail) | ≤ 50 ms | No candidate work at all |
+
+How the budget is met:
+
+- R1 and R2 are answered from O(1) in-memory projections
+  (`DiscoveryStandingProjection`, `AccountStandingProjection`). No identity
+  record, no evidence, no cross-domain call.
+- R3 is a membership test against the viewer's own block projection, whose size
+  is bounded by that user's block count, not by the platform.
+- R5 and R6 are index lookups on the viewer's `InteractionLedgerProjection`.
+- Only P1–P4 touch the candidate index, and the index is filtered by the
+  primary deny predicates (identity = verified, standing in the eligible set)
+  **before** preference predicates, so the expensive predicate is never
+  evaluated on a candidate that is going to be denied anyway.
+
+**The 200-examination cap.** If a page request examines 200 candidates without
+filling 10 slots, the service returns the partial page it has, with an
+`internal` flag `budget_exhausted`. The user sees the short page and the normal
+end-of-page line. The cap bounds worst-case latency; it never causes an
+ineligible candidate to be substituted, and it never silently converts a full
+page into an empty one. Under a systematically too-narrow filter the cap will
+be hit repeatedly, and the fix is the honest empty state, not a filter bypass.
+
+## 8. Discovery funnel events
+
+Named per the overview's catalogue convention (`identity_status.changed`,
+`account_state.changed`, `risk.changed`). Sensitivity is per the overview's
+five-class model. These are the discovery half of the funnel measured in #18.
+
+| Event | Sensitivity | Emitted when | Payload fields |
+|-------|-------------|--------------|----------------|
+| `discovery.entered` | `public` | Viewer passes the page gate and opens discovery | `subjectId` (viewer), `preferenceAxesActive: string[]` (axis names only, never values) |
+| `discovery.page_served` | `internal` | A page is returned, full or short | `subjectId`, `pageSize`, `short: boolean`, `budgetExhausted: boolean`, `poolBucket: 'empty'\|'small'\|'healthy'` |
+| `discovery.exhausted` | `internal` | The eligible pool is confirmed exhausted for the viewer | `subjectId`, `exhaustedAt` |
+| `discovery.viewer_ineligible` | `internal` | G1 or G2 rejects the viewer | `subjectId`, `gate: 'identity'\|'capability'` — the *class* of gate, never the underlying state, never a reason a moderator would recognise |
+| `preferences.updated` | `user` | A preference record is written | `subjectId`, `changedAxes: string[]` |
+
+Design constraints on these events:
+
+- **Only one of these is a domain fact.** `preferences.updated` is the Dating
+  Core domain event. The four `discovery.*` signals are delivery and analytics
+  signals emitted by the discovery serving layer: they describe a request that
+  was served, not a state that changed. They are named here because #18 needs
+  them, and they are kept in the `noun.verb_past` convention so the funnel reads
+  as one catalogue. Nothing in `packages/dating` depends on them, and nothing
+  may consume them to make a product decision.
+- **No preference *values* are ever published.** `changedAxes` names the axes,
+  not the ages or distances, because analytics is a `public`-clearance consumer.
+- `poolBucket` is bucketed rather than exact, so that measuring pool health does
+  not become a way to count how many eligible people exist in a small
+  geography.
+- Like, pass, match, and unmatch events are specified in
+  [`./likes-and-matching.md`](./likes-and-matching.md) and are the continuation
+  of this funnel.
+
+## 9. Acceptance scenarios
+
+**A1 — A verified user sees eligible profiles.**
+*Given* Ada is `verified` and her account is `active`,
+*when* she opens discovery,
+*then* she receives up to 10 cards, every one of which is `verified`, `active`,
+not blocked with her, and not Ada.
+
+**A2 — An unverified user is undiscoverable by construction.**
+*Given* Bo has an account but his identity is `pending`,
+*when* the system evaluates Bo as a candidate for any viewer,
+*then* Bo is denied at R1, before any account, block, or preference rule is
+evaluated, and no viewer is ever served a card for Bo.
+
+**A3 — Risk alone does not hide anyone.**
+*Given* Cleo's risk state is `critical` and her identity is `verified` and her
+account is `active`,
+*when* a viewer with no block edge to Cleo opens discovery,
+*then* Cleo is eligible. Risk feeds moderation; it does not remove a user from
+the pool.
+
+**A4 — A block hides the candidate in both directions.**
+*Given* Dana blocked Eli,
+*when* Eli opens discovery, and separately when any other viewer opens discovery
+and Dana would otherwise be eligible,
+*then* Dana is denied at R3 in both cases, and the card is counted in neither the
+pool size nor the exhaustion message.
+
+**A5 — A restricted account cannot browse, and is told so honestly.**
+*Given* Frank's account is `limited` with `browse_discovery` removed by a case,
+*when* Frank opens discovery,
+*then* the page gate rejects him, he sees the restricted state naming the
+removed capability, and he can still report and block.
+
+**A6 — A candidate who cannot reciprocate does not consume a page slot.**
+*Given* Greta is `verified` but `suspended`,
+*when* a viewer assembles a page,
+*then* Greta is denied at R2 and does not appear.
+
+**A7 — A pass suppresses for 30 days and then expires.**
+*Given* Hana passes a candidate on day 0,
+*when* she browses on day 29, the candidate is not shown,
+*and when* she browses on day 31, the candidate is eligible again if no other
+rule denies them.
+
+**A8 — An undecided card is not a decision.**
+*Given* Ivo opens discovery, views three cards, and closes the app without
+acting,
+*when* he returns,
+*then* no like, pass, or suppression exists for those three, and they are
+eligible again, ranked after never-seen candidates.
+
+**A9 — Already-matched and already-liked profiles never reappear.**
+*Given* Jun likes Kim, and Kim has liked Jun back so a match exists,
+*when* Jun opens discovery,
+*then* Kim is denied at R5 for the live like and R6 for the match, and does not
+appear.
+
+**A10 — The pool is reported honestly, never padded.**
+*Given* Leah's eligible pool contains 3 candidates,
+*when* she opens discovery,
+*then* she receives 3 cards and an end-of-list line saying there is no one else
+available, she receives no fourth card of any kind, and no ineligible candidate
+is substituted to fill the page.
+
+**A11 — Too-narrow filters produce a named, widenable empty state.**
+*Given* Mo sets an age range of 30–34 and no one eligible is in it,
+*when* he opens discovery,
+*then* he sees the filters-too-narrow state naming the age axis, with a one-tap
+"Include all ages", and the system does not silently widen anything for him.
+
+**A12 — Verification lost mid-session closes discovery immediately.**
+*Given* Noor is browsing with a served page,
+*when* her identity transitions to `expired`,
+*then* every subsequent page request fails the page gate and she is shown the
+re-verify state.
+
+**A13 — An unset preference does not exclude everyone.**
+*Given* Pat has never opened preferences,
+*when* he opens discovery,
+*then* every axis resolves to unbounded, and he is not excluded from any
+eligible candidate for the reason that he never configured anything.
+
+**A14 — The page budget is met without weakening eligibility.**
+*Given* a viewer with a narrow filter set,
+*when* a page request exceeds 200 candidate examinations,
+*then* the service returns the partial page it has with the internal
+`budget_exhausted` flag, within the p95 budget, and no ineligible candidate is
+substituted.
+
+**A15 — Eligibility reasons never leak.**
+*Given* any exclusion,
+*when* the page, the response metadata, the client logs, and the analytics sink
+are inspected,
+*then* no user-visible surface contains a reason code, and every emitted event's
+sensitivity is consistent with the overview's classification table.
+
+## 10. Open questions
+
+- Whether a limited-time re-discovery signal (a match expiring after N days of
+  silence) is a v0.2 feature. It implies a match-lifecycle decision, so it
+  belongs with #12's open questions too.
+- Whether an age range narrower than 5 years should be rejected or merely
+  warned about. Currently rejected, on the grounds that a validation failure at
+  save time is cheaper to understand than an empty page later.
+- Whether the 200-examination cap should be raised, lowered, or made adaptive.
+  The number is a guess made without production data.
+- Whether location-precision coarsening belongs in the preference record at all,
+  or in Privacy & User Settings (#17) with Dating Core merely reading the
+  result. The current split has the value owned here, which may be wrong.
+- Whether A/B-testing the ordering is acceptable at all. It is a v0.2 question,
+  and the answer constrains how much the deterministic ordering in §5.1 can
+  rely on being a stable contract.

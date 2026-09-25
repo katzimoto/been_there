@@ -1,0 +1,189 @@
+import {
+  type ActorId,
+  type ConversationId,
+  type CorrelationId,
+  type ReportId,
+  type Result,
+  type UserId,
+  castId,
+} from '@been-there/core';
+import {
+  type AuditLog,
+  type Case,
+  type ContextOptions,
+  type ModerationContext,
+  type ModeratorActor,
+  type Report,
+  type ReportEvidenceInput,
+  type ReportReason,
+  type RelationshipSnapshot,
+  assignCase,
+  createAuditLog,
+  createContext,
+  openCase,
+  startCaseReview,
+  submitReport,
+  triageReport,
+} from '../src/index.js';
+
+/**
+ * Test seams. Reading `.value` off a `Result` is a compile error by design, so
+ * a test should fail with the error code rather than dereference blindly.
+ */
+export function succeeded<T, E extends { code: string; message: string }>(result: Result<T, E>): T {
+  if (!result.ok) {
+    throw new Error(`expected success, got ${result.error.code}: ${result.error.message}`);
+  }
+  return result.value;
+}
+
+export function rejected<T, E extends { code: string; message: string }>(result: Result<T, E>): E {
+  if (result.ok) {
+    throw new Error('expected a rejection, got success');
+  }
+  return result.error;
+}
+
+export interface TestClock {
+  now(): Date;
+  advanceHours(hours: number): void;
+}
+
+export function createTestClock(start: string = '2026-01-05T09:00:00.000Z'): TestClock {
+  let current = new Date(start).getTime();
+  return {
+    now: () => new Date(current),
+    advanceHours(hours) {
+      current += hours * 60 * 60 * 1000;
+    },
+  };
+}
+
+export interface Harness {
+  readonly ctx: ModerationContext;
+  readonly audit: AuditLog;
+  readonly clock: TestClock;
+}
+
+export function harness(options: ContextOptions = {}): Harness {
+  const clock = createTestClock();
+  const audit = createAuditLog();
+  const ctx = createContext({ ...options, audit, now: clock.now });
+  return { ctx, audit, clock };
+}
+export const REPORTER: UserId = castId<'UserId'>('u-reporter');
+export const SUBJECT: UserId = castId<'UserId'>('u-subject');
+export const OTHER_SUBJECT: UserId = castId<'UserId'>('u-other');
+export const MODERATOR: ModeratorActor = {
+  actorId: castId<'ActorId'>('mod-rivera'),
+  isLead: false,
+  identityPrivacyRole: false,
+};
+export const LEAD: ModeratorActor = {
+  actorId: castId<'ActorId'>('mod-lead'),
+  isLead: true,
+  identityPrivacyRole: false,
+};
+export const IDENTITY_OFFICER: ModeratorActor = {
+  actorId: castId<'ActorId'>('privacy-1'),
+  isLead: false,
+  identityPrivacyRole: true,
+};
+
+export const CORRELATION: CorrelationId = castId<'CorrelationId'>('corr-1');
+
+export const CONVERSATION: ConversationId = castId<'ConversationId'>('conv-1');
+
+/** A relationship that is already over: the post-unmatch case. */
+export function unmatchedRelationship(): RelationshipSnapshot {
+  return {
+    status: 'unmatched',
+    capturedAt: new Date('2026-01-04T22:00:00.000Z'),
+    conversationId: CONVERSATION,
+    messageRange: { from: 'msg-1', to: 'msg-3' },
+  };
+}
+
+export function messageEvidence(overrides: Partial<ReportEvidenceInput> = {}): ReportEvidenceInput {
+  return {
+    kind: 'message_snapshot',
+    sourceDomain: 'communication',
+    artefactReference: 'blob://messages/1',
+    digest: 'sha256:msg-1',
+    redactedSummary: 'Message: "you should leave"',
+    ...overrides,
+  };
+}
+
+export interface MakeReportOptions {
+  readonly reportId?: ReportId;
+  readonly subjectId?: UserId;
+  readonly reporterId?: UserId | null;
+  readonly reason?: ReportReason;
+  readonly relationship?: RelationshipSnapshot;
+  readonly evidence?: readonly ReportEvidenceInput[];
+  readonly statement?: string | null;
+}
+
+let reportCounter = 0;
+
+export function makeReport(h: Harness, options: MakeReportOptions = {}): Result<Report, { code: string; message: string }> {
+  reportCounter += 1;
+  const submitted = submitReport(h.ctx, {
+    reportId: options.reportId ?? castId<'ReportId'>(`r-${reportCounter}`),
+    subjectId: options.subjectId ?? SUBJECT,
+    reporterId: options.reporterId === undefined ? REPORTER : options.reporterId,
+    reason: options.reason ?? 'harassment',
+    statement: options.statement === undefined ? 'He kept messaging after I said no.' : options.statement,
+    relationship: options.relationship ?? unmatchedRelationship(),
+    evidence: options.evidence ?? [messageEvidence()],
+    correlationId: CORRELATION,
+  });
+  return submitted.ok ? { ok: true, value: submitted.value.report } : submitted;
+}
+
+/** Report → triage → case: the path a queue actually walks. */
+export function openCaseFromReport(h: Harness, report: Report, actor: ModeratorActor = MODERATOR): Case {
+  const triaged = succeeded(
+    triageReport(h.ctx, { report, moderatorId: actor.actorId, correlationId: CORRELATION }),
+  );
+  return succeeded(
+    openCase(h.ctx, {
+      source: 'user_report',
+      report: triaged,
+      openedBy: actor.actorId,
+      correlationId: CORRELATION,
+    }),
+  ).moderationCase;
+}
+
+/** Case → assigned → in_review, so a decision becomes eligible. */
+export function caseInReview(h: Harness, moderationCase: Case, actor: ModeratorActor = MODERATOR): Case {
+  const assigned = succeeded(assignCase(h.ctx, { moderationCase, actor, correlationId: CORRELATION }));
+  return succeeded(startCaseReview(h.ctx, { moderationCase: assigned, actor, correlationId: CORRELATION }));
+}
+
+export function trustSafetyIntake(subjectId: UserId = SUBJECT) {
+  return {
+    source: 'trust_safety_review' as const,
+    subjectId,
+    riskAssessmentId: castId<'RiskAssessmentId'>('risk-9'),
+    riskState: 'critical' as const,
+    detectors: ['velocity', 'duplicate_device'],
+    digest: 'sha256:risk-9',
+    openedBy: 'system' as const,
+    correlationId: CORRELATION,
+  };
+}
+
+export function identityIntake(subjectId: UserId = SUBJECT) {
+  return {
+    source: 'identity_anomaly' as const,
+    subjectId,
+    verificationId: castId<'VerificationId'>('ver-3'),
+    anomaly: 'liveness provider disagreement',
+    digest: 'sha256:ver-3',
+    openedBy: 'system' as const,
+    correlationId: CORRELATION,
+  };
+}
