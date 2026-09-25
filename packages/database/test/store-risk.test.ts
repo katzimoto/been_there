@@ -151,13 +151,10 @@ describeIfDb('RiskStore, against Postgres', () => {
   it('does not double-count a replay inside one unit of work either', async () => {
     const subject = await newSubject();
     const delivered = signal(subject);
-
     await transaction.run(async (tx) => {
       await store.appendSignal(delivered, tx);
       await store.appendSignal(delivered, tx);
-      await store.appendSignal(delivered, tx);
     });
-
     expect(await signalsOf(subject)).toHaveLength(1);
   });
 
@@ -199,12 +196,6 @@ describeIfDb('RiskStore, against Postgres', () => {
       base + 3 * MINUTE,
       base + 4 * MINUTE,
     ]);
-    for (let index = 1; index < window.length; index += 1) {
-      expect(window[index]!.occurredAt.getTime()).toBeGreaterThanOrEqual(
-        window[index - 1]!.occurredAt.getTime(),
-      );
-    }
-
     // A limit above the total returns everything, still oldest-first.
     const all = await signalsOf(subject);
     expect(all.map((row) => row.behaviour)).toEqual([

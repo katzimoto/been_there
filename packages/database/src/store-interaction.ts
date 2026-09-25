@@ -30,7 +30,13 @@
  */
 import type { PoolClient, QueryResultRow } from 'pg';
 import type { MatchId, UserId } from '@been-there/core';
-import type { InteractionStore, Page, PageResult, ProfileRow, Transaction } from '@been-there/contracts';
+import type {
+  InteractionStore,
+  Page,
+  PageResult,
+  ProfileRow,
+  Transaction,
+} from '@been-there/contracts';
 import { StoreError } from '@been-there/contracts';
 import { pairKey } from './pair-key.js';
 import { clientOf } from './transaction.js';
@@ -44,8 +50,8 @@ import { clientOf } from './transaction.js';
  * into every caller's signature.
  */
 export class InteractionConflictError extends StoreError {
-  constructor(message: string, options: { cause?: unknown } = {}) {
-    super(message, { retryable: false, cause: options.cause });
+  constructor(message: string) {
+    super(message, { retryable: false });
     this.name = 'InteractionConflictError';
   }
 }
@@ -199,7 +205,11 @@ function fault(message: string): StoreError {
   return new StoreError(message, { retryable: false });
 }
 
-function requiredString(bag: Readonly<Record<string, unknown>>, key: string, where: string): string {
+function requiredString(
+  bag: Readonly<Record<string, unknown>>,
+  key: string,
+  where: string,
+): string {
   const value = bag[key];
   if (typeof value !== 'string' || value === '') {
     throw fault(`${where}: '${key}' must be a non-empty string`);
@@ -207,7 +217,11 @@ function requiredString(bag: Readonly<Record<string, unknown>>, key: string, whe
   return value;
 }
 
-function optionalString(bag: Readonly<Record<string, unknown>>, key: string, where: string): string | null {
+function optionalString(
+  bag: Readonly<Record<string, unknown>>,
+  key: string,
+  where: string,
+): string | null {
   const value = bag[key];
   if (value === undefined || value === null) {
     return null;
@@ -231,7 +245,11 @@ function requiredDate(bag: Readonly<Record<string, unknown>>, key: string, where
   return toDate(bag[key], key, where);
 }
 
-function optionalDate(bag: Readonly<Record<string, unknown>>, key: string, where: string): Date | null {
+function optionalDate(
+  bag: Readonly<Record<string, unknown>>,
+  key: string,
+  where: string,
+): Date | null {
   const value = bag[key];
   return value === undefined || value === null ? null : toDate(value, key, where);
 }
@@ -245,7 +263,11 @@ function stringArray(bag: Readonly<Record<string, unknown>>, key: string, where:
 }
 
 /** The two-entry arrays the schema CHECKs, as a tuple so no cast is needed. */
-function stringPair(bag: Readonly<Record<string, unknown>>, key: string, where: string): [string, string] {
+function stringPair(
+  bag: Readonly<Record<string, unknown>>,
+  key: string,
+  where: string,
+): [string, string] {
   const entries = stringArray(bag, key, where);
   if (entries.length !== 2) {
     throw fault(`${where}: '${key}' must hold exactly 2 entries, got ${entries.length}`);
@@ -330,6 +352,9 @@ export class PostgresInteractionStore implements InteractionStore {
 
   async upsertProfile(row: ProfileRow, tx: Transaction): Promise<void> {
     const client = clientOf(tx);
+    if (row.profileId === '') {
+      throw fault("upsertProfile: 'profileId' must be a non-empty string");
+    }
     await query<ProfileDbRow>(
       client,
       `INSERT INTO app.profiles (user_id, profile_id, state, content, updated_at)
@@ -337,19 +362,17 @@ export class PostgresInteractionStore implements InteractionStore {
        ON CONFLICT (user_id) DO UPDATE
               SET profile_id = EXCLUDED.profile_id, state = EXCLUDED.state,
                   content = EXCLUDED.content, updated_at = EXCLUDED.updated_at`,
-      [
-        row.userId,
-        requiredString({ profileId: row.profileId }, 'profileId', 'upsertProfile'),
-        row.state,
-        JSON.stringify(row.content),
-        row.updatedAt,
-      ],
+      [row.userId, row.profileId, row.state, JSON.stringify(row.content), row.updatedAt],
     );
   }
 
   async findProfile(userId: UserId, tx: Transaction): Promise<ProfileRow | null> {
     const client = clientOf(tx);
-    const found = await query<ProfileDbRow>(client, 'SELECT * FROM app.profiles WHERE user_id = $1', [userId]);
+    const found = await query<ProfileDbRow>(
+      client,
+      'SELECT * FROM app.profiles WHERE user_id = $1',
+      [userId],
+    );
     const row = found.rows[0];
     if (row === undefined) {
       return null;
@@ -381,11 +404,16 @@ export class PostgresInteractionStore implements InteractionStore {
     );
   }
 
-  async findPreferences(userId: UserId, tx: Transaction): Promise<Readonly<Record<string, unknown>> | null> {
+  async findPreferences(
+    userId: UserId,
+    tx: Transaction,
+  ): Promise<Readonly<Record<string, unknown>> | null> {
     const client = clientOf(tx);
-    const found = await query<{ value: unknown }>(client, 'SELECT value FROM app.preferences WHERE user_id = $1', [
-      userId,
-    ]);
+    const found = await query<{ value: unknown }>(
+      client,
+      'SELECT value FROM app.preferences WHERE user_id = $1',
+      [userId],
+    );
     const row = found.rows[0];
     return row === undefined ? null : jsonObject(row.value, `preferences.value for user ${userId}`);
   }
@@ -401,7 +429,10 @@ export class PostgresInteractionStore implements InteractionStore {
    * the matching flow with nothing to pass. Withdrawn likes are not in the
    * ledger at all, which is what `isCurrentLike` means.
    */
-  async findLikesFor(userId: UserId, tx: Transaction): Promise<readonly Readonly<Record<string, unknown>>[]> {
+  async findLikesFor(
+    userId: UserId,
+    tx: Transaction,
+  ): Promise<readonly Readonly<Record<string, unknown>>[]> {
     const client = clientOf(tx);
     const found = await query<LikeDbRow>(
       client,
@@ -422,7 +453,11 @@ export class PostgresInteractionStore implements InteractionStore {
    * request ends up reported as an error the user saw. A withdrawn like is
    * final, so it is never revived by a second decision.
    */
-  async updateLike(likeId: string, state: 'matched' | 'withdrawn', tx: Transaction): Promise<boolean> {
+  async updateLike(
+    likeId: string,
+    state: 'matched' | 'withdrawn',
+    tx: Transaction,
+  ): Promise<boolean> {
     const client = clientOf(tx);
     const moved = await query<LikeDbRow>(
       client,
@@ -447,7 +482,10 @@ export class PostgresInteractionStore implements InteractionStore {
    * Idempotence is per *ordered* pair, matching `likes_live_pair`: two people
    * liking each other is two likes, and both are what a match is made of.
    */
-  async appendLike(row: Readonly<Record<string, unknown>>, tx: Transaction): Promise<{ readonly created: boolean }> {
+  async appendLike(
+    row: Readonly<Record<string, unknown>>,
+    tx: Transaction,
+  ): Promise<{ readonly created: boolean }> {
     const client = clientOf(tx);
     const likeId = requiredString(row, 'likeId', 'appendLike');
     const from = requiredString(row, 'from', 'appendLike');
@@ -457,13 +495,21 @@ export class PostgresInteractionStore implements InteractionStore {
     const livePass = await query<PassDbRow>(client, LIVE_PASS_OWNED, [from, to, createdAt]);
     const supersededPassId = livePass.rows[0]?.pass_id ?? null;
 
-    const inserted = await query<LikeDbRow>(client, INSERT_LIKE, [likeId, from, to, createdAt, supersededPassId]);
+    const inserted = await query<LikeDbRow>(client, INSERT_LIKE, [
+      likeId,
+      from,
+      to,
+      createdAt,
+      supersededPassId,
+    ]);
     if (inserted.rowCount === 0) {
       // Either the very same like arriving twice, or a different like for a
       // pair that already has one. The first is a fact; the second is a
       // conflict the caller must see, raised without poisoning the caller's
       // transaction.
-      const replay = await query<LikeDbRow>(client, 'SELECT * FROM app.likes WHERE like_id = $1', [likeId]);
+      const replay = await query<LikeDbRow>(client, 'SELECT * FROM app.likes WHERE like_id = $1', [
+        likeId,
+      ]);
       const existing = replay.rows[0];
       if (existing !== undefined) {
         if (existing.from_user_id !== from || existing.to_user_id !== to) {
@@ -481,7 +527,10 @@ export class PostgresInteractionStore implements InteractionStore {
 
   // ---------------------------------------------------------------- passes --
 
-  async appendPass(row: Readonly<Record<string, unknown>>, tx: Transaction): Promise<{ readonly created: boolean }> {
+  async appendPass(
+    row: Readonly<Record<string, unknown>>,
+    tx: Transaction,
+  ): Promise<{ readonly created: boolean }> {
     const client = clientOf(tx);
     const passId = requiredString(row, 'passId', 'appendPass');
     const from = requiredString(row, 'from', 'appendPass');
@@ -490,7 +539,9 @@ export class PostgresInteractionStore implements InteractionStore {
 
     const inserted = await query<PassDbRow>(client, INSERT_PASS, [passId, from, to, createdAt]);
     if (inserted.rowCount === 0) {
-      const replay = await query<PassDbRow>(client, 'SELECT * FROM app.passes WHERE pass_id = $1', [passId]);
+      const replay = await query<PassDbRow>(client, 'SELECT * FROM app.passes WHERE pass_id = $1', [
+        passId,
+      ]);
       const existing = replay.rows[0];
       if (existing !== undefined) {
         if (existing.from_user_id !== from || existing.to_user_id !== to) {
@@ -524,7 +575,10 @@ export class PostgresInteractionStore implements InteractionStore {
    * pre-filtered would make that check impossible to express. The order is
    * stable because `isPassInEffect` walks the list.
    */
-  async findPassesFor(userId: UserId, tx: Transaction): Promise<readonly Readonly<Record<string, unknown>>[]> {
+  async findPassesFor(
+    userId: UserId,
+    tx: Transaction,
+  ): Promise<readonly Readonly<Record<string, unknown>>[]> {
     const client = clientOf(tx);
     const found = await query<PassDbRow>(
       client,
@@ -536,16 +590,28 @@ export class PostgresInteractionStore implements InteractionStore {
 
   // ---------------------------------------------------------------- blocks --
 
-  async createBlock(row: Readonly<Record<string, unknown>>, tx: Transaction): Promise<{ readonly created: boolean }> {
+  async createBlock(
+    row: Readonly<Record<string, unknown>>,
+    tx: Transaction,
+  ): Promise<{ readonly created: boolean }> {
     const client = clientOf(tx);
     const blockId = requiredString(row, 'blockId', 'createBlock');
     const blocker = requiredString(row, 'blocker', 'createBlock');
     const blocked = requiredString(row, 'blocked', 'createBlock');
     const createdAt = requiredDate(row, 'createdAt', 'createBlock');
 
-    const inserted = await query<BlockDbRow>(client, INSERT_BLOCK, [blockId, blocker, blocked, createdAt]);
+    const inserted = await query<BlockDbRow>(client, INSERT_BLOCK, [
+      blockId,
+      blocker,
+      blocked,
+      createdAt,
+    ]);
     if (inserted.rowCount === 0) {
-      const replay = await query<BlockDbRow>(client, 'SELECT * FROM app.blocks WHERE block_id = $1', [blockId]);
+      const replay = await query<BlockDbRow>(
+        client,
+        'SELECT * FROM app.blocks WHERE block_id = $1',
+        [blockId],
+      );
       const existing = replay.rows[0];
       if (existing !== undefined) {
         if (existing.blocker_id !== blocker || existing.blocked_id !== blocked) {
@@ -554,7 +620,7 @@ export class PostgresInteractionStore implements InteractionStore {
         return { created: false };
       }
       throw new InteractionConflictError(
-        `a block already exists between ${blocker} and ${blocked}: blocks are stored once per pair`,
+        `a block already exists between ${blocker} and ${blocked}: one active block per pair, in either direction`,
       );
     }
     return { created: true };
@@ -572,7 +638,7 @@ export class PostgresInteractionStore implements InteractionStore {
     const client = clientOf(tx);
     const lifted = await query<BlockDbRow>(
       client,
-      `DELETE FROM app.blocks WHERE TRUE SET lifted_at = $3
+      `UPDATE app.blocks SET lifted_at = $3
         WHERE blocker_id = $1 AND blocked_id = $2 AND lifted_at IS NULL
         RETURNING *`,
       [blocker, blocked, at],
@@ -586,7 +652,11 @@ export class PostgresInteractionStore implements InteractionStore {
    * pair rather than two, so there is no moment in which the answer is half a
    * list.
    */
-  async findBlocksBetween(a: UserId, b: UserId, tx: Transaction): Promise<readonly Readonly<Record<string, unknown>>[]> {
+  async findBlocksBetween(
+    a: UserId,
+    b: UserId,
+    tx: Transaction,
+  ): Promise<readonly Readonly<Record<string, unknown>>[]> {
     const client = clientOf(tx);
     const found = await query<BlockDbRow>(
       client,
@@ -600,16 +670,27 @@ export class PostgresInteractionStore implements InteractionStore {
 
   // --------------------------------------------------------------- matches --
 
-  async findMatch(matchId: MatchId, tx: Transaction): Promise<Readonly<Record<string, unknown>> | null> {
+  async findMatch(
+    matchId: MatchId,
+    tx: Transaction,
+  ): Promise<Readonly<Record<string, unknown>> | null> {
     const client = clientOf(tx);
-    const found = await query<MatchDbRow>(client, 'SELECT * FROM app.matches WHERE match_id = $1', [matchId]);
+    const found = await query<MatchDbRow>(client, 'SELECT * FROM app.matches WHERE match_id = $1', [
+      matchId,
+    ]);
     const row = found.rows[0];
     return row === undefined ? null : matchView(row);
   }
 
-  async findMatchByPair(a: UserId, b: UserId, tx: Transaction): Promise<Readonly<Record<string, unknown>> | null> {
+  async findMatchByPair(
+    a: UserId,
+    b: UserId,
+    tx: Transaction,
+  ): Promise<Readonly<Record<string, unknown>> | null> {
     const client = clientOf(tx);
-    const found = await query<MatchDbRow>(client, 'SELECT * FROM app.matches WHERE pair_key = $1', [pairKey(a, b)]);
+    const found = await query<MatchDbRow>(client, 'SELECT * FROM app.matches WHERE pair_key = $1', [
+      pairKey(a, b),
+    ]);
     const row = found.rows[0];
     return row === undefined ? null : matchView(row);
   }
@@ -631,7 +712,9 @@ export class PostgresInteractionStore implements InteractionStore {
       [page.offset, 'offset'],
     ] as const) {
       if (!Number.isInteger(value) || value < 0) {
-        throw fault(`findMatchesFor: '${name}' must be a non-negative integer, got ${String(value)}`);
+        throw fault(
+          `findMatchesFor: '${name}' must be a non-negative integer, got ${String(value)}`,
+        );
       }
     }
     const counted = await query<CountRow>(
@@ -660,7 +743,10 @@ export class PostgresInteractionStore implements InteractionStore {
    * the *other* transaction's `match_id`. That is not a defect of this method,
    * it is the answer: there is one match for this pair and this is it.
    */
-  async upsertMatch(row: Readonly<Record<string, unknown>>, tx: Transaction): Promise<Readonly<Record<string, unknown>>> {
+  async upsertMatch(
+    row: Readonly<Record<string, unknown>>,
+    tx: Transaction,
+  ): Promise<Readonly<Record<string, unknown>>> {
     const client = clientOf(tx);
     const matchId = requiredString(row, 'matchId', 'upsertMatch');
     const [first, second] = stringPair(row, 'participants', 'upsertMatch');
@@ -700,20 +786,30 @@ export class PostgresInteractionStore implements InteractionStore {
    * a no-op — a typo that silently dropped the end of a match is exactly the
    * kind of quiet write this schema exists to prevent.
    */
-  async updateMatch(matchId: MatchId, patch: Readonly<Record<string, unknown>>, tx: Transaction): Promise<boolean> {
+  async updateMatch(
+    matchId: MatchId,
+    patch: Readonly<Record<string, unknown>>,
+    tx: Transaction,
+  ): Promise<boolean> {
     const client = clientOf(tx);
     const assignments: string[] = [];
     const values: unknown[] = [];
     for (const key of Object.keys(patch)) {
       const column = PATCH_COLUMNS[key];
       if (column === undefined) {
-        throw fault(`updateMatch: unknown patch key '${key}'; expected one of ${Object.keys(PATCH_COLUMNS).join(', ')}`);
+        throw fault(
+          `updateMatch: unknown patch key '${key}'; expected one of ${Object.keys(PATCH_COLUMNS).join(', ')}`,
+        );
       }
       values.push(patchValue(key, patch));
       assignments.push(`${column} = $${values.length}`);
     }
     if (assignments.length === 0) {
-      const present = await query<MatchDbRow>(client, 'SELECT * FROM app.matches WHERE match_id = $1', [matchId]);
+      const present = await query<MatchDbRow>(
+        client,
+        'SELECT * FROM app.matches WHERE match_id = $1',
+        [matchId],
+      );
       return present.rowCount > 0;
     }
     values.push(matchId);

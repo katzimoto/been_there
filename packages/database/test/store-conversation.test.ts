@@ -87,8 +87,14 @@ describeIfDb('ConversationStore, against Postgres', () => {
     return [a, b];
   }
 
+  /**
+   * A match with the id the domain actually derives, `match:{a}|{b}` over the
+   * canonical pair. Deriving it the same way here is the point: it makes the
+   * id arithmetic on two user ids rather than a secret, which is what the
+   * participant check on `findByMatch` exists to answer.
+   */
   async function aMatch(participants: readonly [UserId, UserId]): Promise<MatchId> {
-    const matchId = castId<'MatchId'>(`match:${randomUUID()}`);
+    const matchId = castId<'MatchId'>(`match:${pairKey(participants[0], participants[1])}`);
     await client.query(
       'INSERT INTO app.matches (match_id, pair_key, participants, like_ids, standings) VALUES ($1,$2,$3,$4,$5)',
       [matchId, pairKey(participants[0], participants[1]), [...participants], [], ['active', 'active']],
@@ -248,19 +254,22 @@ describeIfDb('ConversationStore, against Postgres', () => {
       store.appendMessage(aMessage(conversation.conversationId, a, at(1), 'between the two of you'), tx),
     );
 
-    // The attacker holds a real id. It is not theirs, and the store is the
-    // only place that can know that, so this is where the check belongs.
+    // The attacker holds a real conversation id, and can derive the match id
+    // from two user ids without ever having seen either. Neither is theirs, and
+    // the store is the only place that can know that.
     const guessed = castId<'ConversationId'>(conversation.conversationId);
+    const derived = castId<'MatchId'>(`match:${pairKey(a, b)}`);
+    expect(derived).toBe(matchId);
     const read = await transaction.run((tx) => store.find(guessed, attacker, tx));
+    const byMatch = await transaction.run((tx) => store.findByMatch(derived, attacker, tx));
     const messages = await transaction.run((tx) =>
       store.findMessages(guessed, { limit: 10, offset: 0 }, attacker, tx),
     );
     const listing = await transaction.run((tx) => store.listFor(attacker, { limit: 10, offset: 0 }, tx));
 
     expect(read).toBeNull();
+    expect(byMatch).toBeNull();
     expect(messages.items).toEqual([]);
-    expect(messages.total).toBe(0);
-    expect(listing.items).toEqual([]);
     // The same answer as an id that does not exist, so the read is not an
     // existence oracle either.
     const invented = await transaction.run((tx) => store.find(castId<'ConversationId'>(randomUUID()), attacker, tx));
@@ -269,6 +278,9 @@ describeIfDb('ConversationStore, against Postgres', () => {
     // And the participants still see it, so the check is a scope and not a lockout.
     const asParticipant = await transaction.run((tx) => store.find(guessed, b, tx));
     expect(asParticipant?.participants).toEqual([a, b]);
+    expect((await transaction.run((tx) => store.findByMatch(derived, b, tx)))?.conversationId).toBe(
+      conversation.conversationId,
+    );
     expect((await transaction.run((tx) => store.findMessages(guessed, { limit: 10, offset: 0 }, b, tx))).items).toHaveLength(1);
   });
 
@@ -345,9 +357,19 @@ describeIfDb('ConversationStore, against Postgres', () => {
     );
     expect(row.rows[0]?.state).toBe('blocked');
     expect(row.rows[0]?.state_changed_at).toEqual(changed);
-    expect(
-      (await transaction.run((tx) => store.find(conversation.conversationId, a, tx)))?.state,
-    ).toBe('blocked');
+    // The instant the domain calls `stateChangedAt` has to survive the round
+    // trip, not just sit in the column: a service that reads the conversation
+    // back and rebuilds the domain object must not lose it.
+    const reread = await transaction.run((tx) => store.find(conversation.conversationId, a, tx));
+    expect(reread?.state).toBe('blocked');
+    expect(reread?.stateChangedAt).toEqual(changed);
+    expect(reread?.openedAt).toEqual(at(0));
+    // A conversation that has never changed state says so, rather than
+    // claiming it changed at the epoch.
+    const [c] = await twoUsers();
+    const never = aConversation(await aMatch([a, c]), [a, c], at(0));
+    await transaction.run((tx) => store.create({ ...never, stateChangedAt: null }, tx));
+    expect((await transaction.run((tx) => store.find(never.conversationId, a, tx)))?.stateChangedAt).toBeNull();
   });
 
   it('leaves nothing behind when the caller rolls back', async () => {

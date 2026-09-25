@@ -132,46 +132,6 @@ export function readSequence(value: unknown): number {
   return sequence;
 }
 
-export /** `opened_by` and `actor_id` hold an actor id or the literal `system`. */
-export function readActor(value: unknown, column: string): ActorId | 'system' {
-  const text = readText(value, column);
-  return text === 'system' ? 'system' : castId<'ActorId'>(text);
-}
-
-/** `seq` is a `bigint`, which the driver hands over as a string. */
-export function readSequence(value: unknown): number {
-  const sequence = typeof value === 'string' ? Number(value) : value;
-  if (typeof sequence !== 'number' || !Number.isSafeInteger(sequence)) {
-    throw new StoreError('column seq is not an audit sequence');
-  }
-  return sequence;
-}
-
-export function readPage(page: Page): Page {
-  if (!Number.isInteger(page.limit) || page.limit < 0) {
-    throw new StoreError('page.limit must be a non-negative integer');
-  }
-  if (!Number.isInteger(page.offset) || page.offset < 0) {
-    throw new StoreError('page.offset must be a non-negative integer');
-  }
-  return page;
-}
-
-/**
- * A store fault, labelled by the class of failure. The kind is in the message
- * because the port's `StoreError` carries no code and a caller that must handle
- * a conflict has no other way to tell one from a fault; the driver error stays
- * reachable as `cause`, where `isConflict` and `isRetryable` still read its
- * SQLSTATE.
- */
-export function storeFault(operation: string, error: unknown): StoreError {
-  if (error instanceof StoreError) {
-    return error;
-  }
-  const kind = isConflict(error) ? 'conflict' : isRetryable(error) ? 'retryable fault' : 'fault';
-  return new StoreError(`${operation}: ${kind}`, { retryable: isRetryable(error), cause: error });
-}
-
 // -------------------------------------------------------------- report rows --
 
 export const REPORT_COLUMNS = `report_id, subject_id, reporter_id, reason, statement, relationship,
@@ -283,6 +243,23 @@ export function readCase(row: Record<string, unknown>): CaseRow {
  */
 export function caseOriginParameter(origin: unknown): string {
   return typeof origin === 'string' ? requireText(origin, 'origin') : jsonParameter(origin, 'origin');
+}
+
+/** Encodes one patch value by the column it lands in. */
+export function casePatchValue(field: string, value: unknown): unknown {
+  switch (field) {
+    case 'dueAt':
+    case 'updatedAt':
+      return requireDate(value, field);
+    case 'reportIds':
+    case 'evidenceIds':
+      return stringArray(value, field);
+    case 'assignedModeratorId':
+    case 'resolutionDecisionId':
+      return value === null ? null : requireText(value, field);
+    default:
+      return requireText(value, field);
+  }
 }
 
 // ------------------------------------------------------------ decision rows --

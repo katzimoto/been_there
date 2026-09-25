@@ -52,6 +52,14 @@ export type RiskSignalRow = {
   readonly facts: Readonly<Record<string, unknown>>;
   readonly weight: number;
   readonly occurredAt: Date;
+  /**
+   * Arrival order, monotonic. It is the last term in the read order and the
+   * one that makes a ledger replayed from the database fold identically to the
+   * in-memory ledger that produced it: two signals sharing an instant *and* a
+   * detector are otherwise indistinguishable, and the domain orders them by
+   * arrival.
+   */
+  readonly seq: number;
 };
 
 /** The current derived risk state for a subject. */

@@ -89,7 +89,13 @@ describeIfDb('InteractionStore, against Postgres', () => {
   }
 
   function like(over: Partial<Record<string, unknown>> = {}): Readonly<Record<string, unknown>> {
-    return { likeId: randomUUID(), from: randomUUID(), to: randomUUID(), createdAt: DAY_ONE, ...over };
+    return {
+      likeId: randomUUID(),
+      from: randomUUID(),
+      to: randomUUID(),
+      createdAt: DAY_ONE,
+      ...over,
+    };
   }
 
   // ------------------------------------------------------------ appendLike --
@@ -99,7 +105,9 @@ describeIfDb('InteractionStore, against Postgres', () => {
     const passId = randomUUID();
     await inTx((tx) => store.appendPass({ passId, from: a, to: b, createdAt: DAY_ONE }, tx));
 
-    const result = await inTx((tx) => store.appendLike(like({ from: a, to: b, createdAt: DAY_TWO }), tx));
+    const result = await inTx((tx) =>
+      store.appendLike(like({ from: a, to: b, createdAt: DAY_TWO }), tx),
+    );
     expect(result.created).toBe(true);
 
     // A separate supersedePass call would also make this pass, which is exactly
@@ -112,7 +120,9 @@ describeIfDb('InteractionStore, against Postgres', () => {
 
   it('leaves the counterpart’s pass alone, because one person’s like is not the other’s decision', async () => {
     const { a, b } = await twoUsers();
-    await inTx((tx) => store.appendPass({ passId: randomUUID(), from: b, to: a, createdAt: DAY_ONE }, tx));
+    await inTx((tx) =>
+      store.appendPass({ passId: randomUUID(), from: b, to: a, createdAt: DAY_ONE }, tx),
+    );
 
     await inTx((tx) => store.appendLike(like({ from: a, to: b, createdAt: DAY_TWO }), tx));
 
@@ -122,7 +132,9 @@ describeIfDb('InteractionStore, against Postgres', () => {
 
   it('a rolled-back like leaves neither the like nor the supersession behind', async () => {
     const { a, b } = await twoUsers();
-    await inTx((tx) => store.appendPass({ passId: randomUUID(), from: a, to: b, createdAt: DAY_ONE }, tx));
+    await inTx((tx) =>
+      store.appendPass({ passId: randomUUID(), from: a, to: b, createdAt: DAY_ONE }, tx),
+    );
 
     await expect(
       inTx(async (tx) => {
@@ -165,10 +177,14 @@ describeIfDb('InteractionStore, against Postgres', () => {
 
   it('the reciprocal direction is a different like, not a duplicate', async () => {
     const { a, b } = await twoUsers();
-    expect(await inTx((tx) => store.appendLike(like({ from: a, to: b, createdAt: DAY_ONE }), tx))).toEqual({
+    expect(
+      await inTx((tx) => store.appendLike(like({ from: a, to: b, createdAt: DAY_ONE }), tx)),
+    ).toEqual({
       created: true,
     });
-    expect(await inTx((tx) => store.appendLike(like({ from: b, to: a, createdAt: DAY_ONE }), tx))).toEqual({
+    expect(
+      await inTx((tx) => store.appendLike(like({ from: b, to: a, createdAt: DAY_ONE }), tx)),
+    ).toEqual({
       created: true,
     });
     expect(await inTx((tx) => store.findLikesFor(a, tx))).toHaveLength(2);
@@ -192,14 +208,20 @@ describeIfDb('InteractionStore, against Postgres', () => {
     const mine = randomUUID();
     const theirs = randomUUID();
     const later = randomUUID();
-    await inTx((tx) => store.appendLike(like({ likeId: mine, from: a, to: b, createdAt: DAY_ONE }), tx));
-    await inTx((tx) => store.appendLike(like({ likeId: theirs, from: b, to: a, createdAt: DAY_TWO }), tx));
+    await inTx((tx) =>
+      store.appendLike(like({ likeId: mine, from: a, to: b, createdAt: DAY_ONE }), tx),
+    );
+    await inTx((tx) =>
+      store.appendLike(like({ likeId: theirs, from: b, to: a, createdAt: DAY_TWO }), tx),
+    );
 
     // A withdrawn like is history, and a later decision is a new row: if the
     // store kept the withdrawn one, `resolveMatch` would match on a decision
     // the user took back.
     expect(await inTx((tx) => store.updateLike(mine, 'withdrawn', tx))).toBe(true);
-    await inTx((tx) => store.appendLike(like({ likeId: later, from: a, to: b, createdAt: DAY_THREE }), tx));
+    await inTx((tx) =>
+      store.appendLike(like({ likeId: later, from: a, to: b, createdAt: DAY_THREE }), tx),
+    );
 
     const ledger = await inTx((tx) => store.findLikesFor(a, tx));
     expect(ledger.map((entry) => entry['likeId'])).toEqual([theirs, later]);
@@ -231,7 +253,9 @@ describeIfDb('InteractionStore, against Postgres', () => {
     const { a: stranger } = await twoUsers();
     expect(await inTx((tx) => store.supersedePass(a, b, DAY_TWO, tx))).toBe(0);
 
-    await inTx((tx) => store.appendPass({ passId: randomUUID(), from: a, to: b, createdAt: DAY_ONE }, tx));
+    await inTx((tx) =>
+      store.appendPass({ passId: randomUUID(), from: a, to: b, createdAt: DAY_ONE }, tx),
+    );
     expect(await inTx((tx) => store.supersedePass(a, b, DAY_TWO, tx))).toBe(1);
     expect(await inTx((tx) => store.supersedePass(a, b, DAY_THREE, tx))).toBe(0);
     expect(await inTx((tx) => store.supersedePass(stranger, b, DAY_TWO, tx))).toBe(0);
@@ -245,9 +269,15 @@ describeIfDb('InteractionStore, against Postgres', () => {
   it('findPassesFor is ordered, and by the pair rather than by insertion accident', async () => {
     const { a, b } = await twoUsers();
     const { a: third } = await twoUsers();
-    await inTx((tx) => store.appendPass({ passId: randomUUID(), from: b, to: a, createdAt: DAY_ONE }, tx));
-    await inTx((tx) => store.appendPass({ passId: randomUUID(), from: a, to: b, createdAt: DAY_THREE }, tx));
-    await inTx((tx) => store.appendPass({ passId: randomUUID(), from: a, to: third, createdAt: DAY_TWO }, tx));
+    await inTx((tx) =>
+      store.appendPass({ passId: randomUUID(), from: b, to: a, createdAt: DAY_ONE }, tx),
+    );
+    await inTx((tx) =>
+      store.appendPass({ passId: randomUUID(), from: a, to: b, createdAt: DAY_THREE }, tx),
+    );
+    await inTx((tx) =>
+      store.appendPass({ passId: randomUUID(), from: a, to: third, createdAt: DAY_TWO }, tx),
+    );
 
     const passes = await inTx((tx) => store.findPassesFor(a, tx));
     expect(passes.map((entry) => entry['createdAt'])).toEqual([DAY_ONE, DAY_TWO, DAY_THREE]);
@@ -270,7 +300,9 @@ describeIfDb('InteractionStore, against Postgres', () => {
   it('only the blocker can release, and the release leaves the block on the record', async () => {
     const { a, b } = await twoUsers();
     const blockId = randomUUID();
-    await inTx((tx) => store.createBlock({ blockId, blocker: a, blocked: b, createdAt: DAY_ONE }, tx));
+    await inTx((tx) =>
+      store.createBlock({ blockId, blocker: a, blocked: b, createdAt: DAY_ONE }, tx),
+    );
 
     // The wrong party asks first, and gets nothing: a block is lifted by the
     // person who placed it or by nobody.
@@ -291,12 +323,16 @@ describeIfDb('InteractionStore, against Postgres', () => {
   it('a released block can be made again, because a lift is not a veto forever', async () => {
     const { a, b } = await twoUsers();
     const first = randomUUID();
-    await inTx((tx) => store.createBlock({ blockId: first, blocker: a, blocked: b, createdAt: DAY_ONE }, tx));
+    await inTx((tx) =>
+      store.createBlock({ blockId: first, blocker: a, blocked: b, createdAt: DAY_ONE }, tx),
+    );
     expect(await inTx((tx) => store.releaseBlock(a, b, DAY_TWO, tx))).toBe(1);
 
     const second = randomUUID();
     expect(
-      await inTx((tx) => store.createBlock({ blockId: second, blocker: a, blocked: b, createdAt: DAY_THREE }, tx)),
+      await inTx((tx) =>
+        store.createBlock({ blockId: second, blocker: a, blocked: b, createdAt: DAY_THREE }, tx),
+      ),
     ).toEqual({ created: true });
 
     // Both are on the record: the block that was lifted, and the one standing.
@@ -308,7 +344,9 @@ describeIfDb('InteractionStore, against Postgres', () => {
 
   it('findBlocksBetween is symmetric, because a block is applied in two', async () => {
     const { a, b } = await twoUsers();
-    await inTx((tx) => store.createBlock({ blockId: randomUUID(), blocker: b, blocked: a, createdAt: DAY_ONE }, tx));
+    await inTx((tx) =>
+      store.createBlock({ blockId: randomUUID(), blocker: b, blocked: a, createdAt: DAY_ONE }, tx),
+    );
 
     const forwards = await inTx((tx) => store.findBlocksBetween(a, b, tx));
     const backwards = await inTx((tx) => store.findBlocksBetween(b, a, tx));
@@ -394,7 +432,15 @@ describeIfDb('InteractionStore, against Postgres', () => {
         tx,
       ),
     );
-    expect(await inTx((tx) => store.updateMatch(match['matchId'] as MatchId, { endedAt: DAY_TWO, endedCause: 'unmatched' }, tx))).toBe(true);
+    expect(
+      await inTx((tx) =>
+        store.updateMatch(
+          match['matchId'] as MatchId,
+          { endedAt: DAY_TWO, endedCause: 'unmatched' },
+          tx,
+        ),
+      ),
+    ).toBe(true);
 
     const converged = await inTx((tx) =>
       store.upsertMatch(
@@ -437,7 +483,11 @@ describeIfDb('InteractionStore, against Postgres', () => {
       await inTx((tx) =>
         store.updateMatch(
           matchId,
-          { standings: ['closed_by_actor', 'restricted_by_target'], endedAt: DAY_TWO, endedCause: 'ended_by_block' },
+          {
+            standings: ['closed_by_actor', 'restricted_by_target'],
+            endedAt: DAY_TWO,
+            endedCause: 'ended_by_block',
+          },
           tx,
         ),
       ),
@@ -450,7 +500,9 @@ describeIfDb('InteractionStore, against Postgres', () => {
 
     // A typo must not be a write that quietly does nothing.
     await expect(
-      inTx((tx) => store.updateMatch(matchId, { standingsg: ['closed_by_actor', 'closed_by_actor'] }, tx)),
+      inTx((tx) =>
+        store.updateMatch(matchId, { standingsg: ['closed_by_actor', 'closed_by_actor'] }, tx),
+      ),
     ).rejects.toBeInstanceOf(StoreError);
     expect((await inTx((tx) => store.findMatch(matchId, tx)))?.['standings']).toEqual([
       'closed_by_actor',
@@ -458,9 +510,14 @@ describeIfDb('InteractionStore, against Postgres', () => {
     ]);
 
     expect(
-      await inTx((tx) => store.updateMatch(`match:${randomUUID()}` as MatchId, { endedCause: 'unmatched' }, tx)),
+      await inTx((tx) =>
+        store.updateMatch(`match:${randomUUID()}` as MatchId, { endedCause: 'unmatched' }, tx),
+      ),
     ).toBe(false);
-    expect(await inTx((tx) => store.findMatchesFor(c, { limit: 10, offset: 0 }, tx))).toEqual({ items: [], total: 0 });
+    expect(await inTx((tx) => store.findMatchesFor(c, { limit: 10, offset: 0 }, tx))).toEqual({
+      items: [],
+      total: 0,
+    });
   });
 
   it('findMatchesFor pages without losing the total past the end', async () => {
@@ -472,13 +529,25 @@ describeIfDb('InteractionStore, against Postgres', () => {
     const newer = `match:${randomUUID()}`;
     await inTx((tx) =>
       store.upsertMatch(
-        { matchId: older, participants: [first, second], likeIds: [randomUUID()], standings: ['active', 'active'], createdAt: DAY_ONE },
+        {
+          matchId: older,
+          participants: [first, second],
+          likeIds: [randomUUID()],
+          standings: ['active', 'active'],
+          createdAt: DAY_ONE,
+        },
         tx,
       ),
     );
     await inTx((tx) =>
       store.upsertMatch(
-        { matchId: newer, participants: [third, fourth], likeIds: [randomUUID()], standings: ['active', 'active'], createdAt: DAY_TWO },
+        {
+          matchId: newer,
+          participants: [third, fourth],
+          likeIds: [randomUUID()],
+          standings: ['active', 'active'],
+          createdAt: DAY_TWO,
+        },
         tx,
       ),
     );
@@ -491,7 +560,9 @@ describeIfDb('InteractionStore, against Postgres', () => {
     expect(past.items).toEqual([]);
     expect(past.total).toBe(1);
 
-    await expect(inTx((tx) => store.findMatchesFor(c, { limit: -1, offset: 0 }, tx))).rejects.toBeInstanceOf(StoreError);
+    await expect(
+      inTx((tx) => store.findMatchesFor(c, { limit: -1, offset: 0 }, tx)),
+    ).rejects.toBeInstanceOf(StoreError);
   });
 
   it('a match cannot be written for a pair that is not in canonical order', async () => {
@@ -543,7 +614,13 @@ describeIfDb('InteractionStore, against Postgres', () => {
 
     await inTx((tx) =>
       store.upsertProfile(
-        { profileId: written?.profileId ?? a, userId: a, state: 'complete', content: { bio: 'two' }, updatedAt: DAY_TWO },
+        {
+          profileId: written?.profileId ?? a,
+          userId: a,
+          state: 'complete',
+          content: { bio: 'two' },
+          updatedAt: DAY_TWO,
+        },
         tx,
       ),
     );
@@ -562,12 +639,14 @@ describeIfDb('InteractionStore, against Postgres', () => {
     const { a } = await twoUsers();
     await inTx(async (tx) => {
       const client = clientOf(tx);
-      await client.query('INSERT INTO app.profiles (user_id, state, content) VALUES ($1, $2, $3::jsonb)', [
+      await client.query(
+        'INSERT INTO app.profiles (user_id, state, content) VALUES ($1, $2, $3::jsonb)',
+        [a, 'complete', '["not", "an", "object"]'],
+      );
+      await client.query('INSERT INTO app.preferences (user_id, value) VALUES ($1, $2::jsonb)', [
         a,
-        'complete',
-        '["not", "an", "object"]',
+        'null',
       ]);
-      await client.query('INSERT INTO app.preferences (user_id, value) VALUES ($1, $2::jsonb)', [a, 'null']);
     });
 
     await expect(inTx((tx) => store.findProfile(a, tx))).rejects.toBeInstanceOf(StoreError);
@@ -584,8 +663,12 @@ describeIfDb('InteractionStore, against Postgres', () => {
     // behind when the outer one rolls back.
     await expect(
       inTx(async (tx) => {
-        await tx.run((inner) => store.appendPass({ passId, from: a, to: b, createdAt: DAY_ONE }, inner));
-        await tx.run((inner) => store.appendLike(like({ from: a, to: b, createdAt: DAY_TWO }), inner));
+        await tx.run((inner) =>
+          store.appendPass({ passId, from: a, to: b, createdAt: DAY_ONE }, inner),
+        );
+        await tx.run((inner) =>
+          store.appendLike(like({ from: a, to: b, createdAt: DAY_TWO }), inner),
+        );
         throw new Error('the request failed after composing two stores');
       }),
     ).rejects.toThrow('the request failed after composing two stores');
@@ -594,15 +677,18 @@ describeIfDb('InteractionStore, against Postgres', () => {
     expect(await inTx((tx) => store.findLikesFor(a, tx))).toEqual([]);
 
     const committed = await inTx(async (tx) => {
-      await tx.run((inner) => store.appendPass({ passId, from: a, to: b, createdAt: DAY_ONE }, inner));
-      return tx.run((inner) => store.appendLike(like({ from: a, to: b, createdAt: DAY_TWO }), inner));
+      await tx.run((inner) =>
+        store.appendPass({ passId, from: a, to: b, createdAt: DAY_ONE }, inner),
+      );
+      return tx.run((inner) =>
+        store.appendLike(like({ from: a, to: b, createdAt: DAY_TWO }), inner),
+      );
     });
     expect(committed.created).toBe(true);
     expect(await inTx((tx) => store.findPassesFor(a, tx))).toEqual([
       expect.objectContaining({ state: 'superseded' }),
     ]);
   });
-
 
   it('refuses a transaction it cannot run on, rather than quietly taking a second connection', async () => {
     const { a } = await twoUsers();
