@@ -174,9 +174,27 @@ highest escalation, and the test says so directly.
 | `high` | `signal_observed` **always** | `score ≥ 0.9` or `corroboratingDetectors ≥ 2` → `critical` |
 | `critical` | none | Nothing is legal; more evidence raises the review priority, not the state |
 
-`threshold_crossed` is never requested from `high`: in the shared table that
-edge has no guard, so using it there would skip the corroboration requirement
-entirely.
+`threshold_crossed` is never requested from `high`, and the reason is that the
+edge is available and unguarded: the shared table declares
+`threshold_crossed` from `high` to `critical` with no guard at all, so taking it
+would skip the corroboration requirement entirely. The policy layer therefore
+treats `signal_observed` as the only escalation out of `high`, and a caller that
+"simplified" it to `threshold_crossed` would reach `critical` on no evidence at
+all.
+
+That is only true because the guarded `threshold_crossed → high` row is declared
+from `normal` and `elevated` only. An earlier version of the table also listed
+`high` there, which made the two rows overlap on `(event, from)`: the resolver
+takes the **first** matching row, so the guarded row shadowed the unguarded one
+and `high + threshold_crossed` returned `high` — a self-transition that is
+indistinguishable at the call site from a guard refusing the move, so the
+corroboration check a caller believes it is relying on is not what fired.
+`defineStateMachine` does not report a shadowed row, so the invariant is pinned
+in `packages/core/test/states.test.ts` instead: `high + threshold_crossed` must
+reach `critical` with no context at all, and no state of any machine in the
+kernel may offer the same event twice — the only externally visible symptom of
+a shadowed row. Keep `high` out of the guarded row and keep the unguarded row
+first; if either changes, the escalation silently stops escalating.
 
 ### Worked numbers — one account, one loud detector
 

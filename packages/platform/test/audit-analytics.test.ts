@@ -13,7 +13,7 @@ import {
   routeEvent,
   type AuditAppendRequest,
 } from '../src/index.js';
-import { correlationId, domainEvent, subjectId } from './helpers.js';
+import { correlationId, domainEvent, subjectId, succeeded } from './helpers.js';
 
 const ALICE = castId<'UserId'>('u-alice') as UserId;
 const NOW = new Date('2026-03-01T12:00:00.000Z');
@@ -34,8 +34,8 @@ describe('audit is complete and append-only', () => {
   it('assigns a gap-free sequence and refuses to let a record be edited', () => {
     const log = new InMemoryAuditLog();
 
-    const first = log.append(appendRequest());
-    const second = log.append(appendRequest({ action: 'auth.recovery_completed' }));
+    const first = succeeded(log.append(appendRequest()));
+    const second = succeeded(log.append(appendRequest({ action: 'auth.recovery_completed' })));
 
     expect([first.sequence, second.sequence]).toEqual([1, 2]);
     // Frozen: the log has no update path, and the record it hands back has no
@@ -48,15 +48,17 @@ describe('audit is complete and append-only', () => {
 
   it('gates a read on the reader clearance, not on the record', () => {
     const log = new InMemoryAuditLog();
-    log.append(
-      appendRequest({
-        action: 'case.evidence_read',
-        fields: [
-          classify('evidence_url', 'restricted', 's3://evidence/case-9/1.jpg'),
-          classify('case_id', 'restricted', 'case-9'),
-          classify('scan_state', 'internal', 'scanning'),
-        ],
-      }),
+    succeeded(
+      log.append(
+        appendRequest({
+          action: 'evidence.read',
+          fields: [
+            classify('evidence_url', 'restricted', 's3://evidence/case-9/1.jpg'),
+            classify('case_id', 'restricted', 'case-9'),
+            classify('scan_state', 'internal', 'scanning'),
+          ],
+        }),
+      ),
     );
 
     // A support console with `internal` clearance cannot even enumerate a
@@ -106,7 +108,7 @@ describe('which events are audit facts', () => {
   it('requires an audit record for safety, identity, case, and auth events', () => {
     expect(isAuditRequired('identity_status.changed')).toBe(true);
     expect(isAuditRequired('identity.verification_changed')).toBe(true);
-    expect(isAuditRequired('case.decision_recorded')).toBe(true);
+    expect(isAuditRequired('case.opened')).toBe(true);
     expect(isAuditRequired('account_state.changed')).toBe(true);
     expect(isAuditRequired('auth.recovery_abuse_suspected')).toBe(true);
     expect(isAuditRequired('message.sent')).toBe(false);
@@ -143,10 +145,17 @@ describe('routing between the two sinks', () => {
     });
   });
 
-  it('keeps a sensitive non-audit event out of the metrics sink', () => {
-    const route = routeEvent(domainEvent({ type: 'location.anchor_updated', sensitivity: 'sensitive' }));
+  it('reports an event no sink may hold, rather than dropping it in silence', () => {
+    // `sensitive` and not an audit fact: the metrics sink is cleared to
+    // `internal`, so no sink may hold it. While this reported nothing, it came
+    // back as `{ audit: false, analytics: false }` — the same shape a
+    // successfully-decided refusal returns, which is how every moderation
+    // event vanished from both sinks without leaving a trace.
+    const route = routeEvent(
+      domainEvent({ type: 'location.anchor_updated', sensitivity: 'sensitive' }),
+    );
 
-    expect(route.analytics).toBe(false);
+    expect(route).toEqual({ audit: false, analytics: false, rejection: 'unroutable' });
   });
 
   it('uses clearance to withhold sensitive events from ordinary subscribers', async () => {

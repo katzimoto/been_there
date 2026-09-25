@@ -59,6 +59,8 @@ as adopted, rejected, or open.
 
 - [Agent workflow research](./research/agent-workflow-research.md)
 - [Trust & safety and verification reference research](./research/trust-safety-reference-research.md)
+- [Session review, 2026-09-25 — architecture baseline](./research/session-reviews/2026-09-25-architecture-baseline.md):
+  what was verified, what was assumed, what broke, and what to do next
 
 ## Document conventions
 

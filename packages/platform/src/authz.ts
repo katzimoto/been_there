@@ -11,6 +11,7 @@ import {
   type Result,
   type UserId,
   capabilitiesFor,
+  UNRESTRICTABLE_CAPABILITIES,
   domainError,
   ok,
 } from '@been-there/core';
@@ -213,15 +214,12 @@ export interface CapabilityGrant {
 }
 
 /**
- * Capabilities a restriction may never take away.
- *
- * Reporting is the intake valve for abuse reports, and blocking is how a user
- * protects themselves. A restriction that removed either would be a moderator
- * mistake with a product-wide consequence: abuse reports stop arriving, or a
- * victim cannot protect themselves, and neither shows up in any metric the
- * platform can see. So the removals are filtered rather than trusted.
+ * Re-exported from the kernel, which owns the capability record and computes
+ * the grant. Platform is a *consumer* of the floor, not its author: a second
+ * list here is what let a removal accepted in moderation reach a `public`
+ * payload with `report` and `block` stripped from it.
  */
-export const UNRESTRICTABLE_CAPABILITIES: readonly string[] = ['report', 'block'];
+export { UNRESTRICTABLE_CAPABILITIES };
 
 export function capabilityGrantFor(
   account: {

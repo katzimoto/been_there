@@ -45,6 +45,7 @@ export {
   ANOMALY_SEVERITY_RANK,
   ANOMALY_THRESHOLDS,
   detectIdentityAnomalies,
+  detectReverificationAbuse,
   maxSeverity,
   proposeReview,
 } from './anomaly.js';
@@ -109,6 +110,8 @@ export {
   type ReverificationHistoryEntry,
   type ReverificationPlan,
   type ReverificationReason,
+  type ReverificationRefusal,
+  type ReverificationRefusalLog,
   type ReverificationRequester,
   requestReVerification,
 } from './reverification.js';

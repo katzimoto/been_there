@@ -1,4 +1,5 @@
-import type { SubjectId } from '@been-there/core';
+import { type ActorId, type SubjectId, castId } from '@been-there/core';
+import type { ReverificationRefusal } from './reverification.js';
 
 /**
  * Identity anomaly detection (issue #3).
@@ -34,7 +35,9 @@ export type AnomalyCode =
   /** A burst of new accounts from one network signature. */
   | 'high_velocity_signups_from_network'
   /** Identity attributes changed repeatedly in a short window. */
-  | 'identity_attributes_changed';
+  | 'identity_attributes_changed'
+  /** A user demanding a re-verification for an account that is not their own. */
+  | 'cross_subject_reverification_demand';
 
 /**
  * How much a finding is allowed to influence the decision:
@@ -107,6 +110,15 @@ export const ANOMALY_THRESHOLDS = {
    * Attribute churn: 3 changes in 30 days. Two is curiosity; three is a loop.
    */
   identityAttributeChanges: { count: 3, windowDays: 30 },
+  /**
+   * Cross-subject re-verification demands: 1 in 30 days, per actor. The
+   * threshold is one because the legitimate path does not produce these at
+   * all — a subject can only ever demand their own re-verification — so the
+   * first occurrence is already an abuse signal rather than a rate to be
+   * measured. It is a demand against someone else's visibility, so it goes to
+   * a human rather than being counted and ignored.
+   */
+  crossSubjectReverificationDemands: { count: 1, windowDays: 30 },
 } as const;
 
 /**
@@ -297,4 +309,67 @@ export function proposeReview(findings: readonly AnomalyFinding[]): ReviewPropos
     findings: actionable,
     identityEvent: 'flag_for_review',
   };
+}
+
+/**
+ * Turns refused re-verification demands into findings about the *demander*.
+ *
+ * The command interface already refuses a demand made for someone else's
+ * account, so this is not a defence — it is what makes the attempt visible
+ * after it has been refused. A one-account attacker can put a named victim
+ * out of discovery four times a month, and if the refusals are not counted
+ * against that account then the only thing distinguishing an attack from a
+ * quiet week is a moderator noticing the victim's complaints.
+ *
+ * The finding's subject is the actor who made the demand, not the account they
+ * reached for: the review is about that account's conduct, and naming the
+ * victim in a review payload would spread the harassment one domain further.
+ * Only demands that reached the cross-subject check are counted — a subject
+ * re-verifying themselves is never in this log, because it is never refused.
+ */
+export function detectReverificationAbuse(
+  refusals: readonly ReverificationRefusal[],
+  now: Date,
+): AnomalyFinding[] {
+  const { windowDays, count: threshold } = ANOMALY_THRESHOLDS.crossSubjectReverificationDemands;
+  const windowStart = now.getTime() - windowDays * 24 * 60 * 60 * 1000;
+
+  const byActor = new Map<ActorId, { count: number; targets: Set<SubjectId> }>();
+  for (const refusal of refusals) {
+    if (refusal.requesterKind !== 'subject' || refusal.code !== 'permission_denied') {
+      continue;
+    }
+    if (refusal.at.getTime() < windowStart || refusal.at.getTime() > now.getTime()) {
+      continue;
+    }
+    const existing = byActor.get(refusal.actorId);
+    if (existing === undefined) {
+      byActor.set(refusal.actorId, { count: 1, targets: new Set([refusal.intendedSubjectId]) });
+    } else {
+      existing.count += 1;
+      existing.targets.add(refusal.intendedSubjectId);
+    }
+  }
+
+  const findings: AnomalyFinding[] = [];
+  for (const [actorId, { count, targets }] of byActor) {
+    if (count < threshold) {
+      continue;
+    }
+    // The demander is a user account, so its actor id is its subject id. A
+    // service actor is filtered out above: only `subject` demands are counted.
+    const offender = castId<'SubjectId'>(actorId);
+    findings.push({
+      code: 'cross_subject_reverification_demand',
+      // Review, never blocking: a demand for someone else's re-verification is
+      // abuse, and refusing the demand is the whole of the response this
+      // domain is allowed to take on it.
+      severity: 'review',
+      detector: 'identity.cross_subject_reverification',
+      subjectId: offender,
+      detectedAt: now,
+      observations: { demands: count, windowDays, distinctTargets: targets.size },
+    });
+  }
+  return findings;
 }

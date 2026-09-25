@@ -103,6 +103,66 @@ describe('applyDecision — the adapter over the shared account machine', () => 
   it('trims the rationale it stores', () => {
     expect(succeeded(applyDecision(command({ rationale: `   ${RATIONALE}   ` }))).rationale).toBe(RATIONALE);
   });
+
+  it('refuses a restriction naming a capability that may never be removed', () => {
+    // The reproduction from the review: `report` and `block` are in every
+    // state's base list, so the "does this account hold it?" check passed and
+    // the removal was recorded, published on a `public` event, and applied.
+    for (const capability of ['report', 'block'] as const) {
+      const error = rejected(
+        applyDecision(
+          command({ action: 'restrict', removedCapabilities: [capability, 'send_message'] }),
+        ),
+      );
+      expect(error.code).toBe('validation_failed');
+      expect(error.message).toContain(capability);
+    }
+  });
+
+  it('refuses to remove delete_account from the state that grants it', () => {
+    // `banned` is the only state that grants `delete_account`, and it is also
+    // the state from which `restrict` is not a legal transition. So this case
+    // passes the not-held check and would otherwise be refused as
+    // `invalid_transition` by the machine. Getting `validation_failed` with the
+    // unrestrictable message is what proves the floor is checked at intake and
+    // not merely inherited from the machine.
+    const error = rejected(
+      applyDecision(
+        command({
+          action: 'restrict',
+          currentAccountState: 'banned',
+          removedCapabilities: ['delete_account'],
+        }),
+      ),
+    );
+    expect(error.code).toBe('validation_failed');
+    expect(error.message).toContain('delete_account');
+  });
+
+  it('still accepts a restriction naming only restrictable capabilities', () => {
+    const decision = succeeded(
+      applyDecision(
+        command({
+          action: 'restrict',
+          removedCapabilities: ['send_message', 'like', 'browse_discovery'],
+        }),
+      ),
+    );
+    expect(decision.removedCapabilities).toEqual(['send_message', 'like', 'browse_discovery']);
+    expect(decision.resultingAccountState).toBe<AccountState>('limited');
+  });
+
+  it('refuses a restriction that mixes a restrictable name with an unrestrictable one', () => {
+    // Silently dropping the offending name would record a decision the moderator
+    // did not take, so the whole request is refused instead.
+    const error = rejected(
+      applyDecision(
+        command({ action: 'restrict', removedCapabilities: ['send_message', 'report'] }),
+      ),
+    );
+    expect(error.code).toBe('validation_failed');
+    expect(error.message).toContain('report');
+  });
 });
 
 describe('decide — a decision resolves its case and publishes the one outward event', () => {
@@ -224,6 +284,76 @@ describe('decide — a decision resolves its case and publishes the one outward 
     expect(seen).toEqual(['account_state.changed']);
     const outward = outcome.events.find((event) => event.type === 'account_state.changed');
     expect(Object.keys(outward?.payload as object)).toEqual(['accountState', 'capabilities']);
+  });
+
+  it('publishes a restricted account that can still report and block', () => {
+    // The spec claim, checked on the surface that actually leaked: the
+    // `public` payload every product domain consumes. Pre-fix this named
+    // send_message only, so the consumer's grant disagreed with platform's.
+    const h = harness();
+    const reviewed = caseInReview(h, openCaseFromReport(h, succeeded(makeReport(h))));
+    const outcome = succeeded(
+      decide(h.ctx, {
+        moderationCase: reviewed,
+        actor: MODERATOR,
+        action: 'restrict',
+        rationale: RATIONALE,
+        currentAccountState: 'active',
+        removedCapabilities: ['send_message', 'like', 'browse_discovery'],
+        correlationId: CORRELATION,
+      }),
+    );
+
+    const publicEvent = outcome.events.find((event) => event.sensitivity === 'public');
+    const payload = publicEvent?.payload as AccountStateChangedPayload;
+    expect(payload.capabilities).toContain('report');
+    expect(payload.capabilities).toContain('block');
+    expect(payload.capabilities).not.toContain('send_message');
+  });
+
+  it('refuses to publish a standing change that would strip report or block', () => {
+    // End to end through `decide`, the only path that publishes. A moderator
+    // typing `report` gets a refusal and no `public` event is emitted at all,
+    // so no consumer can ever read a stripped grant.
+    const h = harness();
+    const reviewed = caseInReview(h, openCaseFromReport(h, succeeded(makeReport(h))));
+    for (const capability of ['report', 'block'] as const) {
+      const error = rejected(
+        decide(h.ctx, {
+          moderationCase: reviewed,
+          actor: MODERATOR,
+          action: 'restrict',
+          rationale: RATIONALE,
+          currentAccountState: 'active',
+          removedCapabilities: [capability],
+          correlationId: CORRELATION,
+        }),
+      );
+      expect(error.code).toBe('validation_failed');
+      expect(error.message).toContain(capability);
+    }
+  });
+
+  it('keeps a banned account able to delete itself on the published payload', () => {
+    // `delete_account` is the recommended action on the banned screen, so a
+    // published grant without it strands the account with no way out.
+    const h = harness();
+    const reviewed = caseInReview(h, openCaseFromReport(h, succeeded(makeReport(h))));
+    const outcome = succeeded(
+      decide(h.ctx, {
+        moderationCase: reviewed,
+        actor: MODERATOR,
+        action: 'ban',
+        rationale: RATIONALE,
+        currentAccountState: 'active',
+        correlationId: CORRELATION,
+      }),
+    );
+
+    const publicEvent = outcome.events.find((event) => event.sensitivity === 'public');
+    const payload = publicEvent?.payload as AccountStateChangedPayload;
+    expect(payload.capabilities).toContain('delete_account');
+    expect(payload.capabilities).toContain('report');
   });
 
   it('closes the report with the same decision that resolved the case', () => {

@@ -305,17 +305,21 @@ export const CONTENT_BEARING_TYPES: readonly string[] = [
   'profile.bio_updated',
 ];
 
-export type AnalyticsRejection = 'content' | 'audited_only';
+export type AnalyticsRejection = 'content' | 'audited_only' | 'unroutable';
 
 export interface SinkRoute {
   /** True when the event is also an audit fact. Audit is never sampled. */
   readonly audit: boolean;
   readonly analytics: boolean;
+  /**
+   * Why an event reached no sink. Present whenever one did, so "nobody has
+   * this event" is a reported outcome rather than an absence nobody notices.
+   */
   readonly rejection?: AnalyticsRejection;
 }
 
 /**
- * Where a published event is allowed to go. The two rules that matter:
+ * Where a published event is allowed to go. The three rules that matter:
  *
  * 1. Content goes nowhere. Metrics sinks are aggregatable and therefore widely
  *    readable; a log of message bodies is a product-wide liability for a
@@ -324,6 +328,11 @@ export interface SinkRoute {
  *    case-bearing, and an aggregate sink that can be sliced by subject is one
  *    query away from a "who was reported" list, which the overview forbids the
  *    product from knowing.
+ * 3. An event no sink may hold is reported, not discarded. A `sensitive` event
+ *    that is not an audit fact reaches neither sink, and the caller has to be
+ *    able to see that; a silent `{ audit: false, analytics: false }` is
+ *    indistinguishable from a bug, and is how every moderation event was
+ *    dropped from both sinks while the router looked healthy.
  *
  * Product metrics for those journeys come from the anonymous counters above
  * (`account.registration_completed`), never from subscribing to the safety or
@@ -336,8 +345,8 @@ export function routeEvent(event: DomainEvent): SinkRoute {
   if (isAuditRequired(event.type)) {
     return { audit: true, analytics: false, rejection: 'audited_only' };
   }
-  return {
-    audit: false,
-    analytics: isWithinClearance(ANALYTICS_SINK_CLEARANCE, event.sensitivity),
-  };
+  if (!isWithinClearance(ANALYTICS_SINK_CLEARANCE, event.sensitivity)) {
+    return { audit: false, analytics: false, rejection: 'unroutable' };
+  }
+  return { audit: false, analytics: true };
 }

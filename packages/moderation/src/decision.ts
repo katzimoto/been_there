@@ -9,6 +9,7 @@ import {
   type Result,
   type UserId,
   accountMachine,
+  UNRESTRICTABLE_CAPABILITIES,
   capabilitiesFor,
   castId,
   domainError,
@@ -150,6 +151,23 @@ export function applyDecision(
         'moderation.decision',
         `a restriction may only name capabilities the account actually holds: ${unknown.join(', ')}`,
         { caseId, unknown: unknown.length },
+      );
+    }
+    // The intake valve. `capabilitiesFor` also refuses to strip these, but a
+    // moderator who types `report` into a restriction must be told no rather
+    // than have the name silently dropped: a decision that records fewer
+    // removals than the one taken is a decision nobody made. Checked before the
+    // not-held check so a capability the account does not hold *and* may never
+    // lose is reported for the reason that actually matters.
+    const unrestrictable = removed.filter((capability) =>
+      UNRESTRICTABLE_CAPABILITIES.includes(capability),
+    );
+    if (unrestrictable.length > 0) {
+      return domainError(
+        'validation_failed',
+        'moderation.decision',
+        `a restriction may never remove ${unrestrictable.join(', ')}: reporting and blocking must survive every sanction, and every state keeps a way out`,
+        { caseId, unrestrictable: unrestrictable.join(',') },
       );
     }
     // The kernel decides whether this transition is legal. We only pass the
