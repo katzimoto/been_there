@@ -2,7 +2,7 @@ import {
   type AccountState,
   type IdentityState,
   type PhotoId,
-  type ProfileId,
+  type Result,
   type UserId,
   castId,
 } from '@been-there/core';
@@ -19,6 +19,7 @@ import {
   type AccountStandingProjection,
   type IdentityStandingProjection,
   type RelationshipProjection,
+  type StandingLookup,
   type SubjectStandingProjection,
   relationshipView,
 } from '../src/read-models.js';
@@ -26,6 +27,28 @@ import {
 export const A: UserId = castId<'UserId'>('user-a');
 export const B: UserId = castId<'UserId'>('user-b');
 export const C: UserId = castId<'UserId'>('user-c');
+
+/**
+ * Reading `.value` off a `Result` is a compile error by design, so a test seam
+ * narrows it once here and every test can say what it expected.
+ */
+export function succeeded<T, E extends { code: string }>(result: Result<T, E>): T {
+  if (!result.ok) {
+    throw new Error(`expected success, got ${result.error.code}`);
+  }
+  return result.value;
+}
+
+export function failure<T, E extends { code: string }>(result: Result<T, E>): E {
+  if (result.ok) {
+    throw new Error('expected a failure');
+  }
+  return result.error;
+}
+
+export function failureCode<T, E extends { code: string }>(result: Result<T, E>): string {
+  return failure(result).code;
+}
 
 export const likeId = (raw: string): LikeId => castDatingId<'LikeId'>(raw);
 export const passId = (raw: string): PassId => castDatingId<'PassId'>(raw);
@@ -72,11 +95,15 @@ export function matchedLedger(entries: readonly LikeRecord[] = [like(A, B, 'like
   return { likes: entries.map((entry) => ({ ...entry, state: 'matched' as const })) };
 }
 
-export function relationship(overrides: Partial<RelationshipProjection> = {}): RelationshipProjection {
+export function relationship(
+  overrides: Partial<RelationshipProjection> = {},
+  standingOf: StandingLookup = (user) => standing(user),
+): RelationshipProjection {
   return relationshipView(
     { blocks: overrides.blocks ?? [] },
     { likes: overrides.likes ?? [], passes: overrides.passes ?? [] },
     { match: overrides.match ?? null },
+    standingOf,
   );
 }
 

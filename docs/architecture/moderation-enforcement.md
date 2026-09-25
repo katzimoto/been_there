@@ -165,13 +165,27 @@ genuine safety concern is exactly the person who must still reach a human.
 | `open`, `assigned`, `in_review`, `escalated` | `resolve` | `resolved` | moderator id + **decision id** |
 | `resolved` | `reopen` | `open` | moderator id + a stated reason |
 
+Each of these transitions publishes exactly one event under its own name — one
+name, one payload: `moderation.case_assigned` `{caseId, assignedModeratorId}`,
+`moderation.case_review_started` `{caseId, state}`,
+`moderation.case_escalated` `{caseId, reason}`,
+`moderation.case_reopened` `{caseId, state, clearedDecisionId}` and
+`moderation.case_resolved` `{caseId, decisionId}`. A reopen used to write its
+audit row and publish nothing, so a consumer watching cases could not see a
+resolution pointer move; `clearedDecisionId` names the decision the reopen
+detached, which is still in the record and still answerable on appeal.
+
 Two rules carry the weight:
 
 - **A case cannot close on a shrug.** `resolve` requires a decision id. Even a
   dismissal is a `Decision` with action `clear`, taken by a named moderator on
   the case. There is no "closed with no action" transition.
-- **Escalation is not self-service.** `canWorkCase` refuses a non-lead on an
-  `escalated` case, at assignment, at review start and at decision time.
+- **Every case operation is gated, not two of them.** `canWorkCase` refuses an
+  automated actor, and refuses a non-lead on an `escalated` case, at
+  assignment, review start, escalation, merge, reopen and decision time. There
+  is no case transition reachable without passing through it. Intake is the
+  deliberate exception: `openCase` accepts `openedBy: 'system'`, because opening
+  a case is not a judgement about a person.
 
 ### The three intake paths
 
@@ -292,14 +306,18 @@ never recomputed.
 `applyDecision` is a **thin adapter over the shared `accountMachine`**. The
 kernel's guards decide whether a restriction, suspension or ban is legal at all.
 Moderation's own preconditions are the ones the kernel does not hold — a case
-id, a moderator id, a rationale — plus one the kernel deliberately does not
-enforce: that a restriction names capabilities the account actually has, and
-**none** in `UNRESTRICTABLE_CAPABILITIES` (`report`, `block`, `delete_account`),
-which lives beside `CAPABILITIES_BY_ACCOUNT_STATE` in
+id, a human moderator id, a rationale — plus the one the kernel deliberately
+does not enforce: that a restriction names capabilities the account actually
+has, and **none** in `UNRESTRICTABLE_CAPABILITIES` (`report`, `block`,
+`delete_account`), which lives beside `CAPABILITIES_BY_ACCOUNT_STATE` in
 `packages/core/src/states/account.ts`. A moderator who types `report` into a
 restriction is refused rather than having the name silently dropped, because a
 decision that records fewer removals than the one taken is a decision nobody
-made. A missing `caseId` is a `validation_failed` refusal, not
+made. That refusal comes first, ahead of the "does the account hold it" check,
+so a capability that may never be removed is always reported as such —
+`delete_account` is granted only by `banned`, so from every other state the
+other message would name a capability the moderator could never have removed
+anyway. A missing `caseId` is a `validation_failed` refusal, not
 `invalid_transition`: the guard failed for want of input, which is a different
 thing from the transition being impossible, and a client can act on the
 difference.
@@ -307,22 +325,48 @@ difference.
 ```ts
 applyDecision({
   decisionId, caseId,      // null is a rejection, not a default
-  moderatorId,             // null is a rejection: automation never enforces
+  moderatorId,             // a HumanActorId, not an ActorId — see below
+  automated,               // must be stated false; a machine, or a caller
+                           // that says nothing, is refused
   subjectId, action, rationale,
   currentAccountState, removedCapabilities,
   decidedAt,
 }): Result<Decision, DomainError>
 ```
 
+### Automation never enforces, at both doors
+
+`applyDecision` and `applyReversal` are exported, so the human check cannot
+live only in the orchestrators that call them. It is enforced twice, and both
+halves are needed:
+
+- **The brand, which is load-bearing.** `moderatorId` is a `HumanActorId`, an
+  `ActorId` that only the package's own `asHumanActor` crossing point can mint
+  — and that function is not re-exported. The id a service already holds is not
+  assignable to it, so `applyDecision({moderatorId: 'system'})` does not compile
+  at all. The lie becomes a cast somebody had to write, at a site a reviewer can
+  find, instead of a value that flows silently.
+- **The claim, which is the runtime half.** `DecisionCommand.automated` is
+  required and is compared against `false` rather than tested for truth, so a
+  command that says `true` — and one that says nothing at all, which an untyped
+  caller can do — is refused with `permission_denied` inside the function that
+  produces the `Decision` an appeal is answered from.
+
+`decide` and `reverseDecision` pass both, after `canWorkCase` has already
+refused an automated actor; the cast they perform is a narrowing the gate has
+made true. What is left is irreducible in the type system: a caller can write
+`asHumanActor`'s result by hand and state `automated: false`. That is two
+deliberate acts in one expression, not a default.
+
 ### Decision matrix
 
 | Action | Required preconditions | Account event | Resulting standing | Reversible by |
 |--------|------------------------|---------------|--------------------|---------------|
-| `warn` | case id, moderator id, rationale ≥ 20 chars | — | unchanged (`active`/current) | Nothing to lift: a warning is a recorded conversation, not a sanction |
-| `clear` | case id, moderator id, rationale | — | unchanged | n/a — this *is* the absence of a sanction |
-| `restrict` | the above **+ ≥ 1 named removed capability** the account actually holds | `restrict` | `limited` | `lift_restriction` on a new decision, or case reopen |
-| `suspend` | case id, moderator id, rationale | `suspend` | `suspended` | `reinstate` on a new decision, or case reopen |
-| `ban` | case id, moderator id, rationale | `ban` | `banned` | `lift_ban` on a new decision, or case reopen |
+| `warn` | case id, human moderator id, rationale ≥ 20 chars | — | unchanged (`active`/current) | Nothing to lift: a warning is a recorded conversation, not a sanction |
+| `clear` | case id, human moderator id, rationale | — | unchanged | n/a — this *is* the absence of a sanction |
+| `restrict` | the above **+ ≥ 1 named removed capability** the account actually holds, and none that may never be removed | `restrict` | `limited` | `lift_restriction` on a new decision, or case reopen |
+| `suspend` | case id, human moderator id, rationale | `suspend` | `suspended` | `reinstate` on a new decision, or case reopen |
+| `ban` | case id, human moderator id, rationale | `ban` | `banned` | `lift_ban` on a new decision, or case reopen |
 
 A restriction may only name capabilities the account holds *now*: naming one it
 has already lost is a validation failure, because a decision that mis-explains
@@ -425,9 +469,10 @@ deliver that, and each is tested:
 
 The case stays `resolved` across a reversal: that review really happened and
 really produced that decision. The appeal reviewer reads two rows and a second
-decision, which is the honest sequence. `case.reopen` exists as the entry point
-a future appeal process will use; today only a moderator may take it, with a
-stated reason.
+decision, which is the honest sequence. `reopenCase` is the entry point a future
+appeal process will use; today only a human moderator may take it, with a
+stated reason, and it publishes `moderation.case_reopened` naming the decision it
+detached from the case.
 
 ## 9. Open questions
 
@@ -454,6 +499,12 @@ gap.
   second crossing point is worse than an unbranded one, because validation added
   later would have two homes. They are `string` aliases in `src/ids.ts` until
   the kernel re-exports `Brand`.
+  `HumanActorId` is the one place the duplication is already paid, and it is
+  deliberate rather than convenient: the alternative to a private brand was an
+  `ActorId` parameter that any service could satisfy with the id it minted for
+  itself, which is the commitment this exists to hold. It is a brand plus one
+  named minting function in the same file, and it should collapse into
+  `Brand<ActorId, 'HumanActorId'>` the moment the kernel exports `Brand`.
 - **Composition of `limited`.** Per the overview, the account model is a strict
   ladder. A suspended-then-restricted account is a v0.2 question and moderation
   inherits whatever the kernel decides.

@@ -83,6 +83,9 @@ function summary(dataset) {
     const state = match.ended === null ? 'open' : `ended (${match.ended.cause})`;
     lines.push(`  ${match.matchId.padEnd(26)}${state}`);
   }
+  for (const entry of dataset.passes) {
+    lines.push(`  pass ${entry.passId.padEnd(26)}${entry.state} (${entry.from} -> ${entry.to})`);
+  }
   for (const conversation of dataset.conversations) {
     lines.push(`  conversation ${conversation.conversationId}: ${conversation.state}, ${conversation.messages.length} message(s)`);
     for (const message of conversation.messages) {
@@ -150,6 +153,7 @@ function jsonView(dataset) {
       users: dataset.users,
       riskAssessments: dataset.riskAssessments,
       matches: dataset.matches,
+      passes: dataset.passes,
       conversations: dataset.conversations,
       blocks: dataset.blocks,
       contact: dataset.contact,

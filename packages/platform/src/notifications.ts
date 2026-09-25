@@ -10,6 +10,7 @@ import { type NotificationId } from './ids.js';
 import {
   NOTIFICATION_CHANNELS,
   NOTIFICATION_KINDS,
+  type NotificationContentToken,
   type NotificationCategory,
   type NotificationChannel,
   type NotificationKind,
@@ -89,6 +90,27 @@ export const DEFAULT_NOTIFICATION_PREFERENCE: NotificationPreference = {
 };
 
 /**
+ * Categories whose notices are non-suppressible whatever the row says.
+ *
+ * `verification` is here because the five notices in it answer the one question
+ * a user cannot answer for themselves — whether they are discoverable at all —
+ * and a mute switch on that answer is a switch on their own visibility. The row
+ * flag `critical` is what the per-pair delivery check reads, and it is also
+ * still the mechanism for `account` and `safety`, where criticality is a
+ * property of the *notice*: `account.restriction.applied` is about the
+ * recipient's own standing and `report.received` is a receipt for a report they
+ * filed, and the two cannot be told apart from the category alone.
+ *
+ * So the category rule is a floor under the row flag rather than a replacement
+ * for it. Without this floor the property is only as strong as the next row
+ * someone adds: `critical` is typed, but it is authored, and an authored flag
+ * on a twenty-second verification row is how "a verification notice is not
+ * suppressible" quietly stops being true. A category in this list is muteable
+ * for no value of `critical`.
+ */
+export const NON_SUPPRESSIBLE_CATEGORIES: readonly NotificationCategory[] = ['verification'];
+
+/**
  * Why nothing was sent. One reason per fact: a channel the recipient has not
  * switched on for that category is the same fact whether they muted it or never
  * had it, so it is one value rather than two that a dashboard would have to
@@ -129,6 +151,17 @@ export interface NotificationPlan {
   readonly channel: NotificationChannel;
   readonly category: NotificationCategory;
   readonly critical: boolean;
+  /**
+   * The facts a body on this channel may bind — the catalogue row, carried
+   * forward rather than re-derived by whoever renders it.
+   *
+   * An adapter holding a plan must not look the catalogue up for itself: a
+   * re-derivation is a second answer to "what may this notice say", and the
+   * one that reaches the bytes would be whichever copy the adapter happened to
+   * read. `renderNotificationBody` takes the plan, so the set that constrains
+   * the body is the set the planner read.
+   */
+  readonly content: readonly NotificationContentToken[];
   readonly mode: NotificationDeliveryMode;
   readonly idempotencyKey: string;
   /**
@@ -255,6 +288,7 @@ function nextDigestBoundary(
 
 function plannedDelivery(
   spec: NotificationKindSpec,
+  critical: boolean,
   channel: NotificationChannel,
   preference: NotificationPreference,
   now: Date,
@@ -273,7 +307,7 @@ function plannedDelivery(
   // Non-critical push and email are held, not dropped. The in-app entry is the
   // durable record and is never deferred; a delayed safety notice would be
   // indistinguishable from no notice, and a critical one is never deferred at all.
-  if (!spec.critical && channel !== 'in_app' && isWithinQuietHours(preference.quietHours, now)) {
+  if (!critical && channel !== 'in_app' && isWithinQuietHours(preference.quietHours, now)) {
     return { mode: 'deferred', deliverAt: endOfQuietHours(preference.quietHours, now) };
   }
   return { mode: 'immediate', deliverAt: now };
@@ -287,6 +321,10 @@ function plannedDelivery(
  * and whether the recipient has it switched on. A critical notice is decided by
  * the first three alone, which is the point — no preference, and no setting, can
  * stand between a user and a notice about their own safety or standing.
+ *
+ * "Critical" is the row's own flag *or* membership of
+ * `NON_SUPPRESSIBLE_CATEGORIES`, resolved once and carried on the plan, so the
+ * mute check, the quiet-hours check and the renderer all read one answer.
  */
 export function planNotification(
   request: NotificationRequest,
@@ -299,6 +337,11 @@ export function planNotification(
     });
   }
   const spec: NotificationKindSpec = NOTIFICATION_KINDS[request.kind];
+  // Resolved once and read three times: the opt-in check, the quiet-hours
+  // check, and the plan the adapter renders from. A verification notice that
+  // ignores a mute switch but is still deferred by quiet hours is a notice
+  // that is non-suppressible in name only.
+  const critical = spec.critical || NON_SUPPRESSIBLE_CATEGORIES.includes(spec.category);
 
   if (spec.channels[request.channel].mode === 'off') {
     return domainError('validation_failed', 'platform', 'channel is not used for this kind', {
@@ -343,14 +386,14 @@ export function planNotification(
     return ok(suppressed('channel_unavailable'));
   }
 
-  if (!spec.critical) {
+  if (!critical) {
     const optedIn = preference.channelOptIn[spec.category] ?? [];
     if (!optedIn.includes(request.channel)) {
       return ok(suppressed('channel_muted'));
     }
   }
 
-  const { mode, deliverAt } = plannedDelivery(spec, request.channel, preference, request.now);
+  const { mode, deliverAt } = plannedDelivery(spec, critical, request.channel, preference, request.now);
 
   return ok({
     notificationId: request.notificationId,
@@ -358,7 +401,8 @@ export function planNotification(
     kind: request.kind,
     channel: request.channel,
     category: spec.category,
-    critical: spec.critical,
+    critical,
+    content: spec.channels[request.channel].content,
     mode,
     idempotencyKey: idempotencyKeyFor(request),
     deliverAt,

@@ -101,20 +101,23 @@ the published event, not as extra edges in the table.
 - A **pass is a soft hide, not a veto**: it removes the candidate from the
   passer's discovery for a **30-day window** (`PASS_SUPPRESSION_DAYS`), and a
   later like by the same person supersedes it immediately — the like names the
-  pass it overrode in `supersededPassId`, and the pass record moves to
-  `superseded`. Only a block is permanent.
+  pass it overrode in `supersededPassId`, and `recordLike` returns that pass
+  moved to `superseded`. Only a block is permanent.
 - **A pass is a window, not a tombstone, and the clock is an argument.**
   `isPassInEffect(pass, at)` is the single definition of "suppresses right now",
   and `DiscoverySnapshot` carries `now` for exactly that reason: a pass that has
   expired suppresses nobody, so a decision the user cannot review cannot become
   a permanent exclusion.
 - **A like after a pass, and a match across a pass, are one rule read twice.**
-  `interactionMachine` lets a passer like; `recordLike` supersedes that pass;
-  `resolveMatch` then finds no pass in effect in either direction and matches.
-  The counterpart's own pass is untouched and still refuses, because one
-  person's like cannot speak for the other party's pass. The three functions are
-  exercised together in `interaction.test.ts`; they were not, which is how they
-  came to disagree.
+  `interactionMachine` lets a passer like; `recordLike` supersedes that pass in
+  the pass list it returns, so `resolveMatch` — given the list the like
+  produced — finds no pass in effect in either direction and matches, and
+  discovery no longer reports `already_passed` to the party who liked. The
+  counterpart's own pass is untouched and still refuses, because one person's
+  like cannot speak for the other party's pass. Both writers return
+  `InteractionOutcome` (ledger *and* passes) for that reason: a caller cannot
+  keep one list and discard the other, which is how a live pass and a like
+  claiming to have overridden it used to sit in the same data set.
 - **Nothing is deleted.** A retracted like, a superseded pass, an ended match
   and a released block are all states on retained records, so a pair that once
   existed can always be reported — see §3.2.
@@ -176,10 +179,14 @@ is the whole reason it is modelled as two entries:
 | counterpart lost `send_message` | `restricted_by_target` | `active` |
 | counterpart cannot appear in the product | `closed_by_target` | `active` |
 
-`deriveMatchStandings(match, standingOf)` computes the four degraded rows from
-the two current `SubjectStandingProjection`s, and reads **only** a capability or
-a visibility bit — never a reason — so a `restricted_by_target` line can name
-the missing capability without ever naming the case that removed it. It never
+The four degraded rows are **not written**. They are computed on read:
+`relationshipView` calls `deriveMatchStandings(match, standingOf)` with the two
+current `SubjectStandingProjection`s and puts the result in the match it hands
+the reader, so the rule runs on every read rather than only when a match
+happens to be written — a moderated removal that writes nothing to the match
+still degrades the row it degrades. It reads **only** a capability or a
+visibility bit — never a reason — so a `restricted_by_target` line can name the
+missing capability without ever naming the case that removed it. It never
 reopens an ended match: a `closed_*` standing outranks a degradation, because
 `dormant_*` and `restricted_*` are degradations that clear themselves and
 `closed_*` are ends.
@@ -429,9 +436,10 @@ carries `version` (`DATING_READ_MODEL_VERSION`). `selectEligibleCards` refuses a
 model whose version it does not publish rather than guessing at its shape, so a
 consumer that has not been rebuilt against a new version fails closed. The
 relationship projection is derived from the block, ledger and match projections
-by `relationshipView`, so it cannot disagree with them about the same pair.
-Cards are viewer-scoped: `distance` is the separation from the viewer the page
-was rendered for.
+by `relationshipView`, which is also handed the standing lookup: it re-derives
+the match's two standings there, so the match a reader holds is the match as of
+that read and not as of the last write (§3.2). Cards are viewer-scoped:
+`distance` is the separation from the viewer the page was rendered for.
 
 `selectEligibleCards` is the only function that turns a model into a page. It
 applies the gate in candidate-store order and performs **no ranking** — see open

@@ -186,6 +186,8 @@ They look like the same table with different retention. They are not.
 | Expiry | Retention is a legal question | Retention is a budget question |
 | Consumers | Moderation, appeals, incident review | Product engineering |
 
+
+
 **What goes where.** The three rules, in the order `routeEvent()` applies them:
 
 1. **Content goes to neither sink.** A metrics sink is aggregatable and
@@ -241,6 +243,45 @@ neither double-counts nor flickers between runs, and the correlation id is the
 only key the sink is allowed to see: `userId` and `sessionId` are forbidden
 properties, so a hash over either of them is not merely unwise, it is
 unconstructible.
+
+### The two audit logs are not the same log
+
+The repository contains both, and the one every production call site writes to
+is not the one that classifies. Stated here because the pair reads as a
+duplication until somebody says which half is the system of record.
+
+| | Platform `InMemoryAuditLog` | Moderation `AuditLog` |
+|---|---|---|
+| Job | classification and access control | the domain's reconstruction of its own chain |
+| Carries | a `sensitivity` per record, from `AUDIT_ACTIONS` | no classification of any kind |
+| Reads | `read({ upTo })` decides from the **reader's** clearance | `byActor` / `bySubject` / `byEntity` / `forCase`, no clearance anywhere |
+| `append` | `Result<AuditRecord, DomainError>`; an unclassified name is a `validation_failed` domain error rather than a `TypeError` | returns the entry; there is nothing for it to refuse |
+| Written by | `routeEvent` and `auditRequestFromEvent` | `ctx.audit.append`, at all fifteen call sites in `packages/moderation/src` |
+
+**Which one an appeal is answered from: both, and they are not
+interchangeable.** The platform log is authoritative for *who may read the
+record*. All sixteen moderation actions are classified `restricted`, so the
+reply to "you were banned, here is the case, contest it here" has to be
+readable by a `senior_moderator` and by nobody below one, and that cell is
+`read({ upTo })`'s to decide rather than a role's to be trusted about. The
+moderation log is authoritative for *what the chain said* — the reversal path,
+the decision id, the evidence ids — because those are domain facts Platform
+has no vocabulary for and must not invent.
+
+**The gap, named rather than left to be discovered.** The chain that runs
+today is the unclassified one. `new InMemoryAuditLog(` appears in no package's
+`src/`; its only callers are the development dataset and Platform's own
+tests, so a deployed system would hold an appeal record with no sensitivity on
+it. The two logs are not connected by accident, though: `NewAuditEntry.detail`
+is an unclassified `Record<string, string | number | boolean | null>` and
+`AuditAppendRequest.fields` demands `ClassifiedField[]`, so the adapter has to
+be written by someone who decides what each detail field *is*. That is
+precisely the decision that must not be made by default — it is the same
+classification every other field in the system makes, one level up. The
+vocabulary is not the outstanding work: all sixteen names already agree with
+the moderation source, and `moderation-audit-contract.test.ts` derives its
+list from that source, so a seventeenth action fails there rather than in
+production. See §13.
 
 ## 7. Location precision
 
@@ -362,14 +403,24 @@ access rather than screening. Until a media event or a scan audit action exists,
 Five rules, in the order `planNotification()` applies them:
 
 1. **The catalogue is the notification.** `NotificationKind` is the stable
-   identifier — twenty of them, in `NOTIFICATION_KINDS` — and each row states its
-   category, its class, which channels it uses and how urgently, whether it is
-   about one specific other person, and the closed set of facts a rendered body
-   may bind. The content vocabulary has no word for message text, so a template
-   cannot render one, and a kind that is not a row does not exist. That is what
-   makes "a notification's content is reviewable" a property of a table rather
-   than of a reviewer's memory.
-2. **`safety`, `account` and `verification` cannot be switched off.** A
+   identifier — twenty-one of them, in `NOTIFICATION_KINDS` — and each row
+   states its category, its class, which channels it uses and how urgently,
+   whether it is about one specific other person, and the closed set of facts
+   a rendered body may bind. A kind that is not a row does not exist, which is
+   what makes "a notification's content is reviewable" a property of a table
+   rather than of a reviewer's memory.
+2. **`verification` cannot be switched off; `account` and `safety` name their
+   critical rows.** `NON_SUPPRESSIBLE_CATEGORIES` is `['verification']`, and a
+   category in it is non-suppressible *whatever the row's own flag says* — so a
+   twenty-second verification row cannot become muteable by being written
+   `critical: false`. `account` and `safety` keep the per-row `critical` flag,
+   because there criticality is a property of the notice rather than of the
+   category: `account.restriction.applied` is about the recipient's own
+   standing, `report.received` is a receipt for a report they filed, and no
+   category-level rule can tell those apart. The resolved answer is read once
+   per plan and threaded to the mute check, the quiet-hours check and the plan
+   itself, because a rule that applied to a mute switch but not to a deferral
+   would leave a verification notice non-suppressible in name only. A
    quiet-hours setting that could silence "someone reported your photo" is a
    safety control operated by the person it protects, and a user who cannot be
    told their verification failed cannot know why they are no longer visible.
@@ -399,6 +450,55 @@ Five rules, in the order `planNotification()` applies them:
    channels is three distinct deliveries of one event. The kind is not part of
    the key: it is a function of the event, so including it would let one event
    claim the same channel twice.
+
+**The content vocabulary is enforced in two places, and the second is the one
+that matters.** `NOTIFICATION_CONTENT_TOKENS` is a closed union, so a
+catalogue row cannot *name* a message body. On its own that constrains the
+catalogue to itself — a type on data that was already reviewable — which is why
+the guarantee is made at the render boundary instead.
+`renderNotificationBody(plan, copy, facts)` is the only function in the
+repository that turns a set of facts into characters, and it refuses three
+ways:
+
+- a `{{slot}}` naming anything outside the union, `{{message_body}}` included.
+  This *is* the guarantee: there is no value that could fill such a slot and
+  no key a caller could spell to get one, so a template that tries comes back
+  as a `validation_failed` rather than as a body with a literal brace pair
+  sitting in the recipient's inbox;
+- a slot naming a real fact this kind does not declare on this channel, and a
+  value supplied for a fact it does not declare. Under-delivery and smuggling
+  are the same mistake, so they are one check — the supplied set and the
+  declared set must be equal;
+- a declared fact with no value, so the catalogue row is a promise the body
+  keeps rather than a suggestion.
+
+The bindable set arrives **on the plan** (`NotificationPlan.content`) rather
+than as a second lookup the adapter performs, so the set that reaches the bytes
+is the set the planner read and not whichever copy of the catalogue the adapter
+happened to open.
+
+**What the renderer does not do**, stated rather than left to be assumed: it
+does not police the literal prose. The copy is the notification layer's, owned
+by [Notifications §3.1](../features/notifications.md) and reviewed as a string
+like any other user-facing safety copy. And there is no caller: in the same way
+`planNotification` takes `kind` as a parameter, nothing in any package emits a
+notification today. `NOTIFICATION_KINDS` is a vocabulary of twenty-one rows and
+zero producers — "the catalogue is the whole of what a notification may say"
+is a contract Platform now enforces end to end for any caller that exists, and
+a claim about a caller that does not.
+
+**The in-app subset rule is conditional, and the condition is written down
+here because a conditional invariant read as a universal one is how the bug
+comes back.** "A channel may say less than the in-app record and never more"
+holds *wherever a kind has an in-app record*. Four kinds have none, and each
+has to match one of two structural shapes or the suite fails: either the
+durable record already exists under another kind in the same category
+(`message.digest`, whose per-message entry is `message.received`, and a second
+in-app entry per window would say the same thing twice), or the user cannot
+reach the app at all — a critical notice whose delivery guarantee is an
+immediate email and nothing else (`account.banned`, `account.recovery`,
+`account.deletion_completed`). An in-app surface added to any of them would be
+a surface nobody will ever render.
 
 `sms` is not a notification channel. A phone number is personal data the account
 does not have to disclose in order to receive product mail, and a safety notice
@@ -518,3 +618,11 @@ gap.
 - **Band width per market.** 8/40/160 km suits a dense city market. A rural
   market, or a market where people drive between cities, may need different
   edges, and the band vocabulary is a client-visible contract.
+- **Classifying the moderation audit chain.** §6 says which log answers an
+  appeal and which one runs; the two are not connected, and the adapter that
+  connects them has to classify `NewAuditEntry.detail` field by field before
+  it can be written. That is a Moderation decision wearing a Platform type, so
+  it belongs to whoever owns the moderation payload schema, not to a default
+  that marks everything `restricted` and calls the case closed. Until it
+  exists, the classified sink guards the vocabulary and the runtime chain
+  guards nothing.

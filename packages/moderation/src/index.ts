@@ -1,4 +1,6 @@
-export * from './ids.js';
+// Types only: `asHumanActor` is deliberately not part of the package surface,
+// so nothing outside moderation can mint the id a decision is recorded under.
+export { type DecisionId, type EvidenceId, type HumanActorId } from './ids.js';
 export * from './audit.js';
 export * from './events.js';
 export * from './evidence.js';

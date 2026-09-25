@@ -10,9 +10,10 @@ import type { PassId } from './ids.js';
  *     a bad day cannot remove a person from a pool permanently, so a decision
  *     that cannot be reviewed by the person who made it does not get to be
  *     permanent. Thirty days is the window both feature specs name.
- *  2. **The same user can override it.** A like is an affirmative act, so it
- *     supersedes the liker's own pass over that person and nothing else — one
- *     person's like cannot speak for the other party's pass.
+ *  2. **The same user can override it.** A like is an affirmative act, so
+     `recordLike` moves the liker's own pass over that person to `superseded`
+     in the pass list it returns — and nothing else, because one person's like
+     cannot speak for the other party's pass.
  *  3. **It never reaches a match.** `resolveMatch` refuses while a pass is in
  *     effect in either direction, so an in-effect pass is exactly a suppressed
  *     candidate, and the two rules are the same rule read at two moments.
@@ -59,14 +60,3 @@ export function isPassInEffect(pass: PassRecord, at: Date): boolean {
   return pass.state === 'live' && at.getTime() < passSuppressesUntil(pass).getTime();
 }
 
-export function supersedePasses(
-  passes: readonly PassRecord[],
-  liker: UserId,
-  target: UserId,
-): readonly PassRecord[] {
-  return passes.map((pass) =>
-    pass.state === 'live' && pass.from === liker && pass.to === target
-      ? { ...pass, state: 'superseded' }
-      : pass,
-  );
-}

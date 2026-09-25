@@ -85,16 +85,35 @@ export interface RelationshipProjection {
 }
 
 /**
+ * The one question a read of this pair must be able to answer about a user,
+ * resolved against the projections as they stand *now*.
+ */
+export type StandingLookup = (user: UserId) => SubjectStandingProjection | null;
+
+/**
  * Assembles that view from the three projections, so the gate can never see a
  * relationship assembled by two different code paths that disagree about the
  * same pair.
+ *
+ * The match it carries is re-derived, not passed through: `MatchRecord.standings`
+ * is written when the match is created and when it ends, and a counterpart who
+ * was restricted or removed afterwards must degrade their party's row without
+ * anyone writing to the match. Reading through this function is therefore the
+ * only way to get a standing, which is what keeps the degraded rows reachable
+ * rather than documented.
  */
 export function relationshipView(
   blocks: BlockListProjection,
   ledger: InteractionLedgerProjection,
   match: MatchProjection,
+  standingOf: StandingLookup,
 ): RelationshipProjection {
-  return { blocks: blocks.blocks, likes: ledger.likes, passes: ledger.passes, match: match.match };
+  return {
+    blocks: blocks.blocks,
+    likes: ledger.likes,
+    passes: ledger.passes,
+    match: match.match === null ? null : { ...match.match, standings: deriveMatchStandings(match.match, standingOf) },
+  };
 }
 
 /**
@@ -140,10 +159,14 @@ export interface DatingReadModel {
  * `restricted_by_target` line can name the capability that is missing without
  * ever naming the case that removed it. An end outranks a degradation: once a
  * match is closed, a standing change does not reopen it.
+ *
+ * `relationshipView` is the caller: it is the only path that assembles a
+ * relationship for a reader, so this rule runs on every read rather than only
+ * when a match happens to be written.
  */
 export function deriveMatchStandings(
   match: MatchRecord,
-  standingOf: (user: UserId) => SubjectStandingProjection | null,
+  standingOf: StandingLookup,
 ): readonly [MatchStanding, MatchStanding] {
   if (match.standings.some((standing) => CLOSED_STANDINGS[standing])) {
     return match.standings;

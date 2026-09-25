@@ -122,6 +122,28 @@ export function verifyDataset(dataset) {
     problems.push('an unblocked, matched pair is not allowed to make contact');
   }
 
+  // A pass and the match that crossed it must not both be in the dataset. The
+  // failure this catches is a like that *claims* to have overridden a pass it
+  // did not: the records would then hold a live pass and a match over the same
+  // pair, and the two rules that read a pass — the gate and the matcher — would
+  // disagree with the data. It is silent, and a green seed is exactly what
+  // makes it survive.
+  const samePair = (entry, first, second) =>
+    (entry.from === first && entry.to === second) || (entry.from === second && entry.to === first);
+  for (const match of dataset.matches) {
+    const [first, second] = match.participants;
+    for (const entry of dataset.passes) {
+      if (entry.state === 'live' && samePair(entry, first, second)) {
+        problems.push(`${match.matchId} stands across a pass that is still live (${entry.passId})`);
+      }
+    }
+  }
+  if (!dataset.passes.some((entry) => entry.state === 'superseded')) {
+    problems.push(
+      'the dataset has no superseded pass, so it does not exercise a like overriding a pass and the pair matching anyway',
+    );
+  }
+
   // The audit log must actually gate: a restricted record is invisible below
   // `restricted` and visible at it, and the role that may read the log at all is
   // the one with the restricted permission.

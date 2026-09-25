@@ -78,6 +78,7 @@ export function relationship(overrides: Partial<RelationshipProjection> = {}): R
     { blocks: overrides.blocks ?? [] },
     { likes: overrides.likes ?? [], passes: overrides.passes ?? [] },
     { match: overrides.match ?? null },
+    (user) => standing(user),
   );
 }
 

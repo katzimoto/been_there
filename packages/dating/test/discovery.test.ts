@@ -4,6 +4,7 @@ import {
   BROWSE_DISCOVERY_CAPABILITY,
   DATING_READ_MODEL_VERSION,
   DISCOVERABLE_IDENTITY_STATE,
+  EMPTY_LEDGER,
   type CandidateCardProjection,
   type DatingReadModel,
   type DiscoverySnapshot,
@@ -14,6 +15,8 @@ import {
   STANDING_PROJECTION_VERSION,
   type SubjectStandingProjection,
   evaluateEligibility,
+  recordLike,
+  recordPass,
   selectEligibleCards,
 } from '../src/index.js';
 import {
@@ -22,11 +25,13 @@ import {
   B,
   C,
   DAYS,
+  LATER,
   block,
   like,
   matchRecord,
   pass,
   relationship,
+  succeeded,
   standing,
 } from './fixtures.js';
 
@@ -282,16 +287,24 @@ describe('discovery eligibility', () => {
 });
 
 describe('selectEligibleCards', () => {
-  const cardFor = (user: typeof B | typeof C): CandidateCardProjection => ({
-    projectionVersion: STANDING_PROJECTION_VERSION,
-    userId: user,
-    displayName: 'Card',
-    age: 30,
-    genderIdentities: ['woman'],
-    bio: 'bio',
-    photoIds: [],
-    distance: 'lt_5_km',
-  });
+  const cards: Record<string, CandidateCardProjection> = {
+    [A]: { ...card(B), userId: A },
+    [B]: card(B),
+    [C]: { ...card(B), userId: C },
+  };
+
+  function card(user: typeof A | typeof B | typeof C): CandidateCardProjection {
+    return {
+      projectionVersion: STANDING_PROJECTION_VERSION,
+      userId: user,
+      displayName: 'Card',
+      age: 30,
+      genderIdentities: ['woman'],
+      bio: 'bio',
+      photoIds: [],
+      distance: 'lt_5_km',
+    };
+  }
 
   function model(overrides: Partial<DatingReadModel>): DatingReadModel {
     const standings: Record<string, SubjectStandingProjection> = {
@@ -302,8 +315,7 @@ describe('selectEligibleCards', () => {
     return {
       version: DATING_READ_MODEL_VERSION,
       standingFor: (user) => standings[user] ?? null,
-      cardFor: (_viewer, candidate) =>
-        candidate === B ? cardFor(B) : candidate === C ? cardFor(C) : null,
+      cardFor: (_viewer, candidate) => cards[candidate] ?? null,
       relationshipFor: () => relationship(),
       ...overrides,
     };
@@ -339,5 +351,41 @@ describe('selectEligibleCards', () => {
     const passed = model({ relationshipFor: () => relationship({ passes: [pass(A, B)] }) });
     expect(selectEligibleCards(A, passed, [B], AT)).toEqual([]);
     expect(selectEligibleCards(A, passed, [B], DAYS(PASS_SUPPRESSION_DAYS)).map((entry) => entry.userId)).toEqual([B]);
+  });
+});
+
+describe('a pass and the like that overrides it', () => {
+  // Each pair is recorded through `recordPass` and `recordLike`, because the
+  // property is not "a superseded pass is ignored" — it is that a like
+  // supersedes one, so the gate and the matcher, which share `isPassInEffect`,
+  // read the same thing about the same pair.
+  it('reports the viewer’s own like, not the pass that like overrode', () => {
+    const passed = succeeded(recordPass(EMPTY_LEDGER, [], pass(A, B, 'pass-a-b')));
+    const liked = succeeded(
+      recordLike(passed.ledger, like(A, B, 'like-a-b'), {
+        actor: standing(A),
+        target: standing(B),
+        blocks: [],
+        passes: passed.passes,
+        at: LATER,
+      }),
+    );
+    const view = relationship({ likes: liked.ledger.likes, passes: liked.passes });
+    expect(reasonOf(snapshotWith(standing(A), standing(B), view, LATER))).toBe<EligibilityReason>('already_liked');
+  });
+
+  it('still hides the pair from a passer, whose own pass a counterpart’s like cannot clear', () => {
+    const passed = succeeded(recordPass(EMPTY_LEDGER, [], pass(A, B, 'pass-a-b')));
+    const liked = succeeded(
+      recordLike(passed.ledger, like(B, A, 'like-b-a'), {
+        actor: standing(B),
+        target: standing(A),
+        blocks: [],
+        passes: passed.passes,
+        at: LATER,
+      }),
+    );
+    const view = relationship({ likes: liked.ledger.likes, passes: liked.passes });
+    expect(reasonOf(snapshotWith(standing(A), standing(B), view, LATER))).toBe<EligibilityReason>('already_passed');
   });
 });

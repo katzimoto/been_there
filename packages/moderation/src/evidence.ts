@@ -245,8 +245,12 @@ export function captureEvidence(
  * `automated` must be set by the caller that resolved the actor's identity, and
  * it exists so that commitment 2 — automation never enforces — is checkable
  * rather than merely documented. A non-null actor id is not evidence of a
- * human: any service can mint an id. Only this flag distinguishes them, and
- * `canWorkCase` refuses an automated actor outright.
+ * human: any service can mint an id, and this flag is a claim rather than a
+ * proof. `canWorkCase` refuses an automated actor outright, and every command
+ * that acts on a case goes through it. Where that is not enough — the decision
+ * adapters are exported and callable on their own — the claim is carried on the
+ * command as `automated` and the id it names is a `HumanActorId`; see
+ * `decision.ts` and `ids.ts`.
  */
 export interface ModeratorActor {
   readonly actorId: ActorId;

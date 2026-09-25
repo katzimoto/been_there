@@ -11,6 +11,7 @@ import {
   type SubjectId,
 } from '@been-there/core';
 import { type AuditLog, createAuditLog } from './audit.js';
+import type { CaseState } from './case.js';
 import type { DecisionId } from './ids.js';
 
 /**
@@ -43,8 +44,10 @@ export const MODERATION_EVENT_TYPES = [
   'moderation.report_status_changed',
   'moderation.case_opened',
   'moderation.case_assigned',
+  'moderation.case_review_started',
   'moderation.case_escalated',
   'moderation.case_reports_merged',
+  'moderation.case_reopened',
   'moderation.case_resolved',
   'moderation.evidence_captured',
   'moderation.evidence_read',
@@ -89,6 +92,37 @@ export interface RestrictionAppliedPayload extends Readonly<Record<string, unkno
   readonly decisionId: DecisionId;
   readonly accountState: AccountState;
   readonly removedCapabilities: readonly string[];
+}
+
+/**
+ * One name, one payload. `moderation.case_assigned` used to be published by
+ * both the assignment and the start of a review, with the second emission
+ * swapping `assignedModeratorId` for `state`; a consumer reading
+ * `payload.assignedModeratorId` then got `undefined` and could not tell an
+ * assignment from a review beginning. Every name below therefore has exactly
+ * one payload interface and exactly one publisher.
+ */
+export interface CaseAssignedPayload extends Readonly<Record<string, unknown>> {
+  readonly caseId: CaseId;
+  readonly assignedModeratorId: ActorId;
+}
+
+export interface CaseReviewStartedPayload extends Readonly<Record<string, unknown>> {
+  readonly caseId: CaseId;
+  readonly state: CaseState;
+}
+
+/**
+ * A reopen is a case going back into a queue, so it is on the bus like every
+ * other case transition. `clearedDecisionId` is the decision the reopen
+ * detached from the case: it is not deleted, and an appeal reads the chain —
+ * but a consumer that only watches cases must be able to see that the pointer
+ * moved.
+ */
+export interface CaseReopenedPayload extends Readonly<Record<string, unknown>> {
+  readonly caseId: CaseId;
+  readonly state: CaseState;
+  readonly clearedDecisionId: DecisionId | null;
 }
 
 export interface EmitSpec<P extends Readonly<Record<string, unknown>>> {

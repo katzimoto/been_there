@@ -193,11 +193,16 @@ export function loadDevelopmentDataset() {
   ];
 
   // --- Dating: two matches, one of which a block will end. ------------------
+  //
+  // Avery passes Blair and then likes them, so the dataset walks the pass
+  // window and the override of it rather than only the easy case: the match has
+  // to happen across a pass the liker themselves made, which is only true if
+  // the like actually superseded it.
 
-  const abLedger = mutualLikes(standings, 'u-avery', 'u-blair', now);
-  const abMatch = matchFromLedger(abLedger, 'u-blair', 'u-avery', asConversation('conv-avery-blair'));
-  const rfLedger = mutualLikes(standings, 'u-riley', 'u-frankie', now);
-  const rfMatch = matchFromLedger(rfLedger, 'u-frankie', 'u-riley', asConversation('conv-riley-frankie'));
+  const abLikes = mutualLikes(standings, 'u-avery', 'u-blair', now, { passer: 'u-avery' });
+  const abMatch = matchFromLedger(abLikes, 'u-blair', 'u-avery', asConversation('conv-avery-blair'));
+  const rfLikes = mutualLikes(standings, 'u-riley', 'u-frankie', now);
+  const rfMatch = matchFromLedger(rfLikes, 'u-frankie', 'u-riley', asConversation('conv-riley-frankie'));
 
   const abProjection = {
     matchId: abMatch.matchId,
@@ -222,7 +227,7 @@ export function loadDevelopmentDataset() {
     'u-frankie',
     'block-riley-frankie',
     rfMatch,
-    rfLedger,
+    rfLikes.ledger,
     now,
   );
   const contact = {
@@ -448,6 +453,7 @@ export function loadDevelopmentDataset() {
     riskAssessments,
     matches: [abMatch, endedMatch],
     conversations: [{ ...conversation, messages }],
+    passes: abLikes.passes,
     blocks: [block],
     contact,
     report: submission.report,

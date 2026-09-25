@@ -16,7 +16,12 @@ import {
   ok,
 } from '@been-there/core';
 import { type EvidenceRecord, type ModeratorActor, captureEvidence } from './evidence.js';
-import type { ModerationContext } from './events.js';
+import {
+  type CaseReopenedPayload,
+  type CaseAssignedPayload,
+  type CaseReviewStartedPayload,
+  type ModerationContext,
+} from './events.js';
 import type { DecisionId, EvidenceId } from './ids.js';
 import {
   type CasePriority,
@@ -419,13 +424,13 @@ export function assignCase(ctx: ModerationContext, command: CaseCommand): Result
     updatedAt,
   };
 
-  ctx.events.emit({
+  ctx.events.emit<CaseAssignedPayload>({
     type: 'moderation.case_assigned',
     actorId: command.actor.actorId,
     subjectId: updated.subjectId,
     correlationId: command.correlationId,
     sensitivity: 'restricted',
-    payload: { caseId: updated.caseId, assignedModeratorId: updated.assignedModeratorId },
+    payload: { caseId: updated.caseId, assignedModeratorId: command.actor.actorId },
   });
   ctx.audit.append({
     occurredAt: updatedAt,
@@ -462,8 +467,8 @@ export function startCaseReview(
   const updatedAt = ctx.now();
   const updated: Case = { ...command.moderationCase, state: next.value, updatedAt };
 
-  ctx.events.emit({
-    type: 'moderation.case_assigned',
+  ctx.events.emit<CaseReviewStartedPayload>({
+    type: 'moderation.case_review_started',
     actorId: command.actor.actorId,
     subjectId: updated.subjectId,
     correlationId: command.correlationId,
@@ -492,6 +497,10 @@ export function escalateCase(
   ctx: ModerationContext,
   command: ReasonedCaseCommand,
 ): Result<Case, DomainError> {
+  const permitted = canWorkCase(command.moderationCase, command.actor);
+  if (!permitted.ok) {
+    return permitted;
+  }
   const next = caseMachine.next(command.moderationCase.state, 'escalate', {
     moderatorId: command.actor.actorId,
     reason: command.reason,
@@ -532,6 +541,10 @@ export function reopenCase(
   ctx: ModerationContext,
   command: ReasonedCaseCommand,
 ): Result<Case, DomainError> {
+  const permitted = canWorkCase(command.moderationCase, command.actor);
+  if (!permitted.ok) {
+    return permitted;
+  }
   const next = caseMachine.next(command.moderationCase.state, 'reopen', {
     moderatorId: command.actor.actorId,
     reason: command.reason,
@@ -546,6 +559,22 @@ export function reopenCase(
     resolutionDecisionId: null,
     updatedAt,
   };
+
+  // A reopen is a case going back into a queue. It was invisible on the bus
+  // while writing a `case.reopened` audit row, so a consumer watching cases
+  // could never see the resolution pointer move.
+  ctx.events.emit<CaseReopenedPayload>({
+    type: 'moderation.case_reopened',
+    actorId: command.actor.actorId,
+    subjectId: updated.subjectId,
+    correlationId: command.correlationId,
+    sensitivity: 'restricted',
+    payload: {
+      caseId: updated.caseId,
+      state: updated.state,
+      clearedDecisionId: command.moderationCase.resolutionDecisionId,
+    },
+  });
 
   ctx.audit.append({
     occurredAt: updatedAt,
@@ -578,6 +607,10 @@ export interface MergeOutcome {
  * captured evidence, and each moves to `merged` pointing at the case. The case's
  * evidence is the union, deduplicated by id and order-preserving, so a moderator
  * reads each artefact once and can still see which report brought it.
+ *
+ * A merge rewrites a case, so it goes through `canWorkCase` like every other
+ * case operation even though it changes no standing: intake is automated
+ * (`openedBy: 'system'`), working a case is not.
  */
 export function mergeReports(
   ctx: ModerationContext,
@@ -586,6 +619,10 @@ export function mergeReports(
   actor: ModeratorActor,
   correlationId: CorrelationId,
 ): Result<MergeOutcome, DomainError> {
+  const permitted = canWorkCase(moderationCase, actor);
+  if (!permitted.ok) {
+    return permitted;
+  }
   if (moderationCase.state === 'resolved') {
     return domainError(
       'conflict',

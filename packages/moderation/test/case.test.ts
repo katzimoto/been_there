@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { assertMachineIsTotal } from '@been-there/core';
 import {
   type Case,
+  type CaseReopenedPayload,
+  type ModerationEventType,
+  type ModeratorActor,
   assignCase,
   caseMachine,
   canWorkCase,
@@ -10,9 +13,11 @@ import {
   mergeReports,
   openCase,
   reopenCase,
+  startCaseReview,
 } from '../src/index.js';
 import {
   CORRELATION,
+  type Harness,
   LEAD,
   MODERATOR,
   SUBJECT,
@@ -24,8 +29,27 @@ import {
   rejected,
   succeeded,
   submitAndTriage,
+  triagedCaseFromReport,
   trustSafetyIntake,
 } from './support.js';
+
+/** A case taken all the way to `resolved`, by a human. */
+function decided(h: Harness, assigned: Case): Case {
+  const reviewed = succeeded(
+    startCaseReview(h.ctx, { moderationCase: assigned, actor: MODERATOR, correlationId: CORRELATION }),
+  );
+  return succeeded(
+    decide(h.ctx, {
+      moderationCase: reviewed,
+      actor: MODERATOR,
+      action: 'restrict',
+      rationale: 'Harassment pattern across three conversations.',
+      currentAccountState: 'active',
+      removedCapabilities: ['send_message'],
+      correlationId: CORRELATION,
+    }),
+  ).moderationCase;
+}
 
 describe('the authority gate refuses automated actors', () => {
   const reviewedCase = () => {
@@ -56,6 +80,71 @@ describe('the authority gate refuses automated actors', () => {
       correlationId: CORRELATION,
     });
     expect(rejected(outcome)).not.toBeNull();
+  });
+
+  it('refuses every case command to an automated actor, not just two of them', () => {
+    // `escalateCase` and `reopenCase` used to skip the gate entirely, so an
+    // actor the domain calls a machine could escalate a case and pull a
+    // resolved one — and its resolution pointer — back into the queue. One
+    // table over all four commands, because the property is that none of them
+    // is a way round it.
+    const h = harness();
+    const opened = openCaseFromReport(h, succeeded(makeReport(h)));
+    const assigned = succeeded(
+      assignCase(h.ctx, { moderationCase: opened, actor: MODERATOR, correlationId: CORRELATION }),
+    );
+    const resolved = decided(h, assigned);
+    const bot: ModeratorActor = { ...LEAD, automated: true };
+    const reason = 'Possible non-consensual imagery; needs a lead and legal review.';
+
+    const paths = [
+      {
+        name: 'assignCase',
+        run: (actor: ModeratorActor) =>
+          assignCase(h.ctx, { moderationCase: opened, actor, correlationId: CORRELATION }),
+        lands: 'assigned',
+      },
+      {
+        name: 'startCaseReview',
+        run: (actor: ModeratorActor) =>
+          startCaseReview(h.ctx, { moderationCase: assigned, actor, correlationId: CORRELATION }),
+        lands: 'in_review',
+      },
+      {
+        name: 'escalateCase',
+        run: (actor: ModeratorActor) =>
+          escalateCase(h.ctx, { moderationCase: assigned, actor, reason, correlationId: CORRELATION }),
+        lands: 'escalated',
+      },
+      {
+        name: 'reopenCase',
+        run: (actor: ModeratorActor) =>
+          reopenCase(h.ctx, { moderationCase: resolved, actor, reason, correlationId: CORRELATION }),
+        lands: 'open',
+      },
+    ];
+
+    for (const path of paths) {
+      expect(rejected(path.run(bot)).code, path.name).toBe('permission_denied');
+      expect(succeeded(path.run(LEAD)).state, path.name).toBe(path.lands);
+    }
+  });
+
+  it('refuses a merge performed by automation too', () => {
+    // A merge rewrites the case — its reports, its evidence, its priority and
+    // its deadline — and it used to be the one case operation with no gate at
+    // all, reached with the same `ModeratorActor` the other four refuse.
+    const h = harness();
+    const { moderationCase } = triagedCaseFromReport(h);
+    const second = submitAndTriage(h, { reason: 'threats_or_violence' });
+    const bot: ModeratorActor = { ...LEAD, automated: true };
+
+    expect(rejected(mergeReports(h.ctx, moderationCase, [second], bot, CORRELATION)).code).toBe(
+      'permission_denied',
+    );
+    expect(
+      succeeded(mergeReports(h.ctx, moderationCase, [second], LEAD, CORRELATION)).mergedReportIds,
+    ).toEqual([second.reportId]);
   });
 });
 
@@ -278,5 +367,61 @@ describe('queue, priority and assignment', () => {
     expect(reopened.state).toBe('open');
     expect(reopened.resolutionDecisionId).toBeNull();
     expect(h.audit.byEntity('decision', outcome.decision.decisionId)).toHaveLength(1);
+  });
+});
+
+describe('what a case transition publishes', () => {
+  const REASON = 'User contests the restriction; new evidence supplied.';
+
+  /** Report → triage → case → assign → review → decide → reopen. */
+  function fullWalk(): { readonly h: Harness; readonly decisionId: string } {
+    const h = harness();
+    const assigned = succeeded(
+      assignCase(h.ctx, {
+        moderationCase: openCaseFromReport(h, succeeded(makeReport(h))),
+        actor: MODERATOR,
+        correlationId: CORRELATION,
+      }),
+    );
+    const outcome = decided(h, assigned);
+    succeeded(
+      reopenCase(h.ctx, { moderationCase: outcome, actor: LEAD, reason: REASON, correlationId: CORRELATION }),
+    );
+    return { h, decisionId: outcome.resolutionDecisionId ?? 'none' };
+  }
+
+  it('publishes a reopen, naming the decision it detached from the case', () => {
+    // The reopen used to write a `case.reopened` audit row and publish nothing
+    // at all, so a consumer watching cases could never see a resolution
+    // pointer move.
+    const { h, decisionId } = fullWalk();
+    const event = h.published.find((published) => published.type === 'moderation.case_reopened');
+    const payload = event?.payload as CaseReopenedPayload;
+
+    expect(Object.keys(payload).sort()).toEqual(['caseId', 'clearedDecisionId', 'state']);
+    expect(payload.state).toBe('open');
+    expect(payload.clearedDecisionId).toBe(decisionId);
+  });
+
+  it('publishes one payload shape per event name, on every path that publishes it', () => {
+    // `moderation.case_assigned` was published by both the assignment and the
+    // start of a review, the second emission swapping `assignedModeratorId` for
+    // `state`. A consumer could not tell the two apart, and nothing in the
+    // types noticed: `EmitSpec<P>` is generic and the event list names only.
+    const { h } = fullWalk();
+    const shapes = new Map<ModerationEventType, Set<string>>();
+    for (const event of h.published) {
+      // The context emits nothing but moderation events, so the envelope's
+      // wider `string` is this domain's vocabulary — the same narrowing
+      // `Harness.typesPublished` makes.
+      const type = event.type as ModerationEventType;
+      const keys = shapes.get(type) ?? new Set<string>();
+      keys.add(Object.keys(event.payload).sort().join(','));
+      shapes.set(type, keys);
+    }
+
+    for (const [type, keys] of shapes) {
+      expect(keys.size, `${type}: ${[...keys].join(' | ')}`).toBe(1);
+    }
   });
 });

@@ -29,9 +29,11 @@ import { DISCOVERABLE_IDENTITY_STATE, LIKE_CAPABILITY } from './read-models.js';
  *     right to report a property of what happened rather than of what survives.
  *
  *  3. **Preconditions are re-read at action time.** `recordLike` takes the two
- *     standings and the block edges as arguments, so "you cannot like after
- *     your verification lapsed" is a guard somebody can delete rather than a
- *     comment somebody can forget. A card served five minutes ago is not a
+ *     standings, the block edges and the pass list as arguments, so "you cannot
+ *     like after your verification lapsed" is a guard somebody can delete rather
+ *     than a comment somebody can forget, and the pass a like supersedes is
+ *     superseded in the list the same call returns rather than by a second
+ *     step somebody has to remember. A card served five minutes ago is not a
  *     licence to act on.
  */
 
@@ -112,8 +114,26 @@ export interface LikeActionContext {
 }
 
 /**
+ * What a write to the interaction ledgers returns. Both writes touch the pair
+ * of them, and a caller that kept only one list would be holding a lie: a like
+ * that supersedes a pass must be read together with the pass it superseded, or
+ * the same data set would say a pass is live and a like overrode it.
+ */
+export interface InteractionOutcome {
+  readonly ledger: LikeLedger;
+  readonly passes: readonly PassRecord[];
+}
+
+/**
  * Records a like, after re-reading every precondition that could have changed
  * since the candidate's card was served.
+ *
+ * A like is the liker's own later decision, so when they have an in-effect
+ * pass over the same person this action supersedes that pass and returns the
+ * updated list: `isPassInEffect` is false from here on, and both rules that read
+ * it — discovery's `already_passed` and `resolveMatch` — see the same fact. The
+ * counterpart's pass is never touched, because one person's like cannot speak
+ * for the other party's pass.
  *
  * Actor-side failures are reported honestly, because the actor is being told
  * about their own state and hiding it would only strand them. Target-side
@@ -124,7 +144,7 @@ export function recordLike(
   ledger: LikeLedger,
   like: NewLike,
   context: LikeActionContext,
-): Result<LikeLedger, DomainError> {
+): Result<InteractionOutcome, DomainError> {
   const { actor, target, blocks, passes, at } = context;
   if (like.from === like.to) {
     return domainError('validation_failed', 'dating.interaction', 'a user cannot like themselves');
@@ -151,23 +171,28 @@ export function recordLike(
   const existing = currentLikeBetween(ledger, like.from, like.to);
   if (existing !== null) {
     if (existing.likeId === like.likeId) {
-      return ok(ledger);
+      return ok({ ledger, passes });
     }
     if (existing.state === 'matched') {
       // The pair is already matched, so the like is on record and the liker is
       // told exactly that, rather than being handed a conflict for tapping twice.
-      return ok(ledger);
+      return ok({ ledger, passes });
     }
     return domainError('conflict', 'dating.interaction', 'this pair already has a like', {
       from: like.from,
       to: like.to,
     });
   }
-  const superseded = passes.find(
-    (pass) => isPassInEffect(pass, at) && pass.from === like.from && pass.to === like.to,
-  );
-  const record: LikeRecord = { ...like, state: 'live', supersededPassId: superseded?.passId ?? null };
-  return ok({ likes: [...ledger.likes, record] });
+  let supersededPassId: PassId | null = null;
+  const remainingPasses = passes.map((pass) => {
+    if (pass.from !== like.from || pass.to !== like.to || !isPassInEffect(pass, at)) {
+      return pass;
+    }
+    supersededPassId ??= pass.passId;
+    return { ...pass, state: 'superseded' as const };
+  });
+  const record: LikeRecord = { ...like, state: 'live', supersededPassId };
+  return ok({ ledger: { likes: [...ledger.likes, record] }, passes: remainingPasses });
 }
 
 /**
@@ -196,11 +221,6 @@ export function setLikeState(ledger: LikeLedger, likeIds: readonly LikeId[], sta
   };
 }
 
-export interface PassOutcome {
-  readonly ledger: LikeLedger;
-  readonly passes: readonly PassRecord[];
-}
-
 /**
  * Records a pass, which withdraws the passer's own live like over the same
  * person: a pass is the later decision, so it is the one that stands. The like
@@ -215,7 +235,7 @@ export function recordPass(
   ledger: LikeLedger,
   passes: readonly PassRecord[],
   pass: NewPass,
-): Result<PassOutcome, DomainError> {
+): Result<InteractionOutcome, DomainError> {
   if (pass.from === pass.to) {
     return domainError('validation_failed', 'dating.interaction', 'a user cannot pass on themselves');
   }
