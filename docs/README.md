@@ -50,6 +50,8 @@ One specification per MVP feature issue, in `features/`:
 
 | Document | Covers |
 |----------|--------|
+| [Detector escalation policy](./architecture/detector-escalation-policy.md) —
+  which detectors may escalate a subject alone, and which require corroboration
 | [Baseline review findings](./architecture/review-findings.md) | Independent review of the eight commitments, the domain boundaries, and doc/code agreement, with a runnable reproduction per finding |
 | [Fix verification](./architecture/fix-verification.md) | Adversarial pass over the fixes: which claimed fixes hold, which are cosmetic, and what the fix pass introduced |
 
