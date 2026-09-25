@@ -287,12 +287,17 @@ export type EvidenceView =
  * not merely hidden from a moderator — it is redacted, and the case continues on
  * the summary. A plain reviewer asking for identity artefacts is `denied`; a
  * lead asking for them is `redacted`, and stays redacted.
+ *
+ * `correlationId` is required because a read publishes an event and an event
+ * without one cannot be tied back to the request that caused it — the same
+ * reason the audit row records the case the read happened in.
  */
 export function readEvidence(
   ctx: ModerationContext,
   actor: ModeratorActor,
   record: EvidenceRecord,
-  caseId: CaseId | null = null,
+  caseId: CaseId | null,
+  correlationId: CorrelationId,
 ): EvidenceView {
   const clearance = clearanceFor(actor);
   const base = { evidenceId: record.evidenceId, kind: record.kind, capturedAt: record.capturedAt };
@@ -333,6 +338,20 @@ export function readEvidence(
     outcome: view.visibility === 'denied' ? 'denied' : 'allowed',
     reversal: null,
     detail: { visibility: view.visibility, clearance, required: record.access },
+  });
+
+  // The audit row says a read happened; this says so on the bus too, so a
+  // clearance-graded consumer learns that restricted evidence was touched and
+  // by whom, without the payload ever carrying the summary, the digest or the
+  // artefact reference. A denied read is published as well, and is the more
+  // interesting of the two.
+  ctx.events.emit({
+    type: 'moderation.evidence_read',
+    actorId: actor.actorId,
+    subjectId: record.subjectId,
+    correlationId,
+    sensitivity: 'restricted',
+    payload: { evidenceId: record.evidenceId, kind: record.kind, visibility: view.visibility },
   });
 
   return view;

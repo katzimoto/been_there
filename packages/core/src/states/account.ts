@@ -62,7 +62,7 @@ export const CAPABILITIES_BY_ACCOUNT_STATE: Readonly<
   ],
   limited: ['browse_discovery', 'report', 'block', 'edit_profile'],
   suspended: ['report', 'block', 'edit_profile'],
-  banned: ['report', 'appeal_request', 'delete_account'],
+  banned: ['report', 'block', 'appeal_request', 'delete_account'],
 };
 
 /**

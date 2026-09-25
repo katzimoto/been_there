@@ -20,16 +20,32 @@ import { type ClassifiedRecord, classify } from './redaction.js';
  * table makes "who can put this asset back into the pipeline" a reviewable line
  * rather than an `if` somewhere in a service.
  */
-export type MediaState = 'initiated' | 'scanning' | 'approved' | 'rejected';
+/**
+ * `needs_human` is not servable and is not the user's problem: the asset is held
+ * out of the live set while a person answers, and the owner is told it is "being
+ * checked" rather than that it failed. Without the state, a borderline photo
+ * would be auto-rejected by a scanner that was not confident — an enforcement
+ * decision a machine made about a stranger's face, with no case and nobody to
+ * appeal to.
+ */
+export type MediaState = 'initiated' | 'scanning' | 'needs_human' | 'approved' | 'rejected';
 
-export type MediaEvent = 'begin_scan' | 'approve' | 'reject' | 'reprocess';
+export type MediaEvent = 'begin_scan' | 'escalate' | 'approve' | 'reject' | 'reprocess';
 
-export type ScanVerdict = 'clean' | 'malware' | 'sexual_content' | 'unreadable';
+/**
+ * `inconclusive` is the verdict a scanner returns when it could not decide, as
+ * distinct from one it decided. The distinction is the difference between "this
+ * photo breaks a rule" — which the machine may say, because the rule is a
+ * published list and the user is told which one — and "this photo might break a
+ * rule" — which nobody but a person should say, because a wrong guess about a
+ * stranger's face is not recoverable by an appeal the user never knew to make.
+ */
+export type ScanVerdict = 'clean' | 'malware' | 'sexual_content' | 'unreadable' | 'inconclusive';
 
 export interface MediaContext {
   readonly verdict?: ScanVerdict;
   readonly reasonCode?: string;
-  /** Required to requeue: a rejected asset only returns through a human. */
+  /** Required to requeue a rejection, and to release or refuse a held asset. */
   readonly reviewerId?: ActorId;
 }
 
@@ -40,6 +56,13 @@ export const mediaMachine: StateMachine<MediaState, MediaEvent, MediaContext> =
     transitions: [
       { event: 'begin_scan', from: ['initiated'], to: 'scanning' },
       {
+        event: 'escalate',
+        from: ['scanning'],
+        to: 'needs_human',
+        guard: (ctx) => ctx?.verdict === 'inconclusive',
+        note: 'An undecidable scan is a decision for a person. No other verdict may take this edge.',
+      },
+      {
         event: 'approve',
         from: ['scanning'],
         to: 'approved',
@@ -47,11 +70,29 @@ export const mediaMachine: StateMachine<MediaState, MediaEvent, MediaContext> =
         note: 'Only a clean verdict produces servable media.',
       },
       {
+        event: 'approve',
+        from: ['needs_human'],
+        to: 'approved',
+        guard: (ctx) => ctx?.reviewerId !== undefined,
+        note: 'A held asset is released by a named person, never by a retry.',
+      },
+      {
         event: 'reject',
         from: ['scanning'],
         to: 'rejected',
-        guard: (ctx) => ctx?.verdict !== undefined && ctx?.verdict !== 'clean' && ctx?.reasonCode !== undefined,
-        note: 'A rejection always carries a machine-readable reason and never a verdict of "clean".',
+        guard: (ctx) =>
+          ctx?.verdict !== undefined &&
+          ctx?.verdict !== 'clean' &&
+          ctx?.verdict !== 'inconclusive' &&
+          ctx?.reasonCode !== undefined,
+        note: 'A rejection always carries a machine-readable reason, and never a verdict of "clean" or of "could not tell".',
+      },
+      {
+        event: 'reject',
+        from: ['needs_human'],
+        to: 'rejected',
+        guard: (ctx) => ctx?.reviewerId !== undefined && ctx?.reasonCode !== undefined,
+        note: 'Refusing a held asset is a moderation decision and is recorded as one.',
       },
       {
         event: 'reprocess',

@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { type AccountState, InMemoryEventBus, isClearedToConsume } from '@been-there/core';
+import { type AccountState, InMemoryEventBus, capabilitiesFor, isClearedToConsume } from '@been-there/core';
 import {
   type AccountStateChangedPayload,
   type Decision,
+  type RestrictionAppliedPayload,
   applyDecision,
   closeReportsWithDecision,
   decide,
@@ -232,7 +233,11 @@ describe('decide — a decision resolves its case and publishes the one outward 
     const publicEvents = outcome.events.filter((event) => event.sensitivity === 'public');
     expect(publicEvents).toHaveLength(1);
     const payload = publicEvents[0]?.payload as AccountStateChangedPayload;
-    expect(Object.keys(payload).sort()).toEqual(['accountState', 'capabilities']);
+    expect(Object.keys(payload).sort()).toEqual([
+      'accountState',
+      'capabilities',
+      'removedCapabilities',
+    ]);
     expect(payload.accountState).toBe('limited');
     expect(payload.capabilities).not.toContain('send_message');
     expect(payload.capabilities).toContain('report');
@@ -283,7 +288,13 @@ describe('decide — a decision resolves its case and publishes the one outward 
     // sees the standing change and nothing about how it happened.
     expect(seen).toEqual(['account_state.changed']);
     const outward = outcome.events.find((event) => event.type === 'account_state.changed');
-    expect(Object.keys(outward?.payload as object)).toEqual(['accountState', 'capabilities']);
+    // A `user`-clearance event is not delivered either: the case reference is
+    // addressed to the restricted account, not to everyone holding the bus.
+    expect(Object.keys(outward?.payload as object)).toEqual([
+      'accountState',
+      'capabilities',
+      'removedCapabilities',
+    ]);
   });
 
   it('publishes a restricted account that can still report and block', () => {
@@ -488,5 +499,138 @@ describe('appeal support', () => {
         }),
       ).code,
     ).toBe('invalid_transition');
+  });
+});
+
+describe('what the restricted account is told', () => {
+  function restrict(h: ReturnType<typeof harness>) {
+    const reviewed = caseInReview(h, openCaseFromReport(h, succeeded(makeReport(h))));
+    return succeeded(
+      decide(h.ctx, {
+        moderationCase: reviewed,
+        actor: MODERATOR,
+        action: 'restrict',
+        rationale: RATIONALE,
+        currentAccountState: 'active',
+        removedCapabilities: ['send_message', 'like'],
+        correlationId: CORRELATION,
+      }),
+    );
+  }
+
+  it('names the case and the removed set on an event only the subject can read', () => {
+    // The notification spec requires the restricted user to be told each removed
+    // capability and the case reference. Neither was on any event before, so the
+    // only way to build that message was to diff the capability set against a
+    // local copy of the base table.
+    const h = harness();
+    const outcome = restrict(h);
+    const toSubject = outcome.events.find(
+      (event) => event.type === 'moderation.restriction_applied',
+    );
+
+    expect(toSubject?.sensitivity).toBe('user');
+    expect(toSubject?.subjectId).toBe(SUBJECT);
+    const payload = toSubject?.payload as RestrictionAppliedPayload;
+    expect(payload.caseId).toBe(outcome.moderationCase.caseId);
+    expect(payload.decisionId).toBe(outcome.decision.decisionId);
+    expect(payload.removedCapabilities).toEqual(['send_message', 'like']);
+    expect(payload.accountState).toBe<AccountState>('limited');
+  });
+
+  it('delivers the case reference to the subject and to nobody else', async () => {
+    const h = harness();
+    const outcome = restrict(h);
+    const bus = new InMemoryEventBus();
+    const asPublic: string[] = [];
+    const asUser: string[] = [];
+    bus.subscribe({ upTo: 'public' }, (event) => {
+      asPublic.push(event.type);
+    });
+    bus.subscribe({ upTo: 'user' }, (event) => {
+      asUser.push(event.type);
+    });
+    for (const event of outcome.events) {
+      await bus.publish(event);
+    }
+
+    expect(asPublic).toEqual(['account_state.changed']);
+    expect(asUser).toEqual([
+      'account_state.changed',
+      'moderation.restriction_applied',
+    ]);
+  });
+
+  it('keeps the case id off the event a public clearance reads', () => {
+    // The whole reason this is a second event: a case reference on a `public`
+    // payload would publish the existence of an open case about an identifiable
+    // person to anyone holding the bus.
+    const h = harness();
+    const outcome = restrict(h);
+    const outward = outcome.events.find((event) => event.type === 'account_state.changed');
+
+    expect(JSON.stringify(outward?.payload)).not.toContain('case');
+    expect(JSON.stringify(outward?.payload)).not.toContain(outcome.moderationCase.caseId);
+  });
+
+  it('publishes the removed set on the outward payload so no client needs the base table', () => {
+    const h = harness();
+    const outcome = restrict(h);
+    const outward = outcome.events.find((event) => event.type === 'account_state.changed');
+    const payload = outward?.payload as AccountStateChangedPayload;
+
+    expect(payload.removedCapabilities).toEqual(['send_message', 'like']);
+    // And the projection the spec names is now derivable from one payload.
+    const base = capabilitiesFor('active');
+    expect(payload.capabilities).toEqual(
+      base.filter((capability) => !payload.removedCapabilities.includes(capability)),
+    );
+  });
+
+  it('tells the subject which capabilities a reversal gave back', () => {
+    const h = harness();
+    const outcome = restrict(h);
+    const reversal = succeeded(
+      reverseDecision(h.ctx, {
+        moderationCase: outcome.moderationCase,
+        actor: LEAD,
+        reverses: outcome.decision,
+        rationale: 'Both messages were sent in a context the reporter did not describe.',
+        currentAccountState: 'limited',
+        correlationId: CORRELATION,
+      }),
+    );
+    const lifted = reversal.events.find((event) => event.type === 'moderation.restriction_lifted');
+    const outward = reversal.events.find((event) => event.type === 'account_state.changed');
+
+    expect(lifted?.sensitivity).toBe('user');
+    const payload = lifted?.payload as RestrictionAppliedPayload;
+    expect(payload.removedCapabilities).toEqual(['send_message', 'like']);
+    expect(payload.caseId).toBe(outcome.moderationCase.caseId);
+    // A lift takes nothing away, so the public removed set is empty and the
+    // effective set is the base set.
+    expect((outward?.payload as AccountStateChangedPayload).removedCapabilities).toEqual([]);
+    expect((outward?.payload as AccountStateChangedPayload).capabilities).toEqual(
+      capabilitiesFor('active'),
+    );
+  });
+
+  it('publishes no case-facing event at all when no sanction was taken', () => {
+    const h = harness();
+    const reviewed = caseInReview(h, openCaseFromReport(h, succeeded(makeReport(h))));
+    const cleared = succeeded(
+      decide(h.ctx, {
+        moderationCase: reviewed,
+        actor: MODERATOR,
+        action: 'clear',
+        rationale: 'Context shows a joke between two people who knew each other.',
+        currentAccountState: 'active',
+        correlationId: CORRELATION,
+      }),
+    );
+
+    expect(cleared.events.map((event) => event.type)).not.toContain(
+      'moderation.restriction_applied',
+    );
   });
 });

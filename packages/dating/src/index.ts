@@ -3,6 +3,8 @@ export * from './location.js';
 export * from './profile.js';
 export * from './preferences.js';
 export * from './blocks.js';
+export * from './passes.js';
+export * from './likes.js';
 export * from './interaction.js';
 export * from './read-models.js';
 export * from './discovery.js';

@@ -11,7 +11,14 @@
 This document is the **single index of events for the MVP**. Every event named in
 another feature spec appears in §2, and if it is not in §2 it does not exist. It
 also fixes the denominators for the success metrics in issue #1, the idempotency
-contract for the four critical actions, and the reliability policy.
+contract for the five critical actions, and the reliability policy.
+
+§2 is two tables, and the distinction between them is load-bearing rather than
+presentational: **§2.1 is what the metrics sink will accept** and **§2.2 is what
+the domains publish**. A name in only one of them is not a naming disagreement to
+be resolved later — it is the difference between an event Platform can record and
+an event a domain owns, and writing one where the other was meant is how a
+catalogue ends up describing a system nobody built.
 
 Three rules that everything below follows from:
 
@@ -38,7 +45,29 @@ Three rules that everything below follows from:
 
 ## 2. Event taxonomy
 
-This is the index. `Role` is one of:
+**Two tables, two vocabularies, and conflating them is the defect this section
+exists to prevent.**
+
+- **§2.1 is the metrics sink catalogue.** Every name in it is a member of
+  `ANALYTICS_EVENTS` in `packages/platform`, and `recordAnalyticsEvent` refuses
+  anything else with `validation_failed`. A name in §2.1 is a *counter or a
+  projection* a service may push: it carries declared dimensions and nothing else.
+- **§2.2 is the indexed domain stream.** These are published by their owning
+  domain and routed by `routeEvent()`. They are never a metrics input, and the
+  safety ones reach the audit log and nowhere else. A metric that needs a subject
+  — median case resolution time, the block-to-report ratio — is computed from the
+  **audit log**, which is the only store that holds case ids, because
+  `ANALYTICS_FORBIDDEN_PROPERTIES` refuses `caseId` and `conversationId` to the
+  sink on purpose.
+
+**Who emits a §2.1 name.** Not a domain package: commitment 6 means no domain
+imports the platform, and the six packages are domain cores, not services. The
+caller is the service layer that hosts them, at the moment the fact happens, and
+this catalogue is the contract that layer must satisfy. A §2.1 name with no such
+caller is a hole in the instrumentation and belongs in §7.1's launch gate, not in
+the table.
+
+`Role` is one of:
 
 - **Funnel** — onboarding, dating, or engagement funnel step.
 - **Safety** — report, block, restriction, suspension, verification failure, risk.
@@ -46,190 +75,260 @@ This is the index. `Role` is one of:
 - **Control** — analytics instrumentation, not a product or safety fact. Kept
   separate so a control event can never be mistaken for a funnel step.
 
-Sensitivity is the `DataSensitivity` from the overview. Note that no event in
-this table is `sensitive` or `restricted`: those classes never reach analytics.
-`verification.anomaly` is published on the bus at `sensitive` for Identity and
-Trust & Safety, and the analytics projection of it (`safety.verification_anomaly`)
-carries only the fact of an anomaly, never the evidence.
+Sensitivity is the `DataSensitivity` from the overview. No §2.1 entry is
+`sensitive` or `restricted`: those classes never reach analytics, and an event
+published at one of them (`verification.review.proposed`,
+`verification.anomaly`, `verification.evidence.accessed`) belongs in §2.2.
 
-### 2.1 Account & onboarding (Platform)
+### 2.1 The metrics sink catalogue
 
-Adopted verbatim from [Account & Onboarding](./account-and-onboarding.md) §11,
-which owns this catalogue. The names here are the same names; this table exists
-so the index is complete, and it is a copy rather than a second source on
-purpose.
+Every row is a member of `ANALYTICS_EVENTS`, transcribed from it. The **Rate**
+column is `AnalyticsEventSpec.sampleRate` and it is the whole of the sampling
+policy: `recordAnalyticsEvent` takes no rate from its caller, so a rate cannot
+drift between two services that disagree about it, and a rate that drifts
+silently changes a metric's denominator.
 
-| Event | Source | Emitted when | Sensitivity | Role |
-|-------|--------|--------------|-------------|------|
-| `account.app_opened` | Platform | A surface is opened; carries `surface`, `journey_id` | `internal` | Funnel |
-| `account.registration_started` | Platform | Sign-up begins; carries `contact_kind` | `internal` | Funnel |
-| `account.registration_completed` | Platform | The account row commits and a verification message is sent; carries `contact_kind` | `internal` | Funnel |
-| `account.registration_rejected` | Platform | Sign-up is refused; carries a `reason_code` (`under_18`, `invalid_input`, `duplicate`, `rate_limited`, `breached_password`, `domain_not_allowed`) and an `age_band` | `internal` | Funnel |
-| `account.onboarding_step_completed` | Platform | An onboarding step passes; carries `step` and `source` | `internal` | Funnel |
-| `account.onboarding_step_failed` | Platform | An onboarding step fails; carries `step` and `reason_code` | `internal` | Funnel |
-| `account.session_started` | Platform | A session is established; carries `surface` and `auth_method` | `internal` | Funnel |
-| `account.session_failed` | Platform | Authentication fails; carries `reason_code` and `auth_method` | `internal` | Health |
-| `account.recovery_started` | Platform | A recovery flow begins | `internal` | Funnel |
-| `account.recovery_completed` | Platform | Recovery succeeds and sessions are revoked; carries `sessions_revoked_count` | `internal` | Health |
-| `account.recovery_locked` | Platform | Recovery is locked by abuse threshold or rate limit | `internal` | Health |
-| `account.session_revoked` | Platform | A session is ended; carries `scope` (`this_device`, `all_devices`, `recovery`, `limit`, `enforcement`) | `internal` | Health |
-| `account.capability_denied` | Platform | A capability is refused; carries `capability` and a `reason_code`, **never a case id** | `internal` | Health |
-| `account.deletion_requested` | Platform | A deletion request commits; idempotency key in §4, row 3 | `internal` | Health |
-| `account.deletion_cancelled` | Platform | The user restores inside the 30-day window | `internal` | Health |
-| `account.deletion_completed` | Platform | Deletion completes, after the undo window | `internal` | Funnel |
-| `profile.published` | Dating Core | A profile goes live; the onboarding funnel's terminal step | `user` | Funnel |
-| `profile.deleted` | Dating Core | A profile is removed | `user` | Funnel |
-| `preferences.updated` | Dating Core | A preference record is written; carries `changedAxes` — axis names only, never values | `user` | Control |
-| `settings.updated` | Platform | A non-preference settings write commits; carries the changed field **names** only | `user` | Control |
+Dimensions are an allowlist, not a suggestion. A property that is not the
+event's own declared dimension is refused with `validation_failed`, and so is any
+name in `ANALYTICS_FORBIDDEN_PROPERTIES` — which now includes `conversationId`,
+because a conversation is a pseudonym for two identified people and a metrics
+sink that can be sliced by one is a "who was talking to whom" list.
 
-Three properties of this table are load-bearing for §3, and they come from #9:
+#### Account, onboarding and settings (Platform)
 
-- **`age_band` is a five-year band, never an age and never a date.** It is the
-  only form of age that reaches analytics.
-- **`account.capability_denied` carries a reason code and never a case id.** A
-  denial is a fact about capability, not about moderation, and a case id in
-  this event would let the funnel reconstruct the moderation pipeline.
-- **`account.registration_rejected` carries `under_18` as a reason code.** The
-  rejected user is counted in the funnel; nothing about them is stored.
+| Event | Class | Dimensions | Rate | What it counts |
+|-------|-------|-----------|------|----------------|
+| `account.app_opened` | `internal` | `surface`, `journey_id` | 100% | App opened. `journey_id` is a per-install random key, never derived from a user id and never joined to an audit event. |
+| `account.registration_started` | `public` | `surface` | 100% | Onboarding entry. No identity, no funnel position. |
+| `account.registration_completed` | `public` | `surface` | 100% | A verified account exists. Counted, never attributed. |
+| `account.registration_rejected` | `internal` | `reason_code`, `age_band` | 100% | Sign-up refused. Reason codes only; no entered values. |
+| `account.onboarding_step_completed` | `public` | `step`, `source` | 100% | Progress through onboarding. Steps are a closed vocabulary. |
+| `account.onboarding_step_failed` | `internal` | `step`, `reason_code` | 100% | Failure twin of `onboarding_step_completed`. |
+| `account.session_started` | `internal` | `surface`, `auth_method` | 100% | A session began. Session churn is a security metric. |
+| `account.session_failed` | `internal` | `reason_code`, `auth_method` | 100% | Counts failed logins, not who. |
+| `account.session_revoked` | `internal` | `scope` | 100% | Sessions were killed — by logout, password change, recovery, the session cap, or enforcement. |
+| `account.capability_denied` | `internal` | `capability`, `reason_code` | 100% | A product capability was refused. A denial is a fact about capability, not about moderation, so it must never carry a case id. |
+| `account.recovery_started` | `internal` | `method` | 100% | A recovery was attempted. |
+| `account.recovery_completed` | `internal` | `method`, `sessions_revoked_count` | 100% | Recovery succeeded and every other session was revoked. The blast radius as a count, never a session id; the detail of *which* sessions is the audit action `auth.recovery_completed`. |
+| `account.recovery_locked` | `internal` | `reason_code`, `window_hours` | 100% | Recovery was locked after repeated failures. Counted; the detail is audit-only. |
+| `account.deletion_requested` | `internal` | `retention_bucket` | 100% | Erasure was requested. Retention buckets only. |
+| `account.deletion_cancelled` | `internal` | `retention_bucket` | 100% | Erasure was withdrawn inside the grace window. |
+| `account.deletion_completed` | `internal` | `retention_bucket` | 100% | Erasure finished. Counts only. |
+| `settings.updated` | `internal` | `changed_field`, `changed_field_count_bucket` | 100% | A non-preference settings write committed. Field names and a count, never the values written. |
 
-`identity_status.changed` and `account_state.changed` are deliberately **absent
-from this table**. They are domain events owned by Identity and Moderation, and
-they are `public` on the bus for product projections. The metrics sink never
-receives `identity_status.changed`: the verification funnel counts submissions
-from `verification.*` in §2.2 and joins the two series in analysis. Subscribing
-analytics to an identity stream to "simplify" the funnel is the mistake this
-note exists to prevent.
+`settings.updated` is separate from `preferences.updated` because they have
+separate owners and separate read-models: folding them together would make the
+Dating Core's analytics footprint depend on the Platform's settings vocabulary.
 
-`preferences.updated` and `settings.updated` are separate events because they
-have separate owners and separate read-models. Folding them together would make
-the Dating Core's analytics footprint depend on the Platform's settings
-vocabulary.
+#### Profile and media (Dating Core, Platform)
 
-### 2.2 Verification (Identity)
+| Event | Class | Dimensions | Rate | What it counts |
+|-------|-------|-----------|------|----------------|
+| `profile.published` | `public` | `surface` | 100% | A profile became visible in discovery. The onboarding funnel's terminal step. |
+| `profile.state_changed` | `internal` | `from`, `to` | 100% | A profile lifecycle state moved. Enumerated states only. |
+| `profile.updated` | `internal` | `changed_field_count_bucket`, `changed_field` | 100% | A profile was edited. Field names and a count bucket, never the values written. |
+| `profile.photo_uploaded` | `internal` | `reason_code`, `bytes_bucket` | 100% | A photo entered the media pipeline. Bytes are bucketed, never sized exactly; `reason_code` carries the upload source, not a screening verdict. |
+| `profile.photo_rejected` | `internal` | `reason_code` | 100% | Screening or policy refused a photo. |
+| `profile.photo_set_updated` | `internal` | `photo_count_bucket` | 100% | The photo set changed. A count, not the media. |
+| `media.signed_url_issued` | `internal` | `purpose` | 100% | A time-boxed media grant was created. |
+| `media.access_denied` | `internal` | `purpose` | 100% | A media read was refused. Enumeration attempts cluster here. |
+| `location.resolved` | `internal` | `band` | 100% | A coarse distance was produced. The band only; never a coordinate. |
 
-Names adopted from
-[Identity & Verification](../architecture/identity-and-verification.md).
-That document owns the emissions; the analytics-relevant subset is indexed here.
+`profile.photo_rejected` counts rejections, not people. A photo held for a
+moderator (`needs_human` in the media machine) is not a rejection, and the two
+must not share a counter: a rise in holds is a queue problem and a rise in
+rejections is a screening problem.
 
-| Event | Source | Emitted when | Sensitivity | Role |
-|-------|--------|--------------|-------------|------|
-| `verification.attempt.started` | Identity | A verification attempt begins; carries the attempt id, a re-verification flag, and a reason code | `internal` | Funnel |
-| `verification.attempt.completed` | Identity | An attempt resolves; carries the attempt id, attempt state, a decision **label**, and a **band** — never a score | `internal` | Funnel |
-| `verification.review.proposed` | Identity | Evidence supports a human review; carries subject, detector, findings | `sensitive` (bus) / `internal` (analytics projection) | Safety |
-| `verification.anomaly` | Identity | Identity evidence is internally inconsistent (impersonation, reuse, liveness failure); carries findings as codes and counts | `sensitive` (bus) / `internal` (analytics projection) | Safety |
-| `verification.re_verification.requested` | Identity | A re-verification is requested by Trust & Safety or Moderation; carries a reason code and the requesting domain | `internal` | Safety |
-| `verification.evidence.accessed` | Identity | Identity evidence is read; carries the audit entry, granted or denied | `restricted` | Health |
+#### Discovery (Dating Core)
+
+| Event | Class | Dimensions | Rate | What it counts |
+|-------|-------|-----------|------|----------------|
+| `discovery.entered` | `public` | `surface` | 100% | The viewer passed the gate and opened the feed. The first dating-funnel step. |
+| `discovery.page_served` | `internal` | `pool_bucket`, `page_size_bucket` | **10%** | A page of candidates was returned, full or short. The one genuinely high-volume event — ten cards per request — and the only one sampled. |
+| `discovery.exhausted` | `internal` | `gate_class` | 100% | The eligible pool is confirmed exhausted for this viewer. A sudden rise means identity expiry, not a lack of users. |
+| `discovery.viewer_ineligible` | `internal` | `gate_class` | 100% | The gate refused the viewer. The gate **class** only, never the underlying state. |
+
+The `discovery.page_served` sample is deterministic on the event's **correlation
+id** — the only opaque key the sink is permitted to see, since `userId` and
+`sessionId` are both on `ANALYTICS_FORBIDDEN_PROPERTIES`. Hashing a user id was
+never implementable here and would have been the wrong thing if it were: it would
+make the sample a function of who the user is, which is a per-user sampling
+decision wearing a uniform's clothes. Any rate computed from it carries a
+weighting factor and the dashboard says "sampled" on the tile.
+
+#### Messaging (Communication)
+
+| Event | Class | Dimensions | Rate | What it counts |
+|-------|-------|-----------|------|----------------|
+| `conversation.created` | `internal` | — | 100% | A conversation opened, which is at match time. The denominator of every messaging rate. |
+| `message.recorded` | `internal` | `message_length_bucket` | 100% | A message was accepted. A count and a length bucket, never a body, an excerpt, or a link. |
+| `message.delivered` | `internal` | `latency_bucket` | 100% | A recipient's client acknowledged the message. |
+| `message.read` | `internal` | — | 100% | A read watermark advanced. |
+| `message.withheld_by_system` | `internal` | `rule` | 100% | An outbound message was refused by a system rule. The rule name and no body. |
+| `conversation.flagged_pattern` | `internal` | `pattern` | 100% | A structural pattern fired. The pattern name only, never content and never a confidence value. |
+
+**Message text is not an event field, on any of these.** The per-conversation
+aggregates that §3.9–§3.11 need — participants who both spoke, inter-message
+gaps, conversation age — come from the `conversation.activity` rollup
+Communication already publishes for Trust & Safety, not from this sink. That is
+why `conversationId` is a forbidden property here: the analytics sink holds
+counts, and the one place a conversation is a key is the place that already
+builds it from counts, hashes and timings.
+
+#### Notifications (Platform)
+
+| Event | Class | Dimensions | Rate | What it counts |
+|-------|-------|-----------|------|----------------|
+| `notification.delivered` | `internal` | `channel`, `category`, `critical` | 25% | A notice left the platform. Counts, not recipients. |
+| `notification.suppressed` | `internal` | `channel`, `category`, `suppression_reason` | 100% | A notice was deliberately not sent, and why. |
+| `notification.failed` | `internal` | `channel`, `category`, `retry_count_bucket` | 25% | Every channel for a notice exhausted its retries. An undelivered critical notice is an incident, not a metric. |
+
+`delivered` rather than `dispatched`: the platform can observe that it handed a
+notice to an adapter, and cannot observe whether the provider accepted it. A name
+that claims otherwise is a name somebody will build a false alert on.
+
+`suppression_reason` is a closed four-value vocabulary, one per fact, and the
+fourth is the one that matters:
+
+| Reason | Means | Should a product team be able to change it? |
+|--------|-------|--------------------------------------------|
+| `channel_muted` | The recipient has not switched this channel on for this category | Yes — it is a preference, and a rise on one category is usually a new default rather than a bug |
+| `channel_unavailable` | The account has no such channel | No — it is a fact about the account's registered channels |
+| `block_separation` | A block edge exists between the recipient and the other person | **No, ever.** This is a safety control, and a suppression rate that moves here is a signal about the product's blocking, not about anyone's preferences |
+| `duplicate` | The idempotency key was already claimed | No — a working system has a non-zero rate |
+
+`quiet_hours` is deliberately **not** on that list. A notice inside quiet hours is
+deferred, not dropped, so a "we held your message" fact would need its own event
+rather than borrowing the vocabulary of a suppression — which is the whole
+distinction between the two and the reason a dashboard can trust the first row.
+
+There is no `notification.duplicate_prevented` event, and its absence is not a
+gap. A duplicate is a suppression with `suppression_reason = 'duplicate'`, and
+the rate a *working* system shows is **non-zero**: retries, redeliveries and
+double taps are the mechanism working, not a fault. An exactly-zero duplicate rate
+means the key is not being claimed at all.
+
+#### Platform health and integrations
+
+| Event | Class | Dimensions | Rate | What it counts |
+|-------|-------|-----------|------|----------------|
+| `slo.error_budget_exhausted` | `internal` | `slo_name`, `window` | 100% | A service burned its error budget for the window. |
+| `alert.fired` | `internal` | `alert_name`, `severity` | 100% | An alert transitioned to firing. The counter every runbook starts from. |
+| `provider.verification_call` | `internal` | `provider`, `outcome`, `latency_bucket` | 100% | A verification provider call completed. The outcome and a latency bucket, never the payload. |
+| `integration.call_failed` | `internal` | `provider`, `operation`, `failure` | 100% | A vendor call failed at the seam, with the uniform failure kind. |
+| `integration.call_failed` also covers the alert set's "dependency failed" | | | | There is no separate `dependency.failed`: an external dependency failing and a vendor call failing are one event, and two names for one fact is how a dashboard ends up counting half of it. |
+
+#### Safety counters
+
+| Event | Class | Dimensions | Rate | What it counts |
+|-------|-------|-----------|------|----------------|
+| `risk.assessed` | `internal` | `state`, `detector_count_bucket` | 100% | A risk evaluation completed for the window. The state and a detector count, never a raw score. |
+
+This is the only safety fact in the sink, and it is a snapshot rather than a
+record: an aggregate state distribution with no subject, which is what the
+risk-shift alert in §5.2 needs and the one thing about risk that a metrics sink
+may hold. Every other safety fact — reports, cases, blocks, enforcement, appeals —
+is §2.2, and reaches the audit log and nowhere else.
+
+### 2.2 The indexed domain stream
+
+Published by the owning domain, routed by `routeEvent()`. **None of these is a
+metrics input.** They are listed because the metrics in §3 are computed from
+them — in the audit log, which is the only store that holds a subject — and
+because a name that is not in either table does not exist.
+
+The names below are the names the packages publish. Several of them were wrong
+in earlier drafts of this document, which is the same defect as a dead entry in
+an allowlist: an identifier that looks like a published event and is not one
+survives a name-only diff whenever its spelling happens to match something else.
+
+#### Identity (Identity)
+
+| Event | Class on the bus | Sink | Emitted when |
+|-------|-----------------|------|--------------|
+| `identity.status_changed` | `public` | **audit only** | The subject's identity state moved. The public projection and nothing else. |
+| `verification.attempt.started` | `internal` | audit or analytics | An attempt was opened. |
+| `verification.attempt.completed` | `internal` | audit or analytics | An attempt resolved, with a decision **label** and a confidence **band** — never a score. |
+| `verification.re_verification.requested` | `internal` | audit or analytics | A re-verification was authorised, by Trust & Safety or Moderation. |
+| `verification.review.proposed` | `sensitive` | audit only | Evidence supports a human review. |
+| `verification.anomaly` | `sensitive` | **audit only** | Identity evidence is internally inconsistent. Findings as codes and counts only. |
+| `verification.evidence.accessed` | `restricted` | audit only | Evidence was read, granted or denied. |
 
 Three rules the metric definitions in §3 depend on:
 
-- **The identity state is a dimension, not a separate event.**
-  `verified` / `verification_failed` / `review_required` / `expired` are the
-  decision label and state on `verification.attempt.completed`. Deriving
-  `verification.failed` as a projection rather than a second emission is what
-  keeps a funnel from double-counting: two code paths emitting one fact is
-  precisely how a completion rate goes wrong.
-- **A band, never a score.** `verification.attempt.completed` carries the
-  decision band and not the likeness score. A score in the warehouse is a score
-  in a breach, and it is also a per-user value that would identify anyone
-  holding the model.
-- **The product stream is not the metrics stream.** `identity.status_changed`
-  (`public`, carrying the projection and nothing else) is what Dating Core and
-  Discovery subscribe to. It is **not** in this taxonomy and must not be added to
-  it: the metrics sink counts from `verification.attempt.*` and joins to the
-  account funnel in analysis. Subscribing analytics to the identity status
-  stream to "simplify" the funnel is the mistake this note exists to prevent —
-  it would put identity state and its timings into a pipeline that has no need
+- **The identity state is a dimension, not a separate event.** `verified` /
+  `verification_failed` / `review_required` / `expired` are the decision label and
+  state on `verification.attempt.completed`. Deriving the funnel from one emission
+  rather than two is what keeps a completion rate from double-counting.
+- **A band, never a score.** A score in the warehouse is a score in a breach, and
+  it is also a per-user value that would identify anyone holding the model.
+- **The product stream is not the metrics stream.** `identity.status_changed` is
+  what Dating Core and Discovery subscribe to, and it is `audit: true,
+  analytics: false` in the router. Subscribing analytics to it to "simplify" the
+  funnel would put identity state and its timings into a pipeline that has no need
   for them.
 
-### 2.3 Discovery, likes, matches (Dating Core)
+#### Dating Core
 
-| Event | Source | Emitted when | Sensitivity | Role |
-|-------|--------|--------------|-------------|------|
-| `discovery.entered` | Dating Core | The viewer passes the discovery gate and opens the feed | `public` | Funnel |
-| `discovery.page_served` | Dating Core | A page is returned, full or short; carries `poolBucket: 'empty' \| 'small' \| 'healthy'` | `internal` | Funnel |
-| `discovery.exhausted` | Dating Core | The eligible pool is confirmed exhausted for this viewer | `internal` | Funnel |
-| `discovery.viewer_ineligible` | Dating Core | The gate rejects the viewer; carries the gate **class** (`identity` \| `capability`), never the underlying state | `internal` | Funnel |
-| `like.recorded` | Dating Core | A like is written for the first time. **Not** on a duplicate or retry; carries `outcome: 'pending' \| 'matched'` | `user` | Funnel |
-| `like.withdrawn` | Dating Core | A like is withdrawn — superseded by a pass, or killed by a block or unmatch | `user` | Funnel |
-| `pass.recorded` | Dating Core | A pass is written | `user` | Funnel |
-| `match.created` | Dating Core | Exactly once per match episode | `user` | Funnel |
-| `match.ended` | Dating Core | A match stopped being usable, for any reason; carries `reason: 'blocked' \| 'unmatched' \| 'declined'` and `initiatorId` where there is one | `user` | Funnel |
-| `unmatch.performed` | Dating Core | An **actor-initiated** unmatch command is accepted | `user` | Funnel |
+| Event | Class on the bus | Sink | Emitted when |
+|-------|-----------------|------|--------------|
+| `profile.completed` | `public` | audit or analytics | A profile became complete. |
+| `profile.deleted` | `public` | audit or analytics | A profile was removed. |
+| `preferences.updated` | `user` | analytics | A preference record was written. Values are published on the bus; the sink receives axis **names** only. |
+| `like.recorded` | `user` | analytics | A like is written for the first time. Not on a duplicate or a retry. |
+| `like.withdrawn` | `user` | analytics | A like was withdrawn — superseded, blocked, or unmatched. |
+| `pass.recorded` | `user` | analytics | A pass was written. |
+| `match.created` | `public` | audit or analytics | Exactly once per match episode. |
+| `unmatch.performed` | `internal` | analytics | An **actor-initiated** unmatch was accepted. |
+| `match.ended` | `internal` | analytics | A match stopped being usable, for any reason. |
+| `block.created` | `internal` | analytics | A block edge was created. |
+| `block.released` | `internal` | analytics | A block edge was lifted. |
 
-Two properties this table is load-bearing for, both stated in
-[Likes & Matching](./likes-and-matching.md) §9:
+Two properties this table is load-bearing for:
 
-- **`match.created` is emitted once per match episode**, and `like.recorded`
-  carries the like's own outcome. Match rate is therefore computable from
-  `like.recorded.outcome` without a join, and a double-tap cannot inflate the
-  funnel.
+- **`match.created` is emitted once per match episode** and `like.recorded`
+  carries the like's own outcome, so the match rate is computable without a join
+  and a double tap cannot inflate the funnel.
 - **`unmatch.performed` is the only actor-initiated end.** A match ended by a
-  block, a deletion, or a moderator emits `match.ended` but **not**
+  block, a deletion, or a moderator emits `match.ended` and not
   `unmatch.performed`, which is what lets the safety metrics separate "a person
   chose this" from "the platform or a block did".
 
-`pass.recorded` is `user` sensitivity and never reaches analytics as a target
-identity beyond the viewer's own record; the analytics projection carries a
-count, not who was passed.
+The block stream is `block.created` / `block.released`, not a single
+`block.created` / `block.released`: a lifted block is a fact a safety reviewer asks about, and an
+edge-shaped pair of events is the only way to answer "how many blocks are lifted"
+without a diff.
 
-### 2.4 Messaging (Communication)
+#### Communication
 
+| Event | Class on the bus | Sink | Emitted when |
+|-------|-----------------|------|--------------|
+| `communication.message_sent` | `internal` | **neither** | A message was accepted. Metadata only, and named in `CONTENT_BEARING_TYPES`: the highest-volume stream about what people said to each other does not reach either sink. |
+| `communication.conversation_state_changed` | `internal` | audit | A conversation moved between lifecycle states, by user action or by case. |
+| `communication.friction_applied` | `internal` | audit | A rate rule answered. Pressure is observable; nothing was judged. |
+| `communication.evidence_captured` | `restricted` | audit | A scoped evidence view was produced for a recorded case. |
 
-| Event | Source | Emitted when | Sensitivity | Role |
-|-------|--------|--------------|-------------|------|
-| `conversation.created` | Communication | A conversation record is opened, i.e. at match time | `user` | Funnel |
-| `message.recorded` | Communication | A message is accepted for delivery | `user` | Funnel |
-| `message.delivered` | Communication | A recipient's client acknowledges the message | `internal` | Health |
-| `message.read` | Communication | A conversation's read watermark advances past a message | `internal` | Funnel |
-| `conversation.activity` | Communication | A rolling window of conversation metadata — counts, distinct-content hashes, link count, median inter-message gap, conversation and match age | `user` (bus) / `internal` (analytics projection) | Safety |
-| `conversation.flagged_pattern` | Communication | A structural pattern fires (`high_rate`, `repeated_content`, `link_density`); carries the pattern name and the detector's own confidence, **never content** | `user` (bus) / `internal` (analytics projection) | Safety |
-| `message.withheld_by_system` | Communication | An outbound message is refused by a system rule; carries the rule name and **no body, no excerpt** | `internal` | Safety |
-| `message.reported` | Communication | A message is attached to a report as evidence | `restricted` (case-scoped read) / `internal` (analytics projection) | Safety |
+#### Trust & Safety and Moderation
 
-**Message text is not an event field, on any of these events.**
-`conversation.activity` is deliberately built from counts, hashes, and timings:
-it is the only channel by which messaging behaviour reaches Trust & Safety, and
-if it carried content the overview's rule that Communication never decides a
-message is abusive would become unverifiable. Evidence is read case-scoped from
-the restricted read-model with a `CaseId`, never from the bus. An event carrying
-an unknown field is rejected at ingest (§6.2), so a body cannot be introduced
-quietly.
+| Event | Class on the bus | Sink | Emitted when |
+|-------|-----------------|------|--------------|
+| `risk.changed` | `internal` | **audit only** | The risk machine transitioned. |
+| `review_candidate.raised` | `internal` | audit or analytics | A detector produced something for a human to look at. |
+| `friction.proposed` | `internal` | audit or analytics | Reversible friction was proposed. |
+| `moderation.report_submitted` | `restricted` | **audit only** | A report was filed. |
+| `moderation.report_status_changed` | `restricted` | audit only | A report's triage status moved. |
+| `moderation.case_opened` / `.case_assigned` / `.case_escalated` / `.case_reports_merged` | `restricted` | audit only | Case lifecycle. |
+| `moderation.case_resolved` | `restricted` | audit only | A case closed, with an outcome. |
+| `moderation.evidence_captured` / `.evidence_read` | `restricted` | audit only | Evidence was captured or read. |
+| `moderation.decision_recorded` / `.decision_reversed` | `restricted` | audit only | A decision was recorded or reversed. |
+| `moderation.restriction_applied` | `user` | audit or analytics | Capabilities were removed, with the case reference, the decision, and the standing it produced. |
+| `moderation.restriction_lifted` | `user` | audit or analytics | A restriction was lifted. |
+| `account_state.changed` | `public` | **audit only** | The account machine transitioned. Carries the new standing, the effective capabilities, and the removed set — and deliberately **not** a case id, because a case reference on a `public` event tells any consumer which case a named person is in. |
 
-### 2.5 Safety and moderation (Trust & Safety, Moderation)
-
-| Event | Source | Emitted when | Sensitivity | Role |
-|-------|--------|--------------|-------------|------|
-| `block.changed` | Moderation | A block edge is created or lifted; carries the blocker as actor, never the blocked user as an actor | `user` (bus) / `internal` (analytics projection) | Safety |
-| `report.submitted` | Moderation | A report is filed; idempotency key in §4, row 4 | `internal` | Safety |
-| `case.opened` | Moderation | A moderator opens a case, from a report, a risk escalation, or an abuse pattern; carries `origin` | `restricted` (bus) / `internal` (analytics projection) | Safety |
-| `case.resolved` | Moderation | A case closes with outcome `warned` \| `restricted` \| `suspended` \| `banned` \| `cleared` | `restricted` (bus) / `internal` (analytics projection) | Safety |
-| `account_state.changed` | Moderation | The account machine transitions; carries `from`, `to`, and for enforcement moves `caseId` and `moderatorId` | `public` (bus) / `internal` (analytics projection) | Safety |
-| `account.restriction.applied` | Moderation | `to === 'limited'`; carries `removedCapabilities` and `caseId` | `public` (bus) / `internal` (analytics projection) | Safety |
-| `account.restriction.lifted` | Moderation | `to === 'active'` from `limited` | `public` (bus) / `internal` (analytics projection) | Safety |
-| `risk.changed` | Trust & Safety | The risk machine transitions; carries `from`, `to`, and the **set** of detector names that fired | `internal` | Safety |
-| `risk.assessed` | Trust & Safety | A risk evaluation completes for a window; carries `state` and `detectorCount`, never a raw score | `internal` | Safety |
-| `moderation.appealed` | Moderation | A user contests an enforcement outcome | `internal` | Safety |
-### 2.6 Notifications (Platform)
-
-| Event | Source | Emitted when | Sensitivity | Role |
-|-------|--------|--------------|-------------|------|
-| `notification.dispatched` | Platform | A notification is handed to a channel adapter | `internal` | Health |
-| `notification.suppressed` | Platform | A notification is withheld: preferences, quiet hours, block separation, or a non-existent recipient | `internal` | Health |
-| `notification.failed` | Platform | All channels for a notification exhausted their retries | `internal` | Health |
-| `notification.duplicate_prevented` | Platform | An idempotency key was already dispatched | `internal` | Health |
-
-`notification.duplicate_prevented` is the observable proof that idempotency is
-working; a rate that is exactly zero on a working system means the key is being
-computed wrong and collisions are being caused by over-broad keys.
-
-### 2.7 Platform health (Platform)
-
-| Event | Source | Emitted when | Sensitivity | Role |
-|-------|--------|--------------|-------------|------|
-| `slo.error_budget_exhausted` | Platform | A service exhausts its error budget for the window | `internal` | Health |
-| `alert.fired` | Platform | An alert in §5.2 transitions to firing | `internal` | Health |
-| `provider.verification_call` | Platform | A verification provider call completes; carries `outcome` and `latencyMs`, never the payload | `internal` | Health |
-| `dependency.failed` | Platform | An external dependency call fails after retries | `internal` | Health |
+`moderation.restriction_applied` is the event the enforcement notifications are
+triggered by, and the reason it is a `user`-clearance event in its own right: the
+restricted user is entitled to the case reference that decides their case, and
+that is a fact about them, not about anyone else.
 
 ## 3. Metric definitions
 
@@ -239,6 +338,16 @@ at least 24 h (`occurredAt` based, not ingest based — a funnel that shifts whe
 the pipeline shifts is not a funnel). Percentages are shown to one decimal.
 
 The rates that are easy to get wrong are marked **[denominator trap]**.
+
+**Where each metric is computed**, because the answer decides which store it can
+be computed from. A metric whose unit of analysis is a *count* is a §2.1 sink
+series. A metric that has to identify a person — a report filed, a case opened, a
+case closed, a block — is **not** computable from analytics at all:
+`ANALYTICS_FORBIDDEN_PROPERTIES` refuses `caseId`, `reportId` and `conversationId`
+to the sink, and that refusal is the design. Those metrics are computed from the
+**audit log** at whatever clearance the review requires, and the analytics sink
+holds only the anonymous counters that make their shape visible. Each metric below
+names its store; a metric that does not is a metric nobody has built.
 
 ### 3.1 Verification completion rate
 
@@ -258,28 +367,32 @@ The rates that are easy to get wrong are marked **[denominator trap]**.
 ### 3.3 Fraudulent profiles passing verification
 
 - **Formula:** `confirmed-fraudulent users who reached 'verified' ÷ users who reached 'verified'`
-- **Numerator:** users with a `confirmed_fraudulent` moderator finding, i.e. a `case.resolved` with outcome `banned` or `suspended` on fraud grounds, at any time **after** the verification event, attributed back to the verification cohort.
+- **Store:** audit log (a `moderation.case_resolved` with a subject); the denominator's `verification.attempt.completed` series is in the sink.
+- **Numerator:** users with a `confirmed_fraudulent` moderator finding, i.e. a `moderation.case_resolved` with outcome `banned` or `suspended` on fraud grounds, at any time **after** the verification event, attributed back to the verification cohort.
 - **Denominator:** distinct users with `verification.attempt.completed` labelled `verified` in the cohort window.
 - **[denominator trap]** The denominator is *all verified users*, not the moderated subset. Using "fraudulent profiles among reviewed cases" measures the review queue's composition, not the product's failure rate.
 - **Pitfalls:** outcome-based, so it has a long tail and a small numerator — report it as a rate with a confidence interval and a minimum-count gate, never as a bare percentage. A sudden drop is as meaningful as a rise: it usually means moderation stopped, not that fraud stopped. It is also the metric most vulnerable to a loophole, so it is paired with the primary metric in §3.6.
 
 ### 3.4 Reports per 1,000 conversations
 
-- **Formula:** `distinct report.submitted ÷ distinct conversation.created × 1000`
+- **Formula:** `distinct moderation.report_submitted ÷ distinct conversation.created × 1000`
+- **Store:** the numerator is a `moderation.report_submitted` in the **audit log**; the denominator is the `conversation.created` sink counter. The two are joined in analysis, not in the sink.
 - **Denominator:** conversations created in the same window, **excluding conversations that a block later invalidated** (per [Privacy & User Settings §5.1](./privacy-and-user-settings.md)), so that a block spike does not deflate the rate.
 - **Pitfalls:** one user filing five reports about one person is one numerator unit; dedupe by `(reporterId, subjectId)` per window and count the excess separately as `repeat_reporter` — that is itself a signal (a target being hammered, or a reporter misusing the form). Reports about *messages* and reports about *profiles* have different base rates and are reported separately, not summed.
 
 ### 3.5 Blocks per 1,000 conversations
 
-- **Formula:** `distinct block.changed ÷ distinct conversation.created × 1000`
+- **Formula:** `distinct block.created ÷ distinct conversation.created × 1000`
+- **Store:** both are sink series. A block edge carries no case and no report, which is what makes it a disclosure-free safety action and also what lets it be counted anonymously.
 - **Denominator:** as §3.4.
 - **Pitfalls:** a block is a *disclosure-free* safety action, so a rising block rate is often a rising trust signal rather than a rising harassment rate — it can mean users feel safe enough to act. It must be read with §3.9: blocks rising while reports stay flat is the expected shape of a healthy block feature. The number to alert on is the **block-to-report ratio**, because a low ratio means users are preferring conversation to disengagement.
 
 ### 3.6 High-risk behaviour detected before first report — **the primary safety metric**
 
-- **Formula:** `users whose risk machine first reached 'high' or 'critical' before any report.submitted named them ÷ users who became a confirmed malicious account`
-- **Denominator:** users with a confirmed malicious finding (`case.resolved` → `banned`, or `suspended` with a repeat-offence finding) in the window.
-- **Numerator:** those users for whom there exists a `risk.changed` with `to ∈ {'high','critical'}` whose `occurredAt` is **earlier** than the first `report.submitted` naming them — or, for undetected-by-report cases, earlier than the `case.opened` that led to the finding. When both exist, the earlier of the two wins.
+- **Formula:** `users whose risk machine first reached 'high' or 'critical' before any `moderation.report_submitted` named them ÷ users who became a confirmed malicious account`
+- **Store:** **audit log** for all three inputs. This is the primary safety metric and every one of its terms needs a subject, which is precisely why the sink may not hold it.
+- **Denominator:** users with a confirmed malicious finding (`moderation.case_resolved` → `banned`, or `suspended` with a repeat-offence finding) in the window.
+- **Numerator:** those users for whom there exists a `risk.changed` with `to ∈ {'high','critical'}` whose `occurredAt` is **earlier** than the first `moderation.report_submitted` naming them — or, for undetected-by-report cases, earlier than the `moderation.case_opened` that led to the finding. When both exist, the earlier of the two wins.
 - **[denominator trap]** The denominator is **confirmed malicious accounts**, not all users. "Percentage of high-risk behaviour detected before first report" over an all-user denominator is a meaningless small number, and it is the single most common way this metric is misreported.
 - **[denominator trap]** The numerator must exclude the moderator who opened the case from the detection path. A case opened *because* a human read the reports is not proactive detection.
 - **Pitfalls:** `risk.changed` ordering must use `occurredAt`, not ingest time, or a late-arriving signal will be scored as a miss; a user with two `high` episodes is one unit; and because a confirmed-malicious cohort is small, report this with a cohort size and a Wilson interval, and treat a single-week move as noise.
@@ -287,13 +400,17 @@ The rates that are easy to get wrong are marked **[denominator trap]**.
 
 ### 3.7 Moderator cases per 1,000 users
 
-- **Formula:** `distinct case.opened ÷ distinct account.registration_completed × 1000`
+- **Formula:** `distinct moderation.case_opened ÷ distinct account.registration_completed × 1000`
+- **Store:** the numerator is a `moderation.case_opened` in the **audit log**; the denominator is the `account.registration_completed` sink counter.
 - **Denominator:** users created in the same window, all states, including `banned`. The alternative denominator (active users only) makes the rate fall every time enforcement works, which is the wrong direction.
-- **Pitfalls:** a case opened on a report and a case opened on a risk escalation are different work; `case.opened` carries an `origin` and the two rates are reported side by side. `case.opened` also counts cases later closed as `cleared`, which is intended — moderator time is spent either way.
+- **Pitfalls:** a case opened on a report and a case opened on a risk escalation are different work; `moderation.case_opened` carries an `origin` and the two rates are reported side by side. It also counts cases later closed as `cleared`, which is intended — moderator time is spent either way.
 
 ### 3.8 Median moderation resolution time
 
-- **Formula:** `median(case.resolved.occurredAt − case.opened.occurredAt)`
+- **Formula:** `median(moderation.case_resolved.occurredAt − moderation.case_opened.occurredAt)`
+- **Store:** **audit log**, joined on `caseId`. A sink that could be sliced by case
+  could be sliced by person, which is the one query this document exists to
+  prevent.
 - **Denominator:** cases **resolved** in the window. Cases still open are excluded from the median and reported separately as the open-case count and the oldest-open-case age — a median over resolved cases alone will look excellent on the day a backlog is being ignored.
 - **Pitfalls:** report the **p90 and p99 alongside the median**; a safety queue with a healthy median and a p99 of nine days is an unattended queue. Report by `origin` and by `priority` separately. Resolution time for a case that waits on the user (an appeal requiring information) is time the moderator is not spending, and excluding it is the difference between a queue metric and a service metric.
 - **SLO link:** this metric has a target, not just a definition — median ≤ 24 h, p90 ≤ 72 h (§5.1).
@@ -301,6 +418,7 @@ The rates that are easy to get wrong are marked **[denominator trap]**.
 ### 3.9 Match → first-message rate
 
 - **Formula:** `matches where the first message was sent by either party within 24 h ÷ all matches created in the window × 100`
+- **Store:** `match.created` and the `message.recorded` sink counters give the shape; the *per-match* first-message fact comes from the `conversation.activity` rollup, which Communication builds for Trust & Safety and which the sink may not rebuild because a conversation is a key.
 - **[denominator trap]** The denominator is **all matches**, not "matches whose counterpart is still active". Filtering the denominator to active users inflates the rate exactly when the product is doing well, because the matches most likely to go quiet are with newly-signed-up users.
 - **[denominator trap]** The 24-hour window is measured from `match.created` to the **first** `message.recorded` in the conversation, and the numerator counts a match once regardless of who spoke first. Two of these — "who spoke first" and "did anyone speak" — are separate metrics and get reported separately.
 - **Pitfalls:** exclude a match from the numerator only when the counterpart was, at match time, `limited` in `send_message` — the silence is the platform's doing, not the user's.
@@ -308,6 +426,7 @@ The rates that are easy to get wrong are marked **[denominator trap]**.
 ### 3.10 Conversations with replies from both users
 
 - **Formula:** `conversations with ≥1 message.recorded from each participant ÷ all conversation.created in the window × 100`
+- **Store:** sink counters for the denominator, the `conversation.activity` rollup for the per-conversation numerator.
 - **Denominator:** all conversations, including ones with zero messages. A conversation is created at match time, so this is well-defined and the denominator does not depend on the outcome being measured.
 - **Pitfalls:** the message can be a single character and still counts — there is no quality bar in v0.1 and inventing one turns a participation metric into an opinion; conversations where one party has since been blocked stay in the denominator, because removing them after the fact is exactly the selection effect that makes blocks and reports look better than they are.
 
@@ -321,7 +440,20 @@ The rates that are easy to get wrong are marked **[denominator trap]**.
 
 ### 3.12 Support metrics
 
-Not in issue #1's list, but required to interpret the list: `settings.updated` rate, notification opt-out rate per kind (a support signal, not a preference metric), `moderation.appealed` rate as a proxy for disagreement, and `repeat_reporter` count. Appeal rate is the early-warning indicator for a false-positive regression, and it moves days before the outcome metrics do.
+Not in issue #1's list, but required to interpret the list: the `settings.updated`
+rate, the notification opt-out rate per kind (a support signal, not a preference
+metric), the **appeal rate** as a proxy for disagreement, and the `repeat_reporter`
+count. The appeal rate is the early-warning indicator for a false-positive
+regression, and it moves days before the outcome metrics do.
+
+**There is no `moderation.appealed` event, and the appeal rate does not need
+one.** An appeal is a case, and `moderation.case_opened` carries the `origin` that
+distinguishes it from a report or a risk escalation. An event named after the
+*action* rather than the case would be a second name for one fact, and it would
+have been an event with no emitter for as long as the appeal flow did not exist —
+which is exactly the shape of promise the bus does not keep. The rate is
+`count(moderation.case_opened where origin = 'appeal')` from the audit log, and it
+is the earliest signal in the set.
 
 ## 4. Idempotency and reliability of critical actions
 
@@ -346,7 +478,7 @@ Not in issue #1's list, but required to interpret the list: `settings.updated` r
 - **Retries never re-evaluate a decision.** A retried restriction application does not re-run detection or re-open a case; a retried report does not create a second case; a retried like does not re-run eligibility. The decision was made on the first attempt and is replayed.
 - **The client never sees a bare failure.** Every terminal failure maps to one of: a specific user-facing error, or a receipt saying the action is in progress. "Something went wrong" is not an acceptable outcome for a critical action, because the only safe response to it is "press it again".
 - **Bounded exposure of an in-flight action.** While a restriction or a deletion is pending, the user is in an explicit `*_pending` state whose product behaviour is defined (not in discovery, not messaging), so a half-applied enforcement action has no product meaning.
-- **Every critical action emits an event even on replay.** `notification.duplicate_prevented`-style accounting applies to all of them: an idempotent replay is observable in the health metrics, so a client stuck in a retry loop is visible in the dashboard rather than only in the logs.
+- **Every critical action emits an event even on replay.** The accounting is the same shape for all five: an idempotent replay is observable in the health metrics, so a client stuck in a retry loop is visible in the dashboard rather than only in the logs. For notifications that is a `notification.suppressed` with `suppression_reason = 'duplicate'`; for the other four it is the domain's own replay counter.
 
 ## 5. Product health
 
@@ -385,17 +517,17 @@ alert as behavioural is how a real outage is misread as a product problem.
 
 | Alert | Condition | Severity | First hypothesis |
 |-------|-----------|----------|-------------------|
-| Verification completion collapse | >20% relative drop vs. same-hour 7-day baseline, for 2 h | **Page** | Verification pipeline or provider failure. Check `provider.verification_call` and `dependency.failed` first, not user sentiment |
+| Verification completion collapse | >20% relative drop vs. same-hour 7-day baseline, for 2 h | **Page** | Verification pipeline or provider failure. Check `provider.verification_call` and `integration.call_failed` first, not user sentiment |
 | Verification provider error rate | >5% over 15 min | **Page** | Provider degradation |
-| Block action failing | Any `block.changed` write failure | **Page** | Zero budget; a broken block is a safety outage |
+| Block action failing | Any `block.created` write failure | **Page** | Zero budget; a broken block is a safety outage |
 | Report submission failure | >2% over 15 min | **Page** | Users believe reports are being silently lost |
 | Enforcement notification not delivered | Any `notification.failed` for a critical kind | **Page** | A user is being enforced against without being told |
 | Message send success | <99.5% over 10 min | **Page** | Transport or database |
 | Match creation error | >1% over 10 min | **Page** | Transaction failure in like/match |
 | Event bus lag | p95 >5 min, or ingest loss >0.5% | **Page** | Every dashboard is now lying |
-| Duplicate critical action detected | `notification.duplicate_prevented` >0 outside client retry bursts, or any non-replay `duplicate_prevented` on like/match/restriction | **Page** | Idempotency key is wrong; a double-enforcement or double-like is in progress |
+| Duplicate critical action detected | A `duplicate` suppression on an **enforcement** notification outside a retry burst, or any non-replay duplicate on like/match/restriction | **Page** | Idempotency key is wrong; a double-enforcement or double-like is in progress. A duplicate on a *message* notice is routine and is not an alert |
 | Moderation queue age | Oldest open case >24 h, or p90 resolution >72 h | **Ticket → page** | Moderation capacity, not moderation policy |
-| Appeal rate spike | >2× 4-week baseline over 7 days | **Ticket** | Likely a false-positive regression; a leading indicator of the outcome metrics |
+| Appeal rate spike | `moderation.case_opened` with `origin = 'appeal'` above 2× the 4-week baseline over 7 days | **Ticket** | Likely a false-positive regression; a leading indicator of the outcome metrics. Read from the audit log, where every appeal is a case |
 | Block rate spike | >3× 4-week baseline over 24 h | **Ticket** | Either a real harm wave, or a false-positive enforcement wave making users block instead of report. Check against reports and risk before concluding |
 | Risk-state distribution shift | Share of users at `high` or `critical` moves >50% relative in 24 h | **Ticket** | A detector changed, or a detector's input broke. This is the metric that catches a silent detector regression |
 | `discovery.exhausted` spike | >10% of sessions for 1 h | **Ticket** | Eligibility filters or identity expiry, not a lack of users. A sudden rise usually means `verified` users stopped being discoverable |
@@ -416,7 +548,7 @@ thirty minutes of nothing.
 | **Safety** | §3.3–§3.6 primary metrics with cohort sizes and intervals, the block-to-report ratio, the risk-state distribution, `safety.high_risk_before_first_report` with its cohort size, and the appeal rate | Safety, product |
 | **Moderation ops** | Open case count by `origin` and priority, median/p90/p99 resolution time, outcome mix, the `account_state.changed` volume, and moderator throughput per case type | Moderation |
 | **Reliability** | All SLOs with error-budget burn rate, idempotency replay counts, partial-failure counts, and the alert history | Engineering |
-| **Notification health** | Dispatch success and latency by kind and channel, `notification.suppressed` by reason, `notification.failed`, and `notification.duplicate_prevented` | Product, engineering |
+| **Notification health** | Delivery success and latency by kind and channel, `notification.suppressed` by reason including `duplicate`, and `notification.failed` | Product, engineering |
 | **Privacy audit** | Reads of `sensitive` fields, cross-clearance delivery refusals, and a count of notification bodies whose bound fields exceed `public` | Engineering, safety |
 
 The privacy audit dashboard is not optional. It is the operational expression of
@@ -462,18 +594,37 @@ accident even if it wanted to.
 
 ### 6.3 Sampling policy
 
-| Event class | Sampling | Why |
-|-------------|----------|-----|
-| Safety events (`report.submitted`, `block.changed`, `case.opened`, `case.resolved`, `account_state.changed`, `account.restriction.*`, `risk.*`, `conversation.flagged_pattern`, `message.withheld_by_system`, `verification.review.proposed`, `verification.anomaly`, `verification.re_verification.requested`, `moderation.appealed`) | **100%** | Rare, high-consequence, and the sample size is already small. Sampling safety data makes every safety metric in §3 wrong, and it is the class most likely to be needed in a dispute |
-| Funnel step events (`account.app_opened`, `account.registration_started`, `account.registration_completed`, `account.onboarding_step_completed`, `account.registration_rejected`, `verification.attempt.started`, `verification.attempt.completed`, `profile.published`, `discovery.entered`, `like.recorded`, `match.created`, `conversation.created`, `message.recorded`) | **100%** | The denominators of §3 live here. A sampled funnel step makes every downstream rate a biased estimate |
-| `discovery.page_served` | **10%, deterministic hash of `userId` + `sessionId`** | The one genuinely high-volume event: ten cards per request. A deterministic hash keeps the sample unbiased across users and time, so a 10% sample scales to the full population rather than skewing toward whoever arrives first. Any rate computed from it uses the hash as a weighting factor, and the dashboard says "sampled" on the tile |
-| `message.read`, `preferences.updated`, `settings.updated`, `moderation.appealed`, `discovery.exhausted` | **100%** | Low volume, and several are leading safety indicators |
-| `notification.*` | 100% aggregate, `notification.dispatched`/`failed` sampled at 25% by the same hash | Volume scales with messages |
-| Health events (`slo.*`, `alert.fired`, `dependency.failed`, `provider.verification_call`) | 100% counters, 100% with a 1-minute rollup for high-cardinality series | Counters, not rows |
+**The rate is a column in §2.1, not a decision made at a call site.**
+`AnalyticsEventSpec.sampleRate` holds it, `recordAnalyticsEvent` reads it from
+there, and there is no parameter a caller can pass. That is the whole rule, and it
+is enforced rather than described: a rate chosen per call site is a per-site
+decision that drifts the moment two services disagree about it, and a rate that
+drifts silently changes a metric's denominator — which is the one thing §3's
+denominator discipline is for.
 
-Rule: **sampling is chosen per event, once, in this table.** An ad-hoc sample
-rate on an unlisted event is a schema change, because it silently changes a
-metric's denominator.
+Three rates exist, and the reasons are the only three reasons any event should
+ever be sampled:
+
+| Rate | Events | Why |
+|------|--------|-----|
+| **100%** | Everything else, including every funnel step and every safety counter | A sampled funnel step makes every downstream rate a biased estimate, and a sampled safety counter makes the safety metrics wrong. The sample size is already small. |
+| **10%** | `discovery.page_served` | The one genuinely high-volume event: ten cards per request. Ten per cent of it extrapolates to the population. |
+| **25%** | `notification.delivered`, `notification.failed` | Volume scales with messages. `notification.suppressed` stays at 100% because it is a support signal, not a volume signal: a suspiciously high suppression rate on a category is more likely a bug than a preference, and a sampled bug is a bug nobody sees. |
+
+**What the sample is keyed on: the correlation id.** `isSampled` hashes the
+`correlationId` and nothing else, and that is a constraint rather than a shortcut
+— `userId` and `sessionId` are both on `ANALYTICS_FORBIDDEN_PROPERTIES`, so a
+hash over either is not merely unwise, it is unconstructible. It also would have
+been the wrong thing if it were: sampling keyed on a user id makes the sample a
+function of *who the user is*, which is a per-user sampling decision wearing a
+uniform's clothes and biases any per-cohort rate built from it. Hashing the
+correlation id keeps the sample unbiased across users and time, so a 10% sample
+scales to the full population rather than skewing toward whoever arrives first.
+The consequence to accept is that a retried publish of the same fact lands on the
+same side of the rate, which is what stops it double-counting.
+
+Any rate computed from a sampled event carries a weighting factor, and the
+dashboard says "sampled" on the tile.
 
 ### 6.4 Retention
 
@@ -554,7 +705,7 @@ missing metric, and a missing metric cannot be reconstructed after launch.
   rate, delete the evidence" trade. It preserves historical comparability at the
   cost of a per-user identifier in an aggregate, which is a regulatory question
   and not a technical one.
-- Whether moderation capacity is staffed for a `case.opened` rate that is
+- Whether moderation capacity is staffed for a `moderation.case_opened` rate that is
   2× the projected load if §3.6 shows proactive detection working. Proactive
   detection generating cases is a success that costs money, and the trigger to
   hire is not written down.
@@ -563,6 +714,21 @@ missing metric, and a missing metric cannot be reconstructed after launch.
   currently only surfaces at moderation, but an anomaly is a signal and not a
   finding, so counting it as a pass-through failure would inflate the metric with
   false positives. Recorded rather than guessed.
+- **Should `review_candidate.raised` and `friction.proposed` be audit-only?**
+  Trust & Safety publishes both at `internal`, and neither is on the
+  audit-required list, so both currently reach the metrics sink. That is
+  defensible — a detector's output volume is a health metric, and the payloads
+  are proposals rather than decisions — but it is also the only place a safety
+  domain's outward stream is not audit-only, and the exception was made by
+  omission rather than by decision. It needs to be one or the other on purpose.
+  Not changed here: Trust & Safety's own document owns the claim, and this
+  document does not get to make that call for it.
+- **What is the source for the privacy-audit dashboard's "reads of `sensitive`
+  fields"?** The audit log covers `restricted` and below; a read of a `sensitive`
+  field by a moderator is logged as an audit action, but the *count* the
+  dashboard needs has no §2.1 name, and inventing one would put a read counter in
+  a sink that is not allowed to know who read. Likely a service-side metric
+  rather than a sink event, which is why it is written down instead of guessed.
 - Whether `blocked` is a reportable outcome in its own right in §3.4. The
   overview commits to safety being structural, and a block is disclosure-free
   disengagement rather than a harm claim, so the two are counted separately.

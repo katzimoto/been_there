@@ -21,6 +21,7 @@ import {
   type AccountStateChangedPayload,
   type ModerationContext,
   OUTWARD_ENFORCEMENT_EVENT,
+  type RestrictionAppliedPayload,
 } from './events.js';
 import type { DecisionId } from './ids.js';
 import { type Report, reportMachine } from './report.js';
@@ -346,13 +347,21 @@ export function decide(
   ];
 
   if (decision.accountEvent !== null) {
+    const removedCapabilities = decision.removedCapabilities;
     const payload: AccountStateChangedPayload = {
       accountState: decision.resultingAccountState,
-      capabilities: capabilitiesFor(decision.resultingAccountState, {
-        removedCapabilities: decision.removedCapabilities,
-      }),
+      capabilities: capabilitiesFor(decision.resultingAccountState, { removedCapabilities }),
+      removedCapabilities,
+    };
+    const toSubject: RestrictionAppliedPayload = {
+      caseId: decision.caseId,
+      decisionId: decision.decisionId,
+      accountState: decision.resultingAccountState,
+      removedCapabilities,
     };
     events.push(
+      // Public: any surface enforcing the capability set needs it, and it carries
+      // no reason.
       ctx.events.emit<AccountStateChangedPayload>({
         type: OUTWARD_ENFORCEMENT_EVENT,
         actorId: command.actor.actorId,
@@ -360,6 +369,16 @@ export function decide(
         correlationId: command.correlationId,
         sensitivity: 'public',
         payload,
+      }),
+      // User: the same decision, addressed to the person it was taken against,
+      // and the only place a case id leaves the restricted record.
+      ctx.events.emit<RestrictionAppliedPayload>({
+        type: 'moderation.restriction_applied',
+        actorId: command.actor.actorId,
+        subjectId: decision.subjectId,
+        correlationId: command.correlationId,
+        sensitivity: 'user',
+        payload: toSubject,
       }),
     );
   }
@@ -463,6 +482,10 @@ export function reverseDecision(
       sensitivity: 'restricted',
       payload: { decisionId, reverses: command.reverses.decisionId },
     }),
+    // A reversal restores exactly what the reversed decision removed, so the
+    // subject is told the same four things about the lift that they were told
+    // about the restriction. The public event carries an empty removed set: a
+    // lift takes nothing away, whatever the sanctioned decision named.
     ctx.events.emit<AccountStateChangedPayload>({
       type: OUTWARD_ENFORCEMENT_EVENT,
       actorId: command.actor.actorId,
@@ -472,6 +495,20 @@ export function reverseDecision(
       payload: {
         accountState: decision.resultingAccountState,
         capabilities: capabilitiesFor(decision.resultingAccountState),
+        removedCapabilities: [],
+      },
+    }),
+    ctx.events.emit<RestrictionAppliedPayload>({
+      type: 'moderation.restriction_lifted',
+      actorId: command.actor.actorId,
+      subjectId: decision.subjectId,
+      correlationId: command.correlationId,
+      sensitivity: 'user',
+      payload: {
+        caseId: decision.caseId,
+        decisionId: decision.decisionId,
+        accountState: decision.resultingAccountState,
+        removedCapabilities: command.reverses.removedCapabilities,
       },
     }),
   ];

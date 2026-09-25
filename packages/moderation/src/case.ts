@@ -696,8 +696,12 @@ export function mergeReports(
     reversal: null,
     detail: { merged: mergedReportIds.length, reportTotal: updated.reportIds.length },
   });
+  // A merge is not a resolution. This used to publish `moderation.case_resolved`
+  // with a merge payload, so a bus consumer read "this case is over" at the
+  // moment reports were folded into it, and `case_reports_merged` — the event
+  // declared for exactly this — was published from nowhere in the package.
   ctx.events.emit({
-    type: 'moderation.case_resolved',
+    type: 'moderation.case_reports_merged',
     actorId: actor.actorId,
     subjectId: updated.subjectId,
     correlationId,

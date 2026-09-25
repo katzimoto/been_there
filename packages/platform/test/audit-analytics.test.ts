@@ -7,13 +7,14 @@ import {
   auditRequestFromEvent,
   classify,
   isAuditRequired,
+  CONTENT_BEARING_TYPES,
   isSampled,
   readAuditRecord,
   recordAnalyticsEvent,
   routeEvent,
   type AuditAppendRequest,
 } from '../src/index.js';
-import { correlationId, domainEvent, subjectId, succeeded } from './helpers.js';
+import { correlationId, domainEvent, rejected, subjectId, succeeded } from './helpers.js';
 
 const ALICE = castId<'UserId'>('u-alice') as UserId;
 const NOW = new Date('2026-03-01T12:00:00.000Z');
@@ -128,14 +129,12 @@ describe('routing between the two sinks', () => {
     expect(route).toEqual({ audit: true, analytics: false, rejection: 'audited_only' });
   });
 
-  it('sends content nowhere at all', () => {
-    for (const type of ['message.sent', 'profile.bio_updated']) {
-      expect(routeEvent(domainEvent({ type, sensitivity: 'user' }))).toEqual({
-        audit: false,
-        analytics: false,
-        rejection: 'content',
-      });
-    }
+  it('sends content nowhere at all, whatever the clearance', () => {
+    // Content is refused by name, not by class: an event carrying a message
+    // reaches neither sink even for a reader cleared to see its payload.
+    const sent = domainEvent({ type: 'communication.message_sent', sensitivity: 'restricted' });
+
+    expect(routeEvent(sent)).toEqual({ audit: false, analytics: false, rejection: 'content' });
   });
 
   it('allows an ordinary product event to analytics but not to audit', () => {
@@ -183,9 +182,16 @@ describe('routing between the two sinks', () => {
   });
 
   it('keeps a content event out of the metrics sink by type, not by hope', () => {
-    const body = domainEvent({ type: 'message.sent', sensitivity: 'user' });
-
-    expect(routeEvent(body)).toEqual({ audit: false, analytics: false, rejection: 'content' });
+    // The name Communication actually publishes. The list used to hold four
+    // names that no package emits, so this guard was protecting nothing while
+    // reading as though it were.
+    for (const type of CONTENT_BEARING_TYPES) {
+      expect(routeEvent(domainEvent({ type, sensitivity: 'user' })), type).toEqual({
+        audit: false,
+        analytics: false,
+        rejection: 'content',
+      });
+    }
   });
 });
 
@@ -196,7 +202,6 @@ describe('analytics discipline', () => {
       occurredAt: NOW,
       correlationId: correlationId('a-1'),
       properties: {},
-      sampleRate: 1,
     });
 
     expect(result.ok).toBe(false);
@@ -208,7 +213,6 @@ describe('analytics discipline', () => {
       occurredAt: NOW,
       correlationId: correlationId('a-1'),
       properties: {},
-      sampleRate: 1,
     });
 
     expect(result.ok).toBe(false);
@@ -221,7 +225,6 @@ describe('analytics discipline', () => {
         occurredAt: NOW,
         correlationId: correlationId('a-1'),
         properties: { [property]: 'x' },
-        sampleRate: 1,
       });
       expect(result.ok, property).toBe(false);
     }
@@ -235,23 +238,41 @@ describe('analytics discipline', () => {
       occurredAt: NOW,
       correlationId: correlationId('a-1'),
       properties: { surface: 'api', something_new: 'value' },
-      sampleRate: 1,
     });
 
     expect(result.ok).toBe(false);
     expect(ANALYTICS_EVENTS['account.session_started'].dimensions).toEqual(['surface', 'auth_method']);
   });
 
-  it('refuses a sample rate outside [0, 1]', () => {
+  it('takes the sampling rate from the catalogue, not from the call site', () => {
+    const recorded = succeeded(
+      recordAnalyticsEvent({
+        name: 'discovery.page_served',
+        occurredAt: NOW,
+        correlationId: correlationId('a-1'),
+        properties: { pool_bucket: 'healthy' },
+      }),
+    );
+
+    // The declared rate is the whole of the policy: a caller cannot raise it to
+    // make a dashboard look fuller, and cannot lower it to make one quieter.
+    expect(ANALYTICS_EVENTS['discovery.page_served'].sampleRate).toBe(0.1);
+    const sampled = Array.from({ length: 1000 }, (_, index) =>
+      isSampled(correlationId(`page-${index}`), ANALYTICS_EVENTS['discovery.page_served'].sampleRate),
+    ).filter(Boolean).length;
+    expect(sampled).toBeGreaterThan(60);
+    expect(sampled).toBeLessThan(160);
+  });
+
+  it('refuses a conversation key, which is a pseudonym for two people', () => {
     const result = recordAnalyticsEvent({
-      name: 'account.session_started',
+      name: 'message.recorded',
       occurredAt: NOW,
       correlationId: correlationId('a-1'),
-      properties: {},
-      sampleRate: 1.5,
+      properties: { conversationId: 'conv-1' },
     });
 
-    expect(result.ok).toBe(false);
+    expect(rejected(result).code).toBe('validation_failed');
   });
 
   it('accepts a well-formed event and records no identifier of its own', () => {
@@ -260,7 +281,6 @@ describe('analytics discipline', () => {
       occurredAt: NOW,
       correlationId: correlationId('a-1'),
       properties: { step: 'photos', source: 'onboarding' },
-      sampleRate: 1,
     });
 
     expect(result.ok).toBe(true);

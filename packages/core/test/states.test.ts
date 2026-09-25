@@ -106,12 +106,40 @@ describe('identity machine', () => {
     ).toBe(false);
   });
 
-  it('re-verification re-enters pending from any trusted state', () => {
-    for (const from of ['verified', 'expired', 'review_required'] as const) {
+  it('re-verification re-enters pending from verified and expired', () => {
+    for (const from of ['verified', 'expired'] as const) {
       expect(
         succeeded(identityMachine.next(from, 'reverify_requested', { reVerification: true })),
       ).toBe<IdentityState>('pending');
     }
+  });
+
+  it('refuses to re-verify an account out of human review, by any requester', () => {
+    // Automation must not walk a case back out from under a reviewer. The
+    // caller-supplied context claims a re-verification; the kernel still refuses.
+    expect(
+      identityMachine.can('review_required', 'reverify_requested', { reVerification: true }),
+    ).toBe(false);
+    expect(
+      rejected(identityMachine.next('review_required', 'reverify_requested', { reVerification: true })),
+    ).toBe(true);
+  });
+
+  it('leaves a flagged account only through a human decision, or by withdrawing', () => {
+    // `withdraw` is legal from every state by design - a user may always
+    // leave. What must not be possible is an automatic route out.
+    const exits = identityMachine.legalEvents('review_required');
+    expect(exits).toContain('review_cleared');
+    expect(exits).toContain('review_confirmed_fraud');
+    expect(exits).not.toContain('reverify_requested');
+    expect(exits).not.toContain('provider_result_received');
+    expect(exits).not.toContain('expire');
+  });
+
+  it('reaches a human review from a repeated verification failure', () => {
+    expect(
+      succeeded(identityMachine.next('verification_failed', 'flag_for_review', { reviewerId: 'mod-1' })),
+    ).toBe<IdentityState>('review_required');
   });
 
   it('has no way to reach verified from review_required without a review', () => {

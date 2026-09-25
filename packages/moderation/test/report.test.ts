@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { assertMachineIsTotal, capabilitiesFor, canPerform } from '@been-there/core';
 import {
+  type CasePriority,
+  REPORT_REASON_POLICY,
   type ReportState,
   openCase,
+  priorityForReason,
   reportMachine,
   submitReport,
   triageReport,
@@ -215,5 +218,74 @@ describe('submitReport input handling', () => {
     );
     expect(submission.report.relationship.status).toBe('never_matched');
     expect(submission.report.capturedEvidence[0]?.kind).toBe('profile_snapshot');
+  });
+});
+
+describe('the report reason a member can actually give', () => {
+  it('routes a report about being steered off-platform to a person-safety queue', () => {
+    // The copy catalogue offers this report and the triage taxonomy had nowhere
+    // to put it, so the only reason a member could file was `other` or a
+    // nearest-miss that triages as a scam at `normal` with no person-safety flag.
+    const h = harness();
+    const report = succeeded(
+      submitReport(h.ctx, {
+        reportId: 'rep-unsafe' as never,
+        subjectId: SUBJECT,
+        reporterId: REPORTER,
+        reason: 'unsafe_contact',
+        statement: null,
+        relationship: unmatchedRelationship(),
+        evidence: [messageEvidence()],
+        correlationId: CORRELATION,
+      }),
+    );
+
+    expect(report.report.reason).toBe('unsafe_contact');
+    expect(priorityForReason('unsafe_contact')).toBe<CasePriority>('high');
+    // Not the same queue as a scam, and not a downgrade into one.
+    expect(priorityForReason('scam_or_solicitation')).toBe<CasePriority>('normal');
+    expect(REPORT_REASON_POLICY.unsafe_contact.isPersonSafety).toBe(true);
+    expect(REPORT_REASON_POLICY.scam_or_solicitation.isPersonSafety).toBe(false);
+  });
+
+  it('opens the case at the priority the reason implies', () => {
+    const h = harness();
+    const opened = openCaseFromReport(
+      h,
+      succeeded(
+        submitReport(h.ctx, {
+          reportId: 'rep-unsafe-2' as never,
+          subjectId: SUBJECT,
+          reporterId: REPORTER,
+          reason: 'unsafe_contact',
+          statement: null,
+          relationship: unmatchedRelationship(),
+          evidence: [messageEvidence()],
+          correlationId: CORRELATION,
+        }),
+      ).report,
+    );
+
+    expect(opened.priority).toBe<CasePriority>('high');
+    expect(opened.dueAt.getTime() - opened.openedAt.getTime()).toBe(24 * 60 * 60 * 1000);
+  });
+
+  it('has a triage policy for every reason the type admits', () => {
+    // The catalogue and the taxonomy are one list; a reason with no policy row
+    // would read `undefined` at the triage gate instead of failing loudly.
+    expect(Object.keys(REPORT_REASON_POLICY).sort()).toEqual([
+      'fake_or_misleading_profile',
+      'harassment',
+      'hate_or_discrimination',
+      'impersonation',
+      'minor_safety',
+      'non_consensual_intimacy',
+      'other',
+      'scam_or_solicitation',
+      'sexual_content',
+      'spam',
+      'threats_or_violence',
+      'unsafe_contact',
+    ]);
   });
 });

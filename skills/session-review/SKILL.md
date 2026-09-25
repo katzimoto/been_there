@@ -63,9 +63,50 @@ Finish with the concrete next actions in priority order, and the single most
 important open question. If the session's work left a system in a state you
 would not want to find later, say that plainly in the first line.
 
+## 7. Turn each lesson into a durable change
+
+A review that only writes a document has not changed anything. Every entry in
+§2 must end in one of four dispositions, and an entry with none of them is not
+finished:
+
+| Disposition | Use when | Example from a real session |
+|---|---|---|
+| **A test** | The failure was a behaviour the code should have had | A commitment was unenforced → a test that fails if the guard is removed |
+| **A check** | The failure was a mistake, and a mechanical gate catches it | A lockfile drifted from `package.json` → CI runs `npm ci` |
+| **A skill** | The failure was a repeated procedural mistake | Anchored edits corrupted files → `tool-craft` §1 |
+| **Nothing** | It was a one-off | A wrong API shape guessed once and caught by the compiler |
+
+Be honest about which. A lesson recorded as a skill when a test would have
+prevented it is a lesson that will be read once and then ignored, because a note
+cannot fail. Conversely, a test for something that only ever happened once is
+noise.
+
+The test for a lesson worth keeping: **would following it have prevented the
+defect, and would a violation be visible?** A lesson that is neither enforceable
+nor checked is a note in a file nobody opens — write it down, but do not pretend
+it is a practice.
+
+## 8. Memory hygiene
+
+Skills and research documents accumulate. Once a quarter, or whenever a document
+contradicts the code:
+
+- **Delete a lesson that is no longer true.** A stale rule is worse than a
+  missing one, because it is followed confidently.
+- **Resolve a contradiction in the file that owns the rule**, not in the one
+  that noticed it.
+- **Move a lesson from a skill to a test** the moment it becomes mechanically
+  checkable. The skill keeps the reasoning; the test keeps the guarantee.
+- **Prefer one document that is right over three that are compatible.** The
+  review of this repository found specs written in parallel disagreeing with
+  their own code; the fix is a single reconciled source, not a cross-reference
+
 ## Output
 
 Write the review to `docs/research/session-reviews/<yyyy-mm-dd>-<slug>.md` when
 the session changed a design or fixed a real defect — those accumulate into
 institutional memory. For routine sessions, keep it in the commit message and
 the PR description.
+
+Then do §7 before finishing. A review with no durable change is a review that
+will be read once and repeated.

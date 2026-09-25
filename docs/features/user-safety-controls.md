@@ -173,20 +173,43 @@ Blocking is a powerful action and can be misused to silence a partner, so:
 
 ### 5.1 Reason taxonomy
 
-Six reasons plus a free-text-only escape. The list is short on purpose: a
-taxonomy is a classifier, and a person who is being harassed is not going to
-scroll a menu of thirty categories. Every reason must map to at least one
-moderation play, or it does not ship.
+Twelve reasons, in triage order, plus a free-text-only escape. The list is a
+**closed vocabulary shared with moderation** — `ReportReason` in
+`packages/moderation/src/report.ts` is the same twelve names, and the code
+below is the wire format. There is no translation layer, because a translation
+layer is where "I am being sexually harassed" quietly becomes a scam report.
 
-| Code | Shown to the user as | Play it maps to |
-|---|---|---|
-| `harassment` | "Harassment or threats" | content + behaviour review; warn/restrict/ban ladder |
-| `hate` | "Hate speech or targeting" | immediate content preservation; restrict/ban ladder |
-| `sexual_content` | "Sexual content I did not agree to" | content review; restrict |
-| `scam` | "Scam, or pretending to be someone else" | identity + message review; ban ladder |
-| `minor` | "I think this person may be under 18" | **escalated queue**: human triage, identity evidence pull |
-| `unsafe_contact` | "Pressured me to move off Been There, or shared my personal details" | contact-safety review; restrict |
-| `other` | "Something else" | free text required for this reason only |
+The length is deliberate: a taxonomy is a classifier, and a person who is being
+harassed is not going to scroll a menu of thirty categories. Every reason maps to
+at least one moderator play, or it does not ship.
+
+| Order | Code (`ReportReason`) | Shown to the user as | Play it maps to |
+|---|---|---|---|
+| 1 | `threats_or_violence` | "Threatening me or someone else" | **immediate**: 4-hour target; content + behaviour review; warn/restrict/ban ladder |
+| 2 | `non_consensual_intimacy` | "Sending me sexual content I did not agree to" | **immediate**: 4-hour target; evidence preserved; restrict/ban ladder |
+| 3 | `minor_safety` | "I think this person may be under 18" | **immediate**: 4-hour target; escalated queue, human triage, identity evidence pull |
+| 4 | `hate_or_discrimination` | "Hate speech or targeting me because of who I am" | content preservation; 24-hour target; restrict/ban ladder |
+| 5 | `unsafe_contact` | "Pressured me to move off Been There, or used my personal details" | contact-safety review; 24-hour target; restrict |
+| 6 | `sexual_content` | "Sexual content that upset me" | content review; restrict |
+| 7 | `harassment` | "Harassment or threats" | content + behaviour review; warn/restrict/ban ladder |
+| 8 | `impersonation` | "Pretending to be someone else" | identity review; 24-hour target; ban ladder |
+| 9 | `scam_or_solicitation` | "Scamming, or asking me for money" | identity + message review; ban ladder |
+| 10 | `fake_or_misleading_profile` | "Their profile is fake or misleading" | profile review |
+| 11 | `spam` | "Spam" | bulk review |
+| 12 | `other` | "Something else" | free text required for this reason only |
+
+**What changed, and why the earlier seven were wrong.** An earlier draft of this
+section offered seven codes — `harassment`, `hate`, `sexual_content`, `scam`,
+`minor`, `unsafe_contact`, `other` — while moderation triaged eleven. Four were
+the same report under a shorter name, one (`unsafe_contact`) existed in no
+vocabulary at all, and five that a member can plainly file — threats,
+non-consensual intimacy, impersonation, a fake profile, spam — were not
+offerable. A menu that cannot express a report does not prevent it; it routes it
+into `other` or into the nearest wrong reason, and both mis-triage.
+
+`unsafe_contact` is now in the taxonomy, at `high` priority and person-safety.
+Folding it into `scam_or_solicitation` would have triaged a report about being
+steered into an unmoderated channel at `normal` with no person-safety flag.
 
 Design constraints on the taxonomy:
 
@@ -194,8 +217,10 @@ Design constraints on the taxonomy:
 - Reasons are phrased as **what happened to me**, never as an accusation
   ("you are a scammer"), because the subject sees nothing — but because the
   reporter must be able to say it out loud without a false accusation on record.
-- The list is a closed set in v0.1. A new reason is a schema change, reviewed
-  like any other state change, and must ship with the moderator play it maps to.
+- The list is a closed set in v0.1. A new reason is a schema change in
+  `packages/moderation`, reviewed like any other state change, and must ship
+  with the moderator play it maps to. A reason that is not in `ReportReason`
+  cannot be sent.
 
 ### 5.2 Optional free text
 
@@ -262,7 +287,7 @@ The requirement is that a report be understandable **and submittable** in under
 | Step | Budget | Detail |
 |---|---|---|
 | Reach "Report" | ≤ 2 taps, 0 page loads beyond the current screen | message overflow menu, conversation header, profile overflow, or the Past-conversations row |
-| Pick a reason | 1 tap, 1 screen | seven rows, no submenus, no scrolling required on a 5" screen |
+| Pick a reason | 1 tap, 1 screen | twelve rows, no submenus, no scrolling on a 5" screen — the first four are the urgent ones and are at the top |
 | Add context | optional, skippable without penalty | 500 chars, no attachment picker in v0.1 — attachments would break the 30s budget and add a second upload path |
 | Submit | 1 tap | single button, `Submit report` |
 | Confirm | immediate, inline | `SAFETY_REPORT_SENT` plus a reference code, on the same screen |
@@ -523,39 +548,65 @@ Full copy, states and next steps: [`account-restrictions-and-reverification.md`]
 
 | Id | Trigger | Copy (abbreviated) |
 |---|---|---|
-| `SAFETY_ACCOUNT_RESTRICTED` | `limited` | "Your account is limited, so {removed_capabilities} is switched off. You can still {retained_capabilities}. Existing matches and messages are kept. A member of our safety team made this decision and it can be changed if the situation does." |
-| `SAFETY_ACCOUNT_SUSPENDED` | `suspended` | "Your account is paused. You cannot message or appear in discovery. Your profile and messages are kept and return in full if your account is reinstated. You can still report a problem, and you can still delete your account." |
-| `SAFETY_ACCOUNT_BANNED` | `banned` | "Your account has been closed by a member of our safety team because of {behaviour_summary}. You cannot use Been There. You can still delete your account and its data, and you can still report a problem you have experienced." |
-| `SAFETY_ACCOUNT_REINSTATED` | `reinstate` / `lift_restriction` / `lift_ban` | "Your account is active again. Everything you had is where you left it." |
+| `SAFETY_ACCOUNT_RESTRICTED` | `limited` | "Your account is limited, so {removed_capabilities} is switched off. You can still {retained_capabilities}. Existing matches and messages are kept. A member of our safety team made this decision and it can be changed if the situation does. Your reference is {case_ref}." |
+| `SAFETY_ACCOUNT_SUSPENDED` | `suspended` | "Your account is paused. You cannot message or appear in discovery. Your profile and messages are kept and return in full if your account is reinstated. You can still report a problem, and you can still delete your account. Your reference is {case_ref}." |
+| `SAFETY_ACCOUNT_BANNED` | `banned` | "Your account has been closed by a member of our safety team because of {behaviour_summary}. You cannot use Been There. You can still delete your account and its data, and you can still report a problem you have experienced. Your reference is {case_ref}." |
+| `SAFETY_ACCOUNT_REINSTATED` | `reinstate` / `lift_restriction` / `lift_ban` | "Your account is active again. Everything you had is where you left it. Your reference is {case_ref}." |
+
+`{removed_capabilities}`, `{retained_capabilities}` and `{case_ref}` all come
+from the enforcement events, none of them from a local capability table:
+`moderation.restriction_applied` (or `moderation.restriction_lifted`) carries
+`{ caseId, decisionId, accountState, removedCapabilities }` at `user`
+clearance, and `account_state.changed` carries the effective set at `public`.
+Naming the reference is what makes the notice contestable — see
+[`account-restrictions-and-reverification.md`](./account-restrictions-and-reverification.md)
+§6.4. It names the case; it never names the reporter, the evidence, the
+moderator or the reason.
 
 ### 10.3 Verification states
 
 | Id | Trigger | Copy |
 |---|---|---|
 | `SAFETY_VERIFICATION_REQUIRED` | Identity not `verified`, and something needs it | "Been Here is for verified people only, so we need to check one selfie before you can appear in discovery or message anyone. It takes about two minutes." + action `Verify now` |
-| `SAFETY_VERIFICATION_FAILED` | `verification_failed` | "We could not verify that selfie. That usually means the lighting was poor or the photo did not match your profile photos. You can try again — this is not a strike, and it does not affect anyone you have already matched." + action `Try again` |
+| `SAFETY_VERIFICATION_FAILED` | `verification_failed` | "We could not verify that selfie. That usually means the lighting was poor or the photo did not match your profile photos. This is not a strike, and it does not affect anyone you have already matched." + action `Try again`, which becomes `Try again in {minutes}` when the attempt limit is reached |
+| `SAFETY_VERIFICATION_RATE_LIMITED` | `rate_limited` on an attempt or a retake | "You have tried a few times in a row, and each try only gets as far as the same place. You can try again {retry_at} — we are not counting this against you." + action `Try again` once the time arrives |
 | `SAFETY_VERIFICATION_REVIEW` | `review_required` | "We are checking your verification by hand. This usually takes under a day. You can keep using the app while we do, and nothing you have already done is affected." |
 | `SAFETY_REVERIFICATION_REQUESTED` | `reverify_requested` (see #15 §7) | "We need to check your identity once more. It takes about two minutes and nothing else about your account changes." + action `Verify now` |
 
-The last two are the important ones: a re-verification is an **automated,
+Two of these are the important ones. A re-verification is an **automated,
 reversible** friction (ADR 0004), so its copy must not read as an accusation, and
 must not say why it was triggered. A user must not be able to infer their own
 risk state from the fact that they were asked to re-verify — that is why the
 trigger is not named.
+
+**The retry copy is not allowed to promise a retry the policy will refuse.**
+`ATTEMPT_POLICY` allows five attempts in a rolling day and a 15-minute cooldown
+on retaking one artefact, and both refusals carry a `retryAt`. A `Try again`
+button that is greyed out three times out of five is a broken promise to a person
+who has just been told their selfie did not work, so the button renders the time
+the limit lifts rather than a flat invitation. Five a day is generous for a real
+bad-photo problem and cheap to hold; it is there to stop an unattended endpoint,
+not to ration a person's afternoon.
 
 ## 11. Contract sketches
 
 Descriptive only; the implemented types live in `packages/moderation`.
 
 ```ts
-// contract sketch
+// contract sketch — the same twelve names as `ReportReason`. There is no
+// user-facing subset to map onto: the menu in §5.1 is a presentation of these.
 type ReportReasonCode =
 	| 'harassment'
-	| 'hate'
+	| 'hate_or_discrimination'
+	| 'threats_or_violence'
 	| 'sexual_content'
-	| 'scam'
-	| 'minor'
+	| 'non_consensual_intimacy'
+	| 'minor_safety'
 	| 'unsafe_contact'
+	| 'scam_or_solicitation'
+	| 'impersonation'
+	| 'fake_or_misleading_profile'
+	| 'spam'
 	| 'other';
 
 interface BlockRecord {
@@ -593,6 +644,8 @@ to its case; it does not imply that blocking opens one.
 | 5. Malicious account | a subject who blocks many people in a pattern | the pattern is observed | a **signal** is raised for Trust & Safety; no account state changes; no automatic enforcement occurs |
 | 6. False positive | a reported user who is found to have done nothing | the case is closed | the user sees nothing at any point; no notification, no counter, no timing change; the reporter sees only `SAFETY_SUBJECT_ACTIONED` if action was taken, and nothing if it was not |
 | 2. Fake-profile attempt | a profile a user never matched with | they report the profile | the report is accepted, a snapshot-only evidence bundle is created, and no conversation evidence is fabricated for a conversation that does not exist |
+| 4. Harassment | a member whose account has been restricted | the state screen renders | `{capability_line}` comes from the published `removedCapabilities` and `{case_ref}` from the `user`-clearance `moderation.restriction_applied` event. No local capability table, no hidden case id, and the appeal route is the `appeal_request` capability the state grants |
+| 4. Harassment | a member who has used five verification attempts in a day | they tap `Try again` | the action is disabled with `Try again in {minutes}`, from the `retryAt` on the `rate_limited` refusal. The copy never offers a retry the policy has already refused |
 
 ## 13. Open questions
 
@@ -600,9 +653,9 @@ to its case; it does not imply that blocking opens one.
   inside them. Blocked on a regulatory answer per market; the overview already
   records this gap. The rules in §6.2 are stated so that the *answer* is one
   number, not a re-litigation.
-- Whether a `minor` report should be time-boxed to minutes rather than hours.
-  Currently a human-triage-only queue; a fast lane is a staffing decision, not a
-  design one, but it is a real one.
+- Whether a `minor_safety` report should be time-boxed to minutes rather than
+  hours. Currently a human-triage-only queue at the 4-hour `urgent` target; a
+  fast lane is a staffing decision, not a design one, but it is a real one.
 - Whether the reporter should ever be able to add evidence to a **closed** case.
   §7.1 says no in v0.1; reopening is coupled to the appeals work in P1.
 - Whether an explicit "this account is new" signal is useful to moderators for

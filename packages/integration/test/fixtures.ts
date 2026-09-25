@@ -16,12 +16,13 @@ import {
   type IdentityStandingProjection,
   type LikeRecord,
   type MatchRecord,
+  type PassRecord,
   type RelationshipProjection,
   type SubjectStandingProjection,
   STANDING_PROJECTION_VERSION,
   relationshipView,
 } from '@been-there/dating';
-import { castDatingId, type BlockId, type LikeId } from '@been-there/dating';
+import { castDatingId, type BlockId, type IdempotencyKey, type LikeId, type PassId } from '@been-there/dating';
 import { UNSET_PREFERENCES, type DatingPreferences } from '@been-there/dating';
 import type { GenderIdentity, ProfileSnapshot, ProfileState } from '@been-there/dating';
 
@@ -35,10 +36,24 @@ export const AT = new Date('2026-03-01T12:00:00Z');
 export const LATER = new Date('2026-03-01T12:05:00Z');
 
 export const likeId = (raw: string): LikeId => castDatingId<'LikeId'>(raw);
+export const passId = (raw: string): PassId => castDatingId<'PassId'>(raw);
 export const blockId = (raw: string): BlockId => castDatingId<'BlockId'>(raw);
+export const requestKey = (raw: string): IdempotencyKey => castDatingId<'IdempotencyKey'>(raw);
 
 export function like(from: UserId, to: UserId, raw: string): LikeRecord {
-  return { likeId: likeId(raw), from, to, createdAt: AT };
+  return { likeId: likeId(raw), from, to, createdAt: AT, state: 'live', supersededPassId: null };
+}
+
+export function pass(from: UserId, to: UserId, raw: string, createdAt: Date = AT): PassRecord {
+  return { passId: passId(raw), from, to, createdAt, state: 'live' };
+}
+
+/** The two likes a live match is built from. */
+export function matchLikes(): LikeRecord[] {
+  return [
+    { ...like(ALICE, BOB, 'like-alice-bob'), state: 'matched' },
+    { ...like(BOB, ALICE, 'like-bob-alice'), state: 'matched' },
+  ];
 }
 
 export function block(blocker: UserId, blocked: UserId, raw: string): BlockRecord {
@@ -50,9 +65,9 @@ export function matchRecord(overrides: Partial<MatchRecord> = {}): MatchRecord {
     matchId: castId<'MatchId'>('match:user-alice|user-bob'),
     participants: [ALICE, BOB],
     likeIds: [likeId('like-alice-bob'), likeId('like-bob-alice')],
-    status: 'active',
+    standings: ['active', 'active'],
     createdAt: AT,
-    endedAt: null,
+    ended: null,
     conversationId: castId<'ConversationId'>('conversation-1'),
     ...overrides,
   };

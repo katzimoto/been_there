@@ -257,13 +257,19 @@ export function planVerificationStart(
   }
 
   const dayAgo = input.now.getTime() - 24 * 60 * 60 * 1000;
-  const startedToday = input.existing.filter(
-    (attempt) => attempt.startedAt.getTime() > dayAgo,
-  ).length;
-  if (startedToday >= ATTEMPT_POLICY.maxAttemptsPerDay) {
+  const startedToday = input.existing.filter((attempt) => attempt.startedAt.getTime() > dayAgo);
+  if (startedToday.length >= ATTEMPT_POLICY.maxAttemptsPerDay) {
+    // `retryAt` is not decoration. The attempt cap is a real limit, so a
+    // "Try again" button that is refused three times out of five is a lie told
+    // to a person; the error carries the moment the oldest of today's attempts
+    // leaves the window, and the copy is written against it.
+    const oldestStartedAt = Math.min(
+      ...startedToday.map((attempt) => attempt.startedAt.getTime()),
+    );
     return domainError('rate_limited', 'identity', 'too many verification attempts today', {
-      startedToday,
+      startedToday: startedToday.length,
       maxAttemptsPerDay: ATTEMPT_POLICY.maxAttemptsPerDay,
+      retryAt: new Date(oldestStartedAt + 24 * 60 * 60 * 1000).toISOString(),
     });
   }
 
@@ -348,6 +354,9 @@ export function recordCapture(
     return domainError('rate_limited', 'identity', 'a retake of this artefact is too soon', {
       kind: capture.kind,
       retakeCooldownMinutes: ATTEMPT_POLICY.retakeCooldownMinutes,
+      retryAt: new Date(
+        previous.capturedAt.getTime() + ATTEMPT_POLICY.retakeCooldownMinutes * 60_000,
+      ).toISOString(),
     });
   }
   const supersede = attempt.evidence.filter((item) => item.kind !== capture.kind);
@@ -489,4 +498,70 @@ export function expireAttempt(
     });
   }
   return applyAttemptEvent(attempt, 'expire', {}, now);
+}
+
+/**
+ * When repetition stops being the user's problem and becomes ours.
+ *
+ * Three is chosen because the failure modes below it are not yet distinguishable
+ * from one bad photo: one is a retake, two is a bad lighting habit, and by the
+ * third the person has spent a meaningful amount of their time in a capture loop
+ * with no outcome. It is a support threshold, not a safety one — nothing here
+ * enforces anything, and the account standing is untouched whatever the answer.
+ */
+export const REVIEW_ESCALATION_POLICY = {
+  consecutiveFailuresBeforeReview: 3,
+} as const;
+
+export interface RepeatFailureInput {
+  readonly identityState: IdentityState;
+  /**
+   * The subject's attempts, newest last. The last one is the failure that has
+   * just been recorded; earlier entries are only read to count how long this has
+   * been going on. Supplied by the caller because the count is a fact about the
+   * store, not a fact the machine can be told.
+   */
+  readonly attempts: readonly VerificationAttempt[];
+}
+
+export interface ReviewEscalation {
+  /** The identity move, resolved through the kernel. */
+  readonly viaEvent: 'flag_for_review';
+  readonly state: IdentityState;
+  /** Consecutive failed attempts, including the one just recorded. */
+  readonly consecutiveFailures: number;
+}
+
+/**
+ * Repeated failure escalates to a person, and to nothing else.
+ *
+ * `verification_failed` is the one state from which the identity machine could
+ * historically do nothing but loop: `submit_verification` back to `pending`, fail
+ * again, forever. An implementer who reads "repeated failure leads to
+ * `review_required`" and calls `flag_for_review` from that state used to get
+ * `invalid_transition`, and the loop was the only behaviour the table permitted.
+ * The kernel now has the edge; this decides when to take it.
+ *
+ * `null` means "not yet" — the caller does nothing and the subject retries. It
+ * is not an error, so it is not a `Result` failure: a result value would make a
+ * perfectly ordinary second failure look like something went wrong.
+ */
+export function escalateAfterRepeatedFailure(
+  input: RepeatFailureInput,
+): Result<ReviewEscalation | null, DomainError> {
+  let consecutiveFailures = 0;
+  for (let index = input.attempts.length - 1; index >= 0; index -= 1) {
+    const attempt = input.attempts[index];
+    if (attempt === undefined || attempt.state !== 'failed') {
+      break;
+    }
+    consecutiveFailures += 1;
+  }
+  if (consecutiveFailures < REVIEW_ESCALATION_POLICY.consecutiveFailuresBeforeReview) {
+    return ok(null);
+  }
+  return andThen(
+    identityMachine.next(input.identityState, 'flag_for_review', {}),
+    (state) => ok({ viaEvent: 'flag_for_review', state, consecutiveFailures }),
+  );
 }

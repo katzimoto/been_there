@@ -20,11 +20,34 @@ export type SessionRevokeReason =
   | 'password_changed'
   | 'recovery_completed'
   | 'moderation_enforcement'
+  | 'session_limit'
   | 'admin_revocation';
 
-/** Short-lived by design: a leaked access token is useless within a quarter hour. */
+/**
+ * Three lifetimes, not one. They answer three different questions, and
+ * conflating them is how a session policy ends up meaning nothing:
+ *
+ - **Access token** — `SESSION_TTL_SECONDS`. Short by design: a leaked access
+   token is useless within a quarter hour, and every request re-mints it.
+ - **Refresh window** — `REFRESH_WINDOW_SECONDS`. Absolute, and deliberately
+   *not* sliding. A rolling window refreshed on activity is a session that
+   never ends: the one credential an attacker stole keeps working as long as the
+   legitimate owner keeps using the product.
+ - **Idle timeout** — `SESSION_IDLE_TIMEOUT_SECONDS`. The half-life of the
+   window: a session nobody has touched for a fortnight is dead whatever the
+   window says. This is the rule that makes an absolute window compatible with
+   "refreshed on activity" — activity refreshes the *token*, not the window.
+ */
 export const SESSION_TTL_SECONDS = 15 * 60;
 export const REFRESH_WINDOW_SECONDS = 30 * 24 * 60 * 60;
+export const SESSION_IDLE_TIMEOUT_SECONDS = 14 * 24 * 60 * 60;
+
+/**
+ * Concurrent sessions per account. Past the cap the least recently active
+ * session is evicted, because the credential that has been quiet the longest is
+ * the one least likely to be a person at the keyboard.
+ */
+export const MAX_CONCURRENT_SESSIONS = 10;
 
 export interface Session {
   readonly sessionId: SessionId;
@@ -34,6 +57,8 @@ export interface Session {
   readonly expiresAt: Date;
   /** Beyond this, the session is dead and only a fresh credential can revive it. */
   readonly refreshableUntil: Date;
+  /** Last request this session authenticated. Sliding; the idle clock. */
+  readonly lastActiveAt: Date;
   readonly status: SessionStatus;
   readonly supersededBy?: SessionId;
   readonly revokedReason?: SessionRevokeReason;
@@ -75,8 +100,37 @@ export function issueSession(request: IssueSessionRequest): Result<Session, Doma
     issuedAt: request.now,
     expiresAt: new Date(request.now.getTime() + ttl * 1000),
     refreshableUntil: new Date(request.now.getTime() + refreshWindow * 1000),
+    lastActiveAt: request.now,
     status: 'active',
   });
+}
+
+/**
+ * Applies the concurrent-session cap. The eleventh live session evicts the
+ * least recently active one rather than refusing the newcomer, so a user who
+ * signs in on a new device is not locked out of the old ones they still want —
+ * and the sessions that survive are the ten a person actually uses.
+ *
+ * Evicted sessions come back revoked, so the caller can notify the owner on the
+ * channel they are still signed in on: an unexplained sign-out is the only
+ * signal they get that a session limit exists.
+ */
+export function enforceSessionLimit(sessions: readonly Session[]): {
+  readonly kept: readonly Session[];
+  readonly evicted: readonly Session[];
+} {
+  const live = sessions
+    .filter((session) => session.status === 'active')
+    .sort((left, right) => right.lastActiveAt.getTime() - left.lastActiveAt.getTime());
+  const kept = live.slice(0, MAX_CONCURRENT_SESSIONS);
+  const evicted = live
+    .slice(MAX_CONCURRENT_SESSIONS)
+    .map((session) => revokeSession(session, 'session_limit'));
+  const keptIds = new Set(kept.map((session) => session.sessionId));
+  return {
+    kept: sessions.filter((session) => session.status !== 'active' || keptIds.has(session.sessionId)),
+    evicted,
+  };
 }
 
 /**
@@ -134,8 +188,10 @@ export function refreshSession(
     issuedAt: now,
     expiresAt: new Date(now.getTime() + ttl * 1000),
     // The refresh window is absolute: it does not slide forward on each rotation,
-    // otherwise a session that keeps being refreshed would live forever.
+    // otherwise a session that keeps being refreshed would live forever. Activity
+    // does slide — that is the whole of what "refreshed on activity" means.
     refreshableUntil: session.refreshableUntil,
+    lastActiveAt: now,
     status: 'active',
   };
   const previous: Session = {
@@ -156,6 +212,14 @@ function validateSessionRefreshable(session: Session, now: Date): Result<true, D
     return domainError('permission_denied', 'platform', 'refresh window closed', {
       reason: 'refresh_window_closed',
     });
+  }
+  if (now.getTime() - session.lastActiveAt.getTime() >= SESSION_IDLE_TIMEOUT_SECONDS * 1000) {
+    // The idle clock, which is what makes an absolute window survivable. It is
+    // checked here and not in `validateSession` because a fortnight is also
+    // fifty-eight thousand access tokens: by then the token is long expired, so
+    // "idle" would be a reason no caller could ever observe. The two refusals
+    // stay distinct because one is routine and the other is a signal.
+    return domainError('permission_denied', 'platform', 'session went idle', { reason: 'idle' });
   }
   return ok(true);
 }

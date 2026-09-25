@@ -408,7 +408,9 @@ action that changes the outcome, and every row has a defined resulting state.
 | Under 18 | **We can't create an account for you yet.** Been There is for adults 18 and over. We haven't created an account or sent any email. | Leave | No account created |
 | Impossible date of birth | **That date doesn't look right.** Check it and try again. | Edit | On the age gate |
 | Terms version changed under them | **We've updated our terms.** Have a read, then accept to continue. | Read, accept | On terms step |
-| Identity verification failed | **We couldn't verify this time.** This is more often a lighting or framing problem than a real one. Try again in good light, holding your phone at eye level — you can retry as often as you like. | Retry now, see tips, contact support | `verification_failed`; **not** discoverable; **not** an account penalty |
+| Identity verification failed | **We couldn't verify this time.** This is more often a lighting or framing problem than a real one. Try again in good light, holding your phone at eye level. | Retry now, see tips, contact support | `verification_failed`; **not** discoverable; **not** an account penalty |
+| Verification retried too soon | **Give it a moment.** You can take a new selfie every 15 minutes, up to 5 a day. Your verification isn't affected — this only paces the attempts. | Wait (timer shown), see tips, contact support | Still `verification_failed`; **not** an account penalty |
+| Verification attempts exhausted today | **That's a lot of tries for one day.** Come back tomorrow and we'll pick up where you left off — your verification is unaffected. | Come back tomorrow, contact support | Still `verification_failed`; **not** an account penalty |
 | Verification needs a human | **We're double-checking your account.** Most checks finish within 24 hours. Nothing is needed from you; if we need more, we'll email you. | Dismiss, check email | `review_required`; not discoverable; **no** risk level shown |
 | Verification expired after 90 days | **Your verification needs a refresh.** It takes about a minute — photo and a quick selfie. | Re-verify | `expired`; not discoverable; profile preserved |
 | Identity looks inconsistent with the profile | **Your photos need another look.** One of your profile photos doesn't match the person in your verification photo. Replace it to keep appearing in discovery. | Replace photo, appeal | Profile `incomplete`; not discoverable; identity untouched |
@@ -580,8 +582,8 @@ Given/when/then, mapped to the scenarios in
 
 - *Given* an account whose identity is `verification_failed`,
   *when* the user retries from the failure screen,
-  *then* the attempt is allowed with no cooldown and no capability loss,
-  *and* `verification_failed` is not an account state: the account remains
+  *then* the attempt is allowed, subject to `ATTEMPT_POLICY` (5 attempts per rolling day, 15-minute retake cooldown) — a refusal is a `rate_limited` error carrying `retryAt`, and the screen renders "Try again in {minutes}" rather than a dead "Try again now",
+  and* no capability is lost and `verification_failed` is not an account state: the account remains
   `active` and the user can still delete it, report, or contact support.
 
 **A3 — Under-18 sign-up leaves no account**

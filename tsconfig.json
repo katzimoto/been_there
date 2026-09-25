@@ -8,6 +8,7 @@
     { "path": "./packages/communication" },
     { "path": "./packages/trust-safety" },
     { "path": "./packages/moderation" },
-    { "path": "./packages/platform" }
+    { "path": "./packages/platform" },
+    { "path": "./packages/integration" }
   ]
 }

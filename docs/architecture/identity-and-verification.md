@@ -73,17 +73,26 @@ matters here is *which* of its events this domain can cause, and how:
 | `liveness_passed`, `likeness_passed` | `pending` | `pending` | Provider results arriving mid-attempt | — |
 | `provider_result_received` | `pending` | `verified` | This domain, on a `pass` decision | `confidence ≥ 0.9` |
 | `fail` | `pending` | `verification_failed` | This domain, on a `fail` decision | — |
-| `flag_for_review` | `pending`, `verified` | `review_required` | This domain, on a `manual_review` decision or an actionable anomaly | — |
+| `flag_for_review` | `pending`, `verified`, `verification_failed` | `review_required` | This domain, on a `manual_review` decision, an actionable anomaly, or three consecutive failed attempts (§5.1) | — |
 | `review_cleared` | `review_required` | `verified` | A named human reviewer | `reviewerId` present |
 | `review_confirmed_fraud` | `review_required` | `verification_failed` | A named human reviewer | `reviewerId` present |
 | `expire` | `verified` | `expired` | The freshness policy | — |
-| `reverify_requested` | `verified`, `expired`, `review_required` | `pending` | This domain's command interface | — |
+| `reverify_requested` | `verified`, `expired` | `pending` | This domain's command interface | — |
 | `withdraw` | any | `unverified` | The user | — |
 
-Two of those edges are automatic in the way people usually mean "automatic":
-`provider_result_received`, which is guarded by the confidence floor, and `fail`.
-Everything else that can remove a person from discovery requires either a named
-human or a policy decision recorded in this document.
+Three of those edges are automatic in the way people usually mean "automatic":
+`provider_result_received`, which is guarded by the confidence floor, `fail`, and
+`flag_for_review` out of `verification_failed` — which is a support threshold,
+not a safety verdict (§5.1). Everything else that can remove a person from
+discovery requires either a named human or a policy decision recorded in this
+document.
+
+`reverify_requested` has no edge out of `review_required`, and that omission is
+the point. While a person is with a human, an automated demand must not be able
+to move them to `pending` and take them back out of it; that is commitment 2 in
+shape, and it belongs in the kernel because a policy check in this package can
+be bypassed by a direct call. A flagged account leaves review only through
+`review_cleared` or `review_confirmed_fraud`.
 
 ### 3.2 Attempt state (this domain)
 
@@ -185,6 +194,42 @@ outcome of the system rather than a failure of it.
 negatives, and values above 1 before anything reads them, and a provider that
 returns 1.4 produces a review rather than a pass.
 
+### 5.1 Repeated failure escalates to a person
+
+`REVIEW_ESCALATION_POLICY.consecutiveFailuresBeforeReview` is **3**, and
+`escalateAfterRepeatedFailure(identityState, attempts)` in
+`packages/identity/src/verification-request.ts` is what enforces it. The counter
+is a *consecutive run* of `failed` attempts, read backwards from the attempt
+that has just been recorded and stopping at the first attempt that is not a
+failure; the caller supplies the attempts, because the count is a fact about the
+store and not something the kernel can be told.
+
+Three is a support threshold, not a safety verdict. One failure is a retake, two
+is a bad lighting habit, and by the third the person has spent a meaningful
+amount of their time in a capture loop with no outcome — which is a support
+burden, and the only honest answer to "we cannot establish that this person is
+real" is a person. It escalates to `review_required` and to nothing else: no
+account state is written, no capability is removed, and the escape already
+exists in both directions (`review_cleared` → `verified`,
+`review_confirmed_fraud` → `verification_failed`), each needing a named reviewer.
+
+`null` is the "not yet" answer — one more retry, not an error — so it is a
+`Result` *value* rather than a rejection. A second ordinary failure should not
+look like something went wrong.
+
+This is not the same counter as §6's `repeated_failed_attempts` detector, and
+the two are allowed to disagree. The detector counts failures *in a 30-day
+window* across the subject's history and produces a `review` finding; the
+escalation counts a *run* and moves the state. Someone who failed twice, then
+verified, then failed once is an anomaly worth a human's eye and is not a
+person being stuck in a loop.
+
+The kernel's `flag_for_review` edge out of `verification_failed` is what makes
+this buildable at all. Without it, `verification_failed` had exactly one
+outgoing event — `submit_verification` back to `pending` — so "repeated failure
+leads to `review_required`" resolved to `invalid_transition` and looping was the
+only behaviour the table permitted.
+
 ## 6. Anomaly catalogue
 
 Detectors consume aggregate signals only (`AnomalySignals`): counts, coarse
@@ -267,11 +312,16 @@ than letting vendor error text escape into a `Result` or a log line.
 
 ## 8. Re-verification
 
-`requestReVerification(command, context)` in
+`requestReVerification(command, context, sinks)` in
 `packages/identity/src/reverification.ts` is a command interface. Other domains
 may *ask*; only this domain decides. It returns a `Result`, and a success is a
 plan, not a mutation: the caller resolves the identity state through the kernel's
 machine and then persists it.
+
+`sinks` is a `ReverificationSinks` — a `refusals` log and a `signals` log — as
+one argument rather than two. A separate parameter would have let a caller pass
+the refusal log and leave escalation unwired, which is the exact shape of the
+failure §"Anti-abuse limits" below records.
 
 ### Who may ask
 
@@ -279,7 +329,7 @@ machine and then persists it.
 |-----------|------------|-------|
 | `trust_safety` | `risk_signal`, `anomaly_findings` | Anything on behalf of a user |
 | `moderation` | `case_linked`, `anomaly_findings` | A re-verification with no case behind it |
-| `subject` (the user) | `user_requested`, `identity_expired`, and only while not already `verified` | A re-verification of an account that is already verified |
+| `subject` (the user) | `user_requested`, `identity_expired`, and only while `expired` | A re-verification of an account that is already `verified`, or of their own `verification_failed` attempt — that one is *retried* through `submit_verification`, which the machine allows from `verification_failed` and which lands in the same `pending` |
 | `dating_core` | **Nothing. Ever.** | Every reason, without exception |
 
 The dating core is refused because a product domain that could demand identity
@@ -298,6 +348,27 @@ repeatedly hidden, not to protect the vendor's budget.
 | `maxPerSubjectPer30Days` | 3 | Enough for a real pattern (expired, then a risk signal, then a case); low enough that no caller can keep someone permanently invisible |
 | `cooldownHours` | 24 | The minimum gap between two re-verifications |
 | Open attempt | any state that is not `passed`, `failed`, or `expired` | A `conflict`, so demands cannot stack |
+| Open human review | `review_required` | A `conflict`. The machine has no `reverify_requested` edge out of it either, so an automated caller cannot walk an escalated case back into `pending` |
+
+The two numbers are **decided**, not provisional. They are exported, asserted in
+`test/reverification.test.ts`, and changed by editing the constant; what is
+revisit-able is the rate, not the mechanism.
+
+**Past a limit, an automated caller raises a signal.** `requestReVerification`
+writes a `ReverificationLimitSignal` to `sinks.signals` before returning
+`rate_limited`, carrying the limit tripped (`per_subject_per_30_days` or
+`cooldown`), the count in the window, and `blockedUntil` — when the block lifts,
+so the caller resumes rather than gives up. Without it, the only artefact of
+"Trust & Safety pulled this person out of discovery for the fourth time this
+month" is an error code in the caller's own log, and the moderation queue never
+learns the pattern exists.
+
+Two deliberate exclusions. A `subject` demand that trips a limit raises
+**no** signal: a person tapping "verify again" twice has found a rate limit, and
+the refusal row is the whole record; escalating a user's own impatience would
+fill a human queue with nothing. And Identity does not open a case itself — it
+has no case vocabulary and the dependency runs the other way — so the record is
+handed to the caller, and Trust & Safety's is to turn into a case.
 
 ### Check order
 
@@ -306,10 +377,12 @@ repeatedly hidden, not to protect the vendor's budget.
    must be the subject. A user demanding another user's re-verification is
    refused here, before any check that could describe the target.
 3. Subject eligibility (`REVERIFICATION_POLICY.subjectMayRequestOnlyWhen`).
-4. In-flight attempts.
-5. The 30-day cap.
-6. The cooldown.
-7. The kernel's state machine.
+4. An open human review — refused for **every** requester kind, before the
+   in-flight check, so it cannot be used as a probe.
+5. In-flight attempts.
+6. The 30-day cap.
+7. The cooldown.
+8. The kernel's state machine.
 
 The order is a privacy property: an unauthorised caller is refused before any of
 the later checks run, so it cannot learn whether a subject has an attempt in
@@ -317,13 +390,19 @@ flight, how many re-verifications they have had, or what state they are in. The
 cross-subject refusal in particular returns a byte-identical error whatever the
 target's state, so it is not a probe for that state. Tests assert both.
 
-**Every refusal is recorded** in a `ReverificationRefusalLog` before the error is
+**Every refusal is recorded** in `sinks.refusals` before the error is
 returned, carrying the actor, the intended subject, the requester kind, the
 reason and the error code. `detectReverificationAbuse` groups cross-subject
 demands per actor and raises a `cross_subject_reverification_demand` anomaly
 finding against the **offender**, routed through the existing
 `proposeReview` → `flag_for_review` path. The offender is reviewable by a human;
 nothing here changes an account state.
+
+Step 3 is a **subset** of the machine's `reverify_requested.from`, and it has to
+stay one: the policy gate runs before the in-flight, cap and cooldown checks, so
+a state it admits and the machine rejects is a call that pays for all three and
+then returns `invalid_transition`. A subset fails closed — the machine has the
+last word on states the policy does not name.
 
 A plan contains an identity move and nothing else. It cannot carry an account
 state, because the type has no field for one.
@@ -540,3 +619,9 @@ fairness problem, not a bug.
    Whether that is a perceptual hash store, a vendor-side check, or a
    platform-wide index is an architecture decision with a privacy cost of its own,
    and it is not made.
+8. **The attempt cap and its copy.** `ATTEMPT_POLICY` allows five attempts in a
+   rolling day with a 15-minute retake cooldown, and both refusals carry a
+   `retryAt` so a screen can say *when* rather than saying "Try again" and then
+   refusing. What is still undecided is the wording for a person who has used
+   all five: that is a copy decision, not a constant, and the numbers are not
+   what is in question.

@@ -18,7 +18,14 @@ import {
   castId,
   isClearedToConsume,
 } from '@been-there/core';
-import { evaluateEligibility, unmatch } from '@been-there/dating';
+import {
+  EMPTY_LEDGER,
+  applyBlockToMatch,
+  evaluateEligibility,
+  evidenceForReport,
+  matchStandingFor,
+  unmatch,
+} from '@been-there/dating';
 import {
   type BlockEdge,
   type MatchProjection as ConversationMatchProjection,
@@ -29,24 +36,27 @@ import {
   startConversation,
 } from '@been-there/communication';
 import {
+  ALICE,
+  AT,
+  BOB,
+  block,
+  like,
+  matchLikes,
+  matchRecord,
+  pass,
+  relationship,
+  requestKey,
+  standing,
+} from './fixtures.js';
+import { createContext, decide, openCase, reportMachine, submitReport } from '@been-there/moderation';
+import {
   applyDecay,
   applySignal,
   createSignal,
   emptyRiskRecord,
   sequentialIdFactory,
 } from '@been-there/trust-safety';
-import { createContext, decide, openCase, reportMachine, submitReport } from '@been-there/moderation';
-import {
-  ALICE,
-  AT,
-  BOB,
-  bobSubject,
-  block,
-  like,
-  matchRecord,
-  relationship,
-  standing,
-} from './fixtures.js';
+import { bobSubject } from './fixtures.js';
 
 function succeeded<T, E extends { code: string }>(result: Result<T, E>): T {
   if (!result.ok) {
@@ -174,6 +184,7 @@ describe('commitment 1 — verified is the only discoverable identity state', ()
     viewer: standing(ALICE),
     relationship: relationship(),
     distance: 'lt_5_km' as const,
+    now: AT,
   };
 
   for (const state of [
@@ -212,6 +223,7 @@ describe('commitment 2 — automation raises risk, only a human enforces', () =>
       candidate: standing(BOB),
       relationship: relationship(),
       distance: 'lt_5_km',
+      now: AT,
     });
     expect(decision.eligible).toBe(true);
   });
@@ -259,6 +271,7 @@ describe('commitment 2 — automation raises risk, only a human enforces', () =>
       candidate: standing(BOB, { accountState: 'suspended', capabilities: ['report', 'block'] }),
       relationship: relationship(),
       distance: 'lt_5_km',
+      now: AT,
     });
     expect(decision.eligible).toBe(false);
   });
@@ -282,13 +295,37 @@ describe('commitment 3 — risk decays', () => {
 
 describe('commitment 4 — the right to report outlives the match', () => {
   it('retains the match and the conversation when a match is ended', () => {
-    const outcome = succeeded(unmatch(matchRecord(), ALICE, AT));
-    expect(outcome.match.status).toBe('unmatched');
+    const outcome = succeeded(
+      unmatch({ likes: matchLikes() }, { match: matchRecord(), actor: ALICE, at: AT, key: requestKey('unmatch-1') }),
+    );
+    expect(outcome.match.ended?.cause).toBe('unmatched');
+    expect(outcome.match.standings).toEqual(['closed_by_actor', 'closed_by_actor']);
     expect(outcome.conversation?.retainedForEvidence).toBe(true);
   });
 
+  it('withdraws the likes without destroying them, so they remain the report evidence', () => {
+    const outcome = succeeded(
+      unmatch({ likes: matchLikes() }, { match: matchRecord(), actor: ALICE, at: AT, key: requestKey('unmatch-1') }),
+    );
+    expect(outcome.ledger.likes).toHaveLength(2);
+    expect(outcome.ledger.likes.every((entry) => entry.state === 'withdrawn')).toBe(true);
+    const evidence = succeeded(
+      evidenceForReport({
+        viewer: ALICE,
+        subject: BOB,
+        likes: outcome.ledger.likes,
+        passes: [],
+        match: outcome.match,
+        blocks: [],
+      }),
+    );
+    expect(evidence.likes).toHaveLength(2);
+    expect(evidence.matchId).toBe(matchRecord().matchId);
+    expect(evidence.conversationId).toBe(matchRecord().conversationId);
+  });
+
   it('still captures conversation evidence after the match has ended', () => {
-    succeeded(unmatch(matchRecord(), ALICE, AT));
+    unmatch(EMPTY_LEDGER, { match: matchRecord(), actor: ALICE, at: AT, key: requestKey('unmatch-1') });
 
     const conversation = baseConversation();
     const message = succeeded(
@@ -364,12 +401,42 @@ describe('block dominates across domains', () => {
     expect(rejected(result)).not.toBeNull();
   });
 
+  it('re-shows a passed candidate once the suppression window has expired', () => {
+    // A pass is a 30-day window, so the passer's own decision cannot remove
+    // somebody from a pool forever. The clock is a parameter of the gate for
+    // exactly this reason.
+    const passed = relationship({ passes: [pass(ALICE, BOB, 'pass-1', AT)] });
+    const snapshot = {
+      viewer: standing(ALICE),
+      candidate: standing(BOB),
+      relationship: passed,
+      distance: 'lt_5_km' as const,
+    };
+    const duringWindow = evaluateEligibility({ ...snapshot, now: AT });
+    expect(duringWindow.eligible ? null : duringWindow.reason).toBe('already_passed');
+    const afterWindow = new Date(AT.getTime() + 31 * 86_400_000);
+    expect(evaluateEligibility({ ...snapshot, now: afterWindow }).eligible).toBe(true);
+  });
+
+  it('gives the two parties different standings of the same ended match', () => {
+    // One status cannot say that a block closed the match for the person who
+    // pressed it and only removed the other person's reach, which is the whole
+    // point of commitment 2's enforceability and commitment 4's reportability
+    // being independent per party.
+    const ended = succeeded(
+      applyBlockToMatch(block(BOB, ALICE, 'block-1'), matchRecord(), { likes: matchLikes() }, AT),
+    );
+    expect(matchStandingFor(ended.match, BOB)).toBe('closed_by_actor');
+    expect(matchStandingFor(ended.match, ALICE)).toBe('closed_by_target');
+  });
+
   it('removes the pair from dating discovery in either direction', () => {
     const decision = evaluateEligibility({
       viewer: standing(ALICE),
       candidate: standing(BOB),
       relationship: relationship({ blocks: [block(BOB, ALICE, 'block-1')] }),
       distance: 'lt_5_km',
+      now: AT,
     });
     expect(decision.eligible).toBe(false);
   });

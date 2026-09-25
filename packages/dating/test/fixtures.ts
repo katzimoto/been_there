@@ -6,11 +6,12 @@ import {
   type UserId,
   castId,
 } from '@been-there/core';
-import { type BlockId, castDatingId } from '../src/ids.js';
 import type { BlockRecord } from '../src/blocks.js';
-import type { LikeId, PassId } from '../src/ids.js';
-import type { LikeRecord, MatchRecord, PassRecord } from '../src/interaction.js';
+import { type BlockId, type IdempotencyKey, type LikeId, type PassId, castDatingId } from '../src/ids.js';
+import type { LikeLedger, LikeRecord } from '../src/likes.js';
+import type { MatchRecord } from '../src/interaction.js';
 import type { DistanceBand } from '../src/location.js';
+import type { PassRecord, PassState } from '../src/passes.js';
 import { type DatingPreferences, UNSET_PREFERENCES } from '../src/preferences.js';
 import type { GenderIdentity, ProfileSnapshot, ProfileState } from '../src/profile.js';
 import {
@@ -29,16 +30,24 @@ export const C: UserId = castId<'UserId'>('user-c');
 export const likeId = (raw: string): LikeId => castDatingId<'LikeId'>(raw);
 export const passId = (raw: string): PassId => castDatingId<'PassId'>(raw);
 export const blockId = (raw: string): BlockId => castDatingId<'BlockId'>(raw);
+export const key = (raw: string): IdempotencyKey => castDatingId<'IdempotencyKey'>(raw);
 
 export const AT = new Date('2026-01-01T00:00:00Z');
 export const LATER = new Date('2026-01-02T00:00:00Z');
+export const DAYS = (n: number): Date => new Date(AT.getTime() + n * 86_400_000);
 
 export function like(from: UserId, to: UserId, raw = 'like-1'): LikeRecord {
-  return { likeId: likeId(raw), from, to, createdAt: AT };
+  return { likeId: likeId(raw), from, to, createdAt: AT, state: 'live', supersededPassId: null };
 }
 
-export function pass(from: UserId, to: UserId, raw = 'pass-1'): PassRecord {
-  return { passId: passId(raw), from, to, createdAt: AT };
+export function pass(
+  from: UserId,
+  to: UserId,
+  raw = 'pass-1',
+  createdAt: Date = AT,
+  state: PassState = 'live',
+): PassRecord {
+  return { passId: passId(raw), from, to, createdAt, state };
 }
 
 export function block(blocker: UserId, blocked: UserId, raw = 'block-1'): BlockRecord {
@@ -50,12 +59,17 @@ export function matchRecord(overrides: Partial<MatchRecord> = {}): MatchRecord {
     matchId: castId<'MatchId'>('match:user-a|user-b'),
     participants: [A, B],
     likeIds: [likeId('like-a-b'), likeId('like-b-a')],
-    status: 'active',
+    standings: ['active', 'active'],
     createdAt: AT,
-    endedAt: null,
+    ended: null,
     conversationId: castId<'ConversationId'>('conversation-1'),
     ...overrides,
   };
+}
+
+/** The two likes a live match is built from, both already in `matched`. */
+export function matchedLedger(entries: readonly LikeRecord[] = [like(A, B, 'like-a-b'), like(B, A, 'like-b-a')]): LikeLedger {
+  return { likes: entries.map((entry) => ({ ...entry, state: 'matched' as const })) };
 }
 
 export function relationship(overrides: Partial<RelationshipProjection> = {}): RelationshipProjection {

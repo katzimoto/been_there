@@ -34,6 +34,7 @@ personalisation; any automated irreversible action.
 |---|---|---|
 | `AccountState` (`active`/`limited`/`suspended`/`banned`) | Moderation & Enforcement | reads only, via `account_state.changed` + capability projection |
 | The capability surface per state | Moderation & Enforcement (`packages/core/src/states/account.ts`) | **read, never restated in code** — see §4 |
+| The capabilities no restriction may remove | Moderation & Enforcement, same file: `UNRESTRICTABLE_CAPABILITIES`, declared next to `CAPABILITIES_BY_ACCOUNT_STATE` | **read, never restated in code** — see §4. One file for both, deliberately: two homes for one capability vocabulary is how a capability gets added to the base table and forgotten in the list that protects it |
 | `IdentityState` and the re-verification decision | Identity & Verification | reads `identity_status.changed`; may *request* re-verification, never enforce |
 | `RiskState` | Trust & Safety | **not read by any product surface.** A product client must not be able to infer a risk state, so no `risk.*` event reaches a product projection |
 | Which capabilities a specific restriction removes | Moderation & Enforcement (the `caseId`-bearing `restrict` event) | read from the capability projection, which is the state plus the removed set |
@@ -54,10 +55,21 @@ renders what capabilities it has; it does not know why, and cannot find out.
 
 ## 4. The capability surface — read from code, not from this document
 
-`packages/core/src/states/account.ts` is the **source of truth**:
-`CAPABILITIES_BY_ACCOUNT_STATE` and `capabilitiesFor(state, context)`. The
-tables below are a transcription for the product's benefit; if they ever
+`packages/core/src/states/account.ts` is the **source of truth**, and it holds
+three things: `CAPABILITIES_BY_ACCOUNT_STATE`, `UNRESTRICTABLE_CAPABILITIES`
+(`report`, `block`, `delete_account`), and `capabilitiesFor(state, context)`.
+The tables below are a transcription for the product's benefit; if they ever
 disagree with the code, the code is right and this document is a bug.
+
+`UNRESTRICTABLE_CAPABILITIES` is the answer to "who decides that this capability
+may never be taken", and it lives beside the base table rather than in the
+moderation package because the moderation package is not the only place that
+needs the answer: `applyDecision` refuses a restriction naming one of them, and
+`capabilitiesFor` will not subtract one. Moderation refuses loudly — a moderator
+who types `report` is told no, because a decision that records fewer removals
+than the one taken is a decision nobody made — and the kernel is the backstop
+behind it. Platform re-exports the same constant rather than keeping its own
+list, so a fourth copy cannot appear.
 
 `capabilitiesFor(state, ctx)` starts from the state's base list and subtracts
 `ctx.removedCapabilities`. Two consequences the product must internalise:
@@ -67,10 +79,11 @@ disagree with the code, the code is right and this document is a bug.
    `removedCapabilities.length > 0`. There is no such thing as a restriction
    that removes nothing: `limited` is always explainable, both to the user and
    to a moderator. This is the overview's "capability-based, not a blanket mute".
-2. **A named removed capability can only ever be a subset of the base set**, so
-   restriction can never *add* a capability and can never remove `report`,
-   `block` or `delete_account` from any state — the account's ability to reach
-   safety controls survives enforcement.
+2. **A named removed capability can only ever be a subset of the base set**,
+   so restriction can never *add* a capability, and it can never remove
+   anything in `UNRESTRICTABLE_CAPABILITIES` — `report`, `block`,
+   `delete_account`. The account's ability to reach safety controls survives
+   every enforcement, and so does its ability to leave.
 
 ### 4.1 Base capability surface
 
@@ -79,7 +92,7 @@ disagree with the code, the code is right and this document is a bug.
 | `active` | `browse_discovery`, `like`, `send_message`, `report`, `block`, `edit_profile` | — |
 | `limited` | `browse_discovery`, `report`, `block`, `edit_profile` | `like`, `send_message` (before any per-case subtraction) |
 | `suspended` | `report`, `block`, `edit_profile` | `browse_discovery`, `like`, `send_message` |
-| `banned` | `report`, `appeal_request`, `delete_account` | `browse_discovery`, `like`, `send_message`, `edit_profile` |
+| `banned` | `report`, `block`, `appeal_request`, `delete_account` | `browse_discovery`, `like`, `send_message`, `edit_profile` |
 
 A `limited` account's effective surface is its base set minus
 `removedCapabilities`, so the most restrictive legal `limited` account has
@@ -164,7 +177,7 @@ named moderator with a `caseId` (`lift_ban`).
 |---|---|---|---|
 | Can message | no | no | no |
 | Can be discovered | usually yes | no | no |
-| Can report / block | yes | yes | yes (report) |
+| Can report / block | yes | yes | yes (report and block) |
 | Data intact | yes | yes | yes, until the user deletes |
 | Reversible by | moderator (`lift_restriction`) | moderator (`reinstate`) | moderator (`lift_ban`) |
 | Framing in copy | "here is what is switched off" | "paused, and here is how it ends" | "closed, and here is what you can still do" |
@@ -187,11 +200,14 @@ community rules`. No forced flow, no cooldown timer, no nagging.
 state, the moderation note, the duration (there is no fixed duration — a
 restriction is lifted by a moderator, so promising a date would be a lie).
 
-`{capability_line}` is generated from the removed capabilities, e.g. "sending
-messages and liking new people are switched off." Generating it from the
-capability set — not from a hand-written string per case — is what makes
-`limited` always explainable to the user, which is the whole point of the
-capability-based model.
+`{capability_line}` is generated from `removedCapabilities` on the published
+`account_state.changed` payload — e.g. "sending messages and liking new people
+are switched off." Generating it from the removed set — not from a hand-written
+string per case, and not by diffing the effective set against a local copy of
+`CAPABILITIES_BY_ACCOUNT_STATE` — is what makes `limited` always explainable to
+the user, which is the whole point of the capability-based model. The payload
+carries `{ accountState, capabilities, removedCapabilities }`: the state, what
+is left, and what was taken.
 
 ### 6.2 `suspended`
 
@@ -224,9 +240,27 @@ lie the P1 appeals work would have to retract.
 When an enforcement lands, the affected user gets one in-app notice, once, at
 the next app open (and never a push that reveals a state change to someone
 holding the device — device lock is not a security model here). The notice
-repeats the state copy verbatim and links to the state screen. Notices are not
-sent for `lift_restriction`/`reinstate` state *changes* beyond the positive
+repeats the state copy verbatim, links to the state screen, and **names the case
+reference and the appeal route**. Notices are not sent for
+`lift_restriction`/`reinstate` state *changes* beyond the positive
 `SAFETY_ACCOUNT_REINSTATED` confirmation, and never for any risk signal.
+
+Those two fields come from a second event, and the split is deliberate.
+`account_state.changed` is `public`: any surface enforcing the capability set
+reads it, and it carries no case, no decision, no moderator and no reason —
+publishing a case id there would tell anyone holding the bus that an open case
+exists about an identifiable person, which is the first fact a `restricted`
+clearance exists to withhold. `moderation.restriction_applied` (and
+`moderation.restriction_lifted` for a reversal) is `user`: the same decision,
+addressed to the account it was taken against, carrying
+`{ caseId, decisionId, accountState, removedCapabilities }`. The date is the
+envelope's `occurredAt`; the appeal route is the `appeal_request` capability the
+state grants, which no event needs to restate.
+
+The user is the only audience for the case reference, and that is the point: a
+restriction nobody can name the case for is a restriction nobody can contest.
+Whether the appeal *intake* exists is §9.3's question; being able to point at
+the case is not an appeal flow and does not wait for one.
 
 ## 7. Re-verification
 
@@ -234,10 +268,20 @@ sent for `lift_restriction`/`reinstate` state *changes* beyond the positive
 
 Re-verification is a **trust-change response in the identity domain**: the
 `reverify_requested` event on `identityMachine` moves
-`verified | expired | review_required → pending`. It is friction that is
-automated and reversible, which is exactly the class ADR 0004 permits. It is
-**not** an enforcement, it does not write `AccountState`, and it never appears
-in a product read-model as a restriction.
+`verified | expired → pending`. It is friction that is automated and
+reversible, which is exactly the class ADR 0004 permits. It is **not** an
+enforcement, it does not write `AccountState`, and it never appears in a
+product read-model as a restriction.
+
+`review_required` is deliberately **not** on that list. A person whose
+verification is already with a human cannot be re-verified by an automated
+caller, because the attempt would move them to `pending` and take them back out
+of the review they were put in — automation undoing a human's involvement, which
+is the shape commitment 2 exists to forbid. `requestReVerification` refuses it as
+a `conflict` before the open-attempt and cap checks, so the refusal also tells
+the caller nothing about the account, and the kernel refuses it independently.
+A flagged account leaves review only through `review_cleared` or
+`review_confirmed_fraud`, both of which need a named reviewer.
 
 `IdentityContext.reVerification` marks the attempt as trust-triggered so Identity
 can apply its own re-verification rules (e.g. a stricter likelihood floor, a
@@ -338,13 +382,27 @@ the subject to re-enter a product surface.
 
 | # | Rule | Justification |
 |---|---|---|
-| R1 | A subject may only *ask* for their own re-verification, and only while `expired` or `verification_failed` — never while already `verified`, and never for anyone else. `REVERIFICATION_POLICY.subjectMayRequestOnlyWhen` enforces the request; the identity transition table enforces the event. | See R2 for who else may ask and R3 for the cross-subject refusal. |
-| R2 | Automated re-verification requests are rate-capped per subject per rolling window. Past the cap, Trust & Safety raises a signal and stops requesting. | ADR 0004: automation is allowed to apply reversible friction, and the *rate* is the revisitable part. |
+| R1 | A subject may only *ask* for their own re-verification, and only while `expired` — never while already `verified`, never from `verification_failed`, and never for anyone else. `REVERIFICATION_POLICY.subjectMayRequestOnlyWhen` enforces the request; the identity transition table enforces the event. The policy list is always a **subset** of the machine's `reverify_requested.from`, never a superset: a state the policy admits but the machine rejects is a call that pays for the open-attempt, cap and cooldown checks and then returns `invalid_transition`. | See R2 for who else may ask, R3 for the cross-subject refusal, and the retry route below. |
+| R2 | Automated re-verification requests are rate-capped per subject per rolling 30 days, with a 24-hour minimum gap. Past either limit the request is refused **and a `ReverificationLimitSignal` is written to the caller's signal sink**, naming the limit, the count, and the moment the block lifts. | ADR 0004: automation is allowed to apply reversible friction, and the *rate* is the revisitable part. A `rate_limited` error with no side effect is the failure this replaces: the moderation queue never learns that the system pulled one person out of discovery three times in a month. |
 | R3 | **No user can request another user's re-verification.** There is no "report as unverified", no "flag this person's age", and no product action that writes `reverify_requested` on a subject's behalf. | A user-triggered verification request is a harassment and an escalation-abuse vector, and it would be automation acting on a user's accusation. |
 | R4 | A re-verification request never changes `AccountState` and never restores a removed capability. | Independence of the three state machines. |
 | R5 | A re-verification prompt is rendered with the same copy whether it is routine, trust-triggered, or moderation-driven. | If the copy varied, the subject could infer their risk state, and the harassment vector would work at the psychological level instead. |
 | R6 | A subject with an open enforcement case receives re-verification prompts only at Identity's normal cadence; the case does not create a prompt storm, and a moderator's restriction replaces the prompt rather than adding to it. | One friction, not two. |
-| R7 | Failed or repeated re-verification attempts are capped by the identity machine, not by an account-level throttle, and repeated failure leads to `review_required` (a human) rather than any enforcement. | Escalation to enforcement stays human. |
+| R7 | Failed or repeated attempts are capped by the identity machine, not by an account-level throttle, and **three consecutive failed attempts escalate to `review_required`** (`REVIEW_ESCALATION_POLICY.consecutiveFailuresBeforeReview`), never to any enforcement. | Escalation to enforcement stays human, and so does escalation out of a loop. Before the kernel had the `flag_for_review` edge out of `verification_failed`, "repeated failure leads to `review_required`" was not buildable: the implementer got `invalid_transition`, and looping back to `pending` forever was the only thing the table allowed. |
+
+**A failed attempt is retried, not re-verified.** A subject in
+`verification_failed` starts a fresh attempt through `submit_verification`,
+which the identity machine allows from that state and which lands in the same
+`pending` the re-verification command would have produced. Naming
+`verification_failed` in `subjectMayRequestOnlyWhen` would have been a second
+route to one outcome, and the one the machine does not have.
+
+**A subject hitting a limit raises no signal.** The refusal row records it,
+which is all a person tapping "verify again" twice needs. Only `trust_safety`
+and `moderation` can reach a cap at all, and them doing so repeatedly on one
+account is the pattern a human should see. Identity cannot open a moderation
+case — it has no case vocabulary and the dependency runs the other way — so the
+record is handed to the caller, which is Trust & Safety's to turn into a case.
 
 ### 8.4 Bypassing a messaging freeze
 
@@ -448,15 +506,19 @@ Descriptive only; the implemented types live in `packages/core` and
 
 ```ts
 // contract sketch — the projection a product client is allowed to hold.
+// Built from one `account_state.changed` payload; no second crossing point,
+// no local copy of the base capability table.
 interface AccountCapabilityProjection {
 	readonly accountState: AccountState;
 	readonly removedCapabilities: readonly string[]; // the case's named set
 	readonly effectiveCapabilities: readonly string[]; // capabilitiesFor(state, ctx)
 }
 
-// contract sketch — what a product client is NOT given.
+// contract sketch — what a product projection is NOT given. The subject's own
+// case reference is not on this list because it does not arrive on a projection
+// at all: it is a `user`-clearance event addressed to them (§6.4), and no
+// product domain may hold it on a stranger's account.
 type NeverInAProductProjection =
-	| { readonly caseId: CaseId }
 	| { readonly moderatorId: ActorId }
 	| { readonly riskState: RiskState }
 	| { readonly reportCount: number }
@@ -471,7 +533,11 @@ screen is wrong: the copy in §6 is written to be sufficient without any of them
 | #1 scenario | Given | When | Then |
 |---|---|---|---|
 | **6. False positive** (primary) | an account that was `limited` on a case | the moderator lifts the restriction with a `caseId` | the account returns to `active`; messaging returns to `active` for both parties; the product read-model retains no trace; the user sees `SAFETY_ACCOUNT_REINSTATED`; the audit log retains the full history for a later appeal |
-| 6. False positive | an enforcement with no `caseId` | the transition is attempted | the transition is rejected by the machine — the case is a structural precondition, not a convention |
+| 6. False positive | an enforcement with no `caseId` | the transition is attempted | the transition is refused with `validation_failed` and a message naming the missing case. The case is a precondition, not a convention — but the refusal is *incomplete context*, not *impossible transition*, and a client can act on that difference: `invalid_transition` means retrying will never help, `validation_failed` means the caller did not supply what the guard asks for. `applyDecision` returns the same code before the machine is consulted at all |
+| 6. False positive | a `limited` account | the client renders the restricted screen | the removed set and the case reference both arrive: `removedCapabilities` on the `public` `account_state.changed`, and `caseId`/`decisionId` on the `user` `moderation.restriction_applied`. The screen is built from those two events, never from a local copy of the base capability table (§10) |
+| 7. Re-verification abuse | Trust & Safety has already had three re-verifications from one subject in 30 days | it requests a fourth | the request is refused `rate_limited` **and** a `ReverificationLimitSignal` is written naming the limit, the count, and `blockedUntil`. Trust & Safety stops requesting and a human can see why |
+| 7. Re-verification abuse | an account already in `review_required` | Trust & Safety requests a re-verification | refused `conflict`. `reverify_requested` has no edge out of `review_required`, so automation cannot walk an escalated case back into `pending` and out of the human's queue |
+| 6. False positive | three consecutive failed verification attempts | the third failure is recorded | `escalateAfterRepeatedFailure` resolves `flag_for_review` → `review_required`. No account standing changes, no capability is removed, and a person picks it up |
 | 5. Malicious account | a subject whose risk reaches `high`/`critical` with corroboration | Trust & Safety signals | an automated, reversible response (re-verification request, rate limit) is applied; **no** account state changes; a case enters the moderator queue; the subject sees only the neutral re-verification copy and cannot infer their risk state |
 | 4. Harassment | a `limited` or `suspended` victim | they open the block and report controls | both are present and functional, because `report` and `block` are in every state including `banned`; evidence is captured and the case exists |
 | 3. Normal dating flow | an `active` user | nothing happens | `limited` never arises from a dating action; unmatch and block do not change `AccountState` |
@@ -484,9 +550,14 @@ screen is wrong: the copy in §6 is written to be sufficient without any of them
   strictly a ladder. The overview records this as a v0.2 question and the
   transition table currently models a strict ladder; the product copy for a
   composed state would need a priority rule.
-- The re-verification rate cap in §8.3 R2. The mechanism is settled (a cap that
-  degrades to a signal); the number is not, and it needs observed rates rather
-  than a guess.
+- ~~The re-verification rate cap in §8.3 R2.~~ **Decided, not open.** Three
+  re-verifications per subject per rolling 30 days, minimum 24 hours apart
+  (`REVERIFICATION_POLICY.maxPerSubjectPer30Days`, `cooldownHours`). Both
+  numbers are exported, pinned by tests in
+  `packages/identity/test/reverification.test.ts`, and revisit-able by editing
+  the constant — the mechanism degrading to a signal is the part that has to
+  survive a change of number, and it does, because the signal records the limit
+  it tripped and when the block lifts rather than hard-coding either.
 - Whether a `suspended` account should keep receiving non-messaging
   notifications (matches, likes). Keeping them helps the user return; there is a
   real argument either way, and it is a judgement call, not a technical one.

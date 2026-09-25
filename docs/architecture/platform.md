@@ -186,34 +186,61 @@ They look like the same table with different retention. They are not.
 | Expiry | Retention is a legal question | Retention is a budget question |
 | Consumers | Moderation, appeals, incident review | Product engineering |
 
-**What goes where.**
+**What goes where.** The three rules, in the order `routeEvent()` applies them:
 
-- Safety and identity events go to audit and nowhere else. `identity_status.changed`
-  is `public` on the bus — a client must know whether the current user is
-  verified — and it is still `audit: true, analytics: false` in `routeEvent()`.
-  A metrics sink that can be sliced by subject is one query away from a "who was
-  reported" list, which the overview forbids the product from knowing.
-- Content goes to neither. A metrics sink is aggregatable and therefore widely
-  readable; a log of message bodies is a product-wide liability that buys no
-  safety. The guard is a type rule (`CONTENT_BEARING_TYPES`) plus the
-  classification, because clearance alone would let an `internal` subscriber see
-  a `user` event.
-- The `auth.` prefix is audit-required for the same reason: recovery abuse is a
-  safety signal, so `auth.recovery_abuse_suspected` is an event, not a metric.
-- Product metrics for the identity and safety journeys come from the anonymous
-  counters in the catalogue (`account.registration_completed`), never from
-  subscribing the metrics sink to a safety stream.
+1. **Content goes to neither sink.** A metrics sink is aggregatable and
+   therefore widely readable; a log of what people said to each other is a
+   product-wide liability that buys no safety. The guard is
+   `CONTENT_BEARING_TYPES`, and it names the events the packages actually
+   publish — `communication.message_sent` today, and only that one. It used to
+   list four names no package emits, which meant the rule protected nothing
+   while reading as though it did, and the failure is silent: an unflagged event
+   simply goes wherever its sensitivity allows. Every other event that could
+   carry user content is `sensitive` or `restricted`, which the clearance check
+   refuses regardless of its name.
+2. **Safety and identity events go to audit and nowhere else.**
+   `identity.status_changed` is `public` on the bus — a client must know whether
+   the current user is verified — and it is still `audit: true, analytics:
+   false` in `routeEvent()`. A metrics sink that can be sliced by subject is one
+   query away from a "who was reported" list, which the overview forbids the
+   product from knowing. Audit-required membership is by domain prefix
+   (`identity.`, `moderation.`, `communication.`, `case.`, `account_state.`,
+   `auth.`) with an explicit exception list for the safety facts whose type name
+   carries no prefix (`verification.anomaly`, `risk.changed`). The legacy
+   spelling `identity_status.changed` is on that list only until the rename in
+   the feature specs lands; it is the row to delete, and not before.
+3. **An event no sink may hold is reported, not discarded.** A `sensitive` event
+   that is not an audit fact comes back `{ audit: false, analytics: false,
+   rejection: 'unroutable' }`. A silent `{ audit: false, analytics: false }` is
+   indistinguishable from a bug, and is how the entire moderation domain's
+   safety record was dropped from both sinks while the router looked healthy.
+
+Product metrics for the identity and safety journeys come from the anonymous
+counters in the catalogue (`account.registration_completed`), never from
+subscribing the metrics sink to a safety stream. Where a safety metric genuinely
+needs a subject — median case resolution time, the block-to-report ratio — it is
+computed from the **audit log**, which is the only store that holds case ids, and
+not from analytics. `ANALYTICS_FORBIDDEN_PROPERTIES` refuses `caseId` and
+`conversationId` precisely so that no one reaches for the sink to get them.
 
 **Analytics discipline** is enforced at the sink, not by review:
 `recordAnalyticsEvent()` refuses an unregistered name (including an inherited
 one like `"toString"`), a property from `ANALYTICS_FORBIDDEN_PROPERTIES`
-(`userId`, `caseId`, `latitude`, `messageBody`, …), a property the event did not
-declare as a dimension, a non-scalar value, and a sample rate outside `[0, 1]`.
-Declared dimensions are the review surface: adding one is a diff in
-`ANALYTICS_EVENTS`.
+(`userId`, `caseId`, `conversationId`, `latitude`, `messageBody`, …), a property
+the event did not declare as a dimension, and a non-scalar value. Declared
+dimensions are the review surface: adding one is a diff in `ANALYTICS_EVENTS`.
 
-Sampling is deterministic on the correlation id, so a retried publish neither
-double-counts nor flickers between runs.
+**The sampling rate lives in the catalogue.** `AnalyticsEventSpec.sampleRate` is
+the whole of the policy, and a caller cannot pass one: a rate chosen at the call
+site is a per-site decision that drifts the moment two services disagree, and a
+drifting rate silently changes a metric's denominator. Almost everything is
+`1`; the exceptions are `discovery.page_served` at `0.1` — the one genuinely
+high-volume event — and `notification.delivered` and `notification.failed` at
+`0.25`. Sampling is deterministic on the correlation id, so a retried publish
+neither double-counts nor flickers between runs, and the correlation id is the
+only key the sink is allowed to see: `userId` and `sessionId` are forbidden
+properties, so a hash over either of them is not merely unwise, it is
+unconstructible.
 
 ## 7. Location precision
 
@@ -272,12 +299,36 @@ The upload lifecycle is a transition table, so "can this asset be served?" is a
 readable block rather than an `if`:
 
 ```
-initiated ──begin_scan──▶ scanning ──approve(clean)──▶ approved   (terminal)
-                          │       └─reject(verdict≠clean, reason)──▶ rejected
-                          │                                              │
-                          └──────────────────────────────────────────────┘
+initiated ──begin_scan──▶ scanning ──approve(clean)──▶ approved (terminal)
+                          │   │
+                          │   └─reject(verdict≠clean, ≠inconclusive, reason)──▶ rejected ◀─┐
+                          │           escalate(inconclusive)                           │  │
+                          │                 │                                         │  │
+                          │                 ▼                                         │  │
+                          │           needs_human ──approve(reviewer)──▶ approved        │  │
+                          │                 │                                         │  │
+                          │                 └─reject(reviewer, reason)──────────────────┘
+                          └───────────────────────────────────────────────────────────┘
                                        reprocess(reviewer) ──▶ initiated
 ```
+
+**`needs_human` is the state that keeps screening from being enforcement.** A
+scanner that reached a verdict may act on it: the rules in
+[Profile & Personalization §6.2](../features/profile-and-personalization.md) are
+a published list, and a photo that breaks one is rejected with the reason the
+user is told. A scanner that could *not* decide has no such warrant, and the
+only honest outcomes for it are "hold this for a person" and nothing else. The
+held asset is not servable, not in the live set, and its owner is told it is
+being checked rather than that it failed — because an auto-rejected borderline
+photo is an enforcement decision about a stranger's face, made by a machine,
+with no case behind it and nobody to appeal to.
+
+Leaving `needs_human`, in either direction, requires a named `reviewerId`, on the
+same rule as `reprocess`: a decision about a person is made by a person. Which
+verdicts count as inconclusive is recorded as an open question in the feature
+spec: only an explicit `inconclusive` verdict reaches the state today, and
+promoting, say, `sexual_content` into a human queue is a queue-cost decision with
+user-facing consequences, not a mechanical one.
 
 Only `approved` media is servable, and even then never from a public URL.
 `MediaAsset` carries no address, so a bucket URL cannot be constructed from
@@ -290,7 +341,8 @@ signing key).
   through an unmoderated door.
 - A non-owner gets nothing, on any purpose, unless the purpose is
   `moderation_review` **and** `authorize(principal, 'media.read_any')` passes
-  with a case. Rejected media is exactly what a review needs to see.
+  with a case. Rejected media is exactly what a review needs to see, and so is a
+  held asset.
 - Grants are short-lived (120 s), bound to asset + owner + requester + purpose +
   expiry in the signed claim, and re-verified at serve time, so a leaked URL
   stops working when the asset is later rejected and cannot be replayed onto
@@ -299,27 +351,103 @@ signing key).
   refused" is the signal worth keeping, and it is invisible if only successes
   are logged.
 
+One gap worth naming rather than discovering later: **a scan decision is written
+nowhere.** The media machine publishes no event, so a rejected photo is in
+neither the audit log nor any counter, and the `media.*` audit actions cover
+access rather than screening. Until a media event or a scan audit action exists,
+"how many photos did screening refuse last week" has no answer.
+
 ## 9. Notifications
 
-Three rules, in priority order:
+Five rules, in the order `planNotification()` applies them:
 
-1. **`safety` and `account` are not suppressible.** A quiet-hours setting that
-   could silence "someone reported your photo" is a safety control operated by
-   the person it protects. Preferences, muted channels, and quiet hours are all
-   ignored for these categories; the only thing that can stop them is the account
-   not having that channel. A channel the account does not have is recorded as
-   `channel_unavailable` rather than retried forever, and safety notices fan out
-   across every channel the account *does* have.
-2. **Quiet hours are per recipient and per timezone.** "Quiet hours" is a local
-   fact; 22:30 UTC is 23:30 in Berlin and 17:30 in New York, and the same
-   instant is quiet for one recipient and not for another. Windows may span
-   midnight (start inclusive, end exclusive).
-3. **The idempotency key is derived from the event, not the notification**, and
-   includes the recipient and channel. A redelivery, an at-least-once
-   publisher, and a user tapping twice all collapse onto one claim; a fan-out
-   across four channels is four distinct deliveries of one event.
+1. **The catalogue is the notification.** `NotificationKind` is the stable
+   identifier — twenty of them, in `NOTIFICATION_KINDS` — and each row states its
+   category, its class, which channels it uses and how urgently, whether it is
+   about one specific other person, and the closed set of facts a rendered body
+   may bind. The content vocabulary has no word for message text, so a template
+   cannot render one, and a kind that is not a row does not exist. That is what
+   makes "a notification's content is reviewable" a property of a table rather
+   than of a reviewer's memory.
+2. **`safety`, `account` and `verification` cannot be switched off.** A
+   quiet-hours setting that could silence "someone reported your photo" is a
+   safety control operated by the person it protects, and a user who cannot be
+   told their verification failed cannot know why they are no longer visible.
+   Critical kinds ignore both the preference and the window; the only thing that
+   can stop them is the account not having that channel, which is recorded as
+   `channel_unavailable` rather than retried forever.
+3. **A block edge stops a pair notice on both sides, and no class overrides
+   it.** `planNotification` refuses a pair-scoped kind whose caller did not state
+   the edge, so the block is a required input rather than a default: a missing
+   `blockedPair` is an error, not an assumption. Telling a blocked person that
+   the other side is still active is a safety disclosure; telling the blocker
+   that the other side still receives notices invites the abuse that caused the
+   block.
+4. **Quiet hours defer, they do not drop.** A non-critical push or email inside
+   the recipient's window is planned with `mode: 'deferred'` and a `deliverAt` at
+   the end of it, and it claims the same idempotency key it would have claimed
+   immediately, so a held release and a retried immediate send cannot both
+   deliver. The in-app entry is never deferred — it is the durable record. An
+   email the catalogue marks `digest` is a *schedule*, not a prohibition: it is
+   planned at the next window boundary, hourly aligned or weekly on the day and
+   hour the recipient chose. Windows are per recipient and per timezone, because
+   "quiet hours" is a local fact: 22:30 UTC is 23:30 in Berlin and 17:30 in New
+   York, and the same instant is quiet for one recipient and not for another.
+5. **The idempotency key is derived from the event, not the notification**, and
+   includes the recipient and channel. A redelivery, an at-least-once publisher,
+   and a user tapping twice all collapse onto one claim; a fan-out across three
+   channels is three distinct deliveries of one event. The kind is not part of
+   the key: it is a function of the event, so including it would let one event
+   claim the same channel twice.
 
-## 10. External integration seam
+`sms` is not a notification channel. A phone number is personal data the account
+does not have to disclose in order to receive product mail, and a safety notice
+that arrives by SMS is a notice a shared or coercive device can see. The recovery
+*flow* may still use an SMS one-time code — that is a credential channel, and
+nobody is ever notified by the channel they authenticate with.
+
+## 10. Sessions
+
+Three lifetimes, and conflating them is how a session policy ends up meaning
+nothing:
+
+| | Constant | Answer to | Why |
+|---|---|---|---|
+| Access token | `SESSION_TTL_SECONDS` — 15 min | "how long is this bearer token useful?" | A leaked access token is useless within a quarter hour, and every request can re-mint one. |
+| Refresh window | `REFRESH_WINDOW_SECONDS` — 30 days | "how long may this login be *renewed*?" | Absolute, and deliberately **not** sliding. |
+| Idle clock | `SESSION_IDLE_TIMEOUT_SECONDS` — 14 days | "has anyone used it lately?" | The half-life of the window. |
+
+**Why the window does not slide.** A 30-day window that refreshes on activity is
+a session that never ends: the one credential an attacker stole keeps working for
+as long as the legitimate owner keeps using the product, so the window measures
+nothing. The idle clock is what makes an absolute window compatible with
+"refreshed on activity" — activity refreshes the *token*, not the window, and a
+login nobody has touched for a fortnight dies with a fortnight still left on its
+window. The two refusals stay distinct because one is routine and the other is a
+signal: an `expired` access token is the normal fifteen minutes, an `idle` one
+means a person stopped coming back.
+
+The idle clock is checked on the **refresh** path, not on the validate path,
+because a fortnight is also fifty-eight thousand access tokens — by then the
+token is long expired, and `idle` would be a reason no caller could ever
+observe.
+
+**Concurrent sessions.** `MAX_CONCURRENT_SESSIONS` is 10. Past the cap the
+least recently active session is evicted rather than the newcomer refused, so
+signing in on a new device does not lock you out of the ten devices you actually
+use, and the sessions that survive are the ones a person has touched. An
+eviction comes back revoked with the reason `session_limit`, which is what lets
+the owner be told on a channel they are still signed in on: an unexplained
+sign-out is otherwise the only signal that a session limit exists.
+
+> The feature spec [Account & Onboarding §5](../features/account-and-onboarding.md)
+> currently reads "30 days rolling, refreshed on activity; idle timeout 14 days;
+> 10 concurrent sessions". Rolling and idle are mutually exclusive as written —
+> a session refreshed on activity is never idle for a fortnight — and the code
+> follows the table above. That paragraph is the thing to correct, and it is not
+> corrected here because that document is not this domain's.
+
+## 11. External integration seam
 
 No domain imports a vendor SDK. A verification provider, an email relay, APNs,
 and an SMS gateway all arrive as the same three shapes:
@@ -348,7 +476,7 @@ risk is handled at the ledger, upstream, where the recipient is known.
 
 Rate limits from the vendor take precedence over our exponential backoff.
 
-## 11. Observability
+## 12. Observability
 
 - One correlation id is minted at the edge (`newRequestTrace`) and inherited
   everywhere. `inheritEventContext` never re-mints it; re-minting is how a
@@ -359,7 +487,7 @@ Rate limits from the vendor take precedence over our exponential backoff.
 - An audit record built from an event takes its timestamp and correlation id
   from that event, so every audit fact ties back to the envelope that caused it.
 
-## 12. Open questions
+## 13. Open questions
 
 Recorded rather than guessed, because guessing is worse than writing down the
 gap.

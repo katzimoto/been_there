@@ -1,11 +1,11 @@
 import { type DomainError, type Result, domainError, ok } from '@been-there/core';
+import { type DistanceBand, DISTANCE_BAND_BOUNDS, isWithinDistanceLimit } from './location.js';
 import type { GenderIdentity } from './profile.js';
-import { type DistanceBand, isWithinDistanceLimit } from './location.js';
 
 /**
  * Dating preferences (issue #4, #11).
  *
- * Every dimension is nullable, and `null` means *not expressed* — never
+ * Every expressible axis is nullable, and `null` means *not expressed* — never
  * "no one". A new account with no preferences expressed must still be able to
  * see people and be seen, otherwise the product's cold start is a black hole:
  * the first session would have to be configured before it could do anything,
@@ -13,14 +13,65 @@ import { type DistanceBand, isWithinDistanceLimit } from './location.js';
  * The rule is therefore asymmetric on purpose: an unexpressed dimension
  * contributes no constraint, and exclusion requires *both* sides to have
  * expressed a constraint on that dimension.
+ *
+ * Two gender axes, and they are not the same question:
+ *
+ *  - `seekingGenders` is one-sided. It filters the viewer's own page and nothing
+ *    else — "who do I want to see".
+ *  - `openTo` is pair-wise. It is half of the mutual test, and it is the only
+ *    gender dimension that can end a match — "who am I willing to be matched
+ *    with".
+ *
+ * Collapsing them into one field cannot express a user who wants to *see* women
+ * but is not open to being matched with women, and the two are separately
+ * actionable in the product: one has a "widen this filter" action and the other
+ * does not.
  */
 
 export const PREFERENCE_LIMITS = {
   minAge: 18,
   maxAge: 120,
-  minDistanceKm: 1,
-  maxDistanceKm: 500,
+  /**
+   * A narrower window is rejected rather than warned about: a validation
+   * failure at save time is cheaper to understand than an empty page later.
+   */
+  minAgeRangeWidth: 5,
 } as const;
+
+/**
+ * The only distance limits a preference may name, derived from the bands rather
+ * than restated beside them. A limit that is not a band edge cannot be compared
+ * against a band, so accepting one would store a number no query can honour.
+ */
+export const DISTANCE_LIMIT_KM: readonly number[] = Object.values(DISTANCE_BAND_BOUNDS)
+  .filter((bounds) => Number.isFinite(bounds.maxKm))
+  .map((bounds) => bounds.maxKm);
+
+/**
+ * The coarsest bucket the platform presents a location at by default. A viewer
+ * may ask for something coarser and may not ask for anything finer: the finest
+ * band exists for computing separation, and publishing someone's own location at
+ * that resolution is the triangulation risk the banding exists to prevent.
+ */
+export const PLATFORM_DEFAULT_LOCATION_PRECISION: DistanceBand = '5_25_km';
+
+/** Bands ordered from finest to coarsest, so a precision comparison is an index compare. */
+const PRECISION_ORDER: readonly DistanceBand[] = [
+  'lt_5_km',
+  '5_25_km',
+  '25_50_km',
+  '50_100_km',
+  'gt_100_km',
+];
+
+/**
+ * The gender identities someone is open to being matched with. A separate name
+ * from `seekingGenders` because it is read in a different role and is not
+ * interchangeable with it. Modelling attraction as anything other than label
+ * matching is unresolved and stays unresolved (see the open questions in
+ * docs/architecture/dating-core.md).
+ */
+export type OrientationGroup = GenderIdentity;
 
 export interface AgeRange {
   readonly min: number;
@@ -29,34 +80,43 @@ export interface AgeRange {
 
 export interface DatingPreferences {
   readonly ageRange: AgeRange | null;
+  /** One of `DISTANCE_LIMIT_KM`. */
   readonly maxDistanceKm: number | null;
-  readonly interestedIn: readonly GenderIdentity[] | null;
+  /** One-sided: filters this viewer's page. */
+  readonly seekingGenders: readonly GenderIdentity[] | null;
+  /** Pair-wise: half of the mutual test. */
+  readonly openTo: readonly OrientationGroup[] | null;
+  /** Coarsest bucket this viewer permits their own location to be shown at. */
+  readonly locationPrecision: DistanceBand | null;
 }
 
 const KNOWN_GENDER_IDENTITIES: Readonly<Record<GenderIdentity, true>> = {
-	woman: true,
-	man: true,
-	non_binary: true,
-	self_described: true,
+  woman: true,
+  man: true,
+  non_binary: true,
+  self_described: true,
 };
 
 /** The cold-start default: nothing expressed, so nothing excluded. */
 export const UNSET_PREFERENCES: DatingPreferences = {
-	ageRange: null,
-	maxDistanceKm: null,
-	interestedIn: null,
+  ageRange: null,
+  maxDistanceKm: null,
+  seekingGenders: null,
+  openTo: null,
+  locationPrecision: null,
 };
 
 /** Rejects a preference set that could never be satisfied, rather than storing it. */
 export function validatePreferences(candidate: DatingPreferences): Result<DatingPreferences, DomainError> {
-  const { ageRange, maxDistanceKm, interestedIn } = candidate;
+  const { ageRange, maxDistanceKm, seekingGenders, openTo, locationPrecision } = candidate;
   if (ageRange !== null) {
     if (
       !Number.isInteger(ageRange.min) ||
       !Number.isInteger(ageRange.max) ||
       ageRange.min < PREFERENCE_LIMITS.minAge ||
       ageRange.max > PREFERENCE_LIMITS.maxAge ||
-      ageRange.min > ageRange.max
+      ageRange.min > ageRange.max ||
+      ageRange.max - ageRange.min < PREFERENCE_LIMITS.minAgeRangeWidth
     ) {
       return domainError('validation_failed', 'dating.preferences', 'age range is out of bounds', {
         min: ageRange.min,
@@ -64,48 +124,65 @@ export function validatePreferences(candidate: DatingPreferences): Result<Dating
       });
     }
   }
-  if (maxDistanceKm !== null) {
-    if (
-      !Number.isFinite(maxDistanceKm) ||
-      maxDistanceKm < PREFERENCE_LIMITS.minDistanceKm ||
-      maxDistanceKm > PREFERENCE_LIMITS.maxDistanceKm
-    ) {
-      return domainError('validation_failed', 'dating.preferences', 'distance limit is out of bounds', {
-        maxDistanceKm,
+  if (maxDistanceKm !== null && !DISTANCE_LIMIT_KM.includes(maxDistanceKm)) {
+    return domainError('validation_failed', 'dating.preferences', 'distance limit is not a published bucket edge', {
+      maxDistanceKm,
+    });
+  }
+  for (const [field, identities] of [
+    ['seekingGenders', seekingGenders],
+    ['openTo', openTo],
+  ] as const) {
+    if (identities === null) {
+      continue;
+    }
+    if (identities.length === 0) {
+      return domainError('validation_failed', 'dating.preferences', 'an empty interest list would exclude everyone', {
+        field,
       });
     }
-  }
-  if (interestedIn !== null) {
-    if (interestedIn.length === 0) {
-      return domainError('validation_failed', 'dating.preferences', 'an empty interest list would exclude everyone');
-    }
     const accepted: Partial<Record<GenderIdentity, true>> = {};
-    for (const identity of interestedIn) {
+    for (const identity of identities) {
       if (KNOWN_GENDER_IDENTITIES[identity] !== true) {
         return domainError('validation_failed', 'dating.preferences', 'unknown gender identity', {
+          field,
           value: identity,
         });
       }
       if (accepted[identity] === true) {
         return domainError('validation_failed', 'dating.preferences', 'duplicate gender identity', {
+          field,
           value: identity,
         });
       }
       accepted[identity] = true;
     }
   }
+  if (locationPrecision !== null) {
+    const requested = PRECISION_ORDER.indexOf(locationPrecision);
+    if (
+      requested < 0 ||
+      requested < PRECISION_ORDER.indexOf(PLATFORM_DEFAULT_LOCATION_PRECISION)
+    ) {
+      return domainError('validation_failed', 'dating.preferences', 'location precision may only be coarser than the platform default', {
+        requested: locationPrecision,
+        platformDefault: PLATFORM_DEFAULT_LOCATION_PRECISION,
+      });
+    }
+  }
   return ok(candidate);
 }
 
 /**
- * True only when every dimension is expressed. Drives the product prompt to
- * finish setting preferences up; it never gates discovery on its own.
+ * True when every axis that narrows a pool is expressed. Drives the product
+ * prompt to finish setting preferences up; it never gates discovery on its own.
  */
 export function hasExpressedPreferences(preferences: DatingPreferences): boolean {
   return (
     preferences.ageRange !== null &&
     preferences.maxDistanceKm !== null &&
-    preferences.interestedIn !== null
+    preferences.seekingGenders !== null &&
+    preferences.openTo !== null
   );
 }
 
@@ -150,15 +227,20 @@ function distanceBreaks(
   return !isWithinDistanceLimit(distance, viewerMax) || !isWithinDistanceLimit(distance, candidateMax);
 }
 
+/**
+ * The pair-wise gender test, and the only place `openTo` is read: a match needs
+ * both sides to be open to each other, which is a different question from either
+ * side's own page filter.
+ */
 function genderBreaks(viewer: CompatibilitySide, candidate: CompatibilitySide): boolean {
-  const viewerInterestedIn = viewer.preferences.interestedIn;
-  const candidateInterestedIn = candidate.preferences.interestedIn;
-  if (viewerInterestedIn === null || candidateInterestedIn === null) {
+  const viewerOpenTo = viewer.preferences.openTo;
+  const candidateOpenTo = candidate.preferences.openTo;
+  if (viewerOpenTo === null || candidateOpenTo === null) {
     return false;
   }
-  const viewerListCoversCandidate = candidate.genderIdentities.some((identity) => viewerInterestedIn.includes(identity));
-  const candidateListCoversViewer = viewer.genderIdentities.some((identity) => candidateInterestedIn.includes(identity));
-  return !viewerListCoversCandidate || !candidateListCoversViewer;
+  const viewerCoversCandidate = candidate.genderIdentities.some((identity) => viewerOpenTo.includes(identity));
+  const candidateCoversViewer = viewer.genderIdentities.some((identity) => candidateOpenTo.includes(identity));
+  return !viewerCoversCandidate || !candidateCoversViewer;
 }
 
 /**

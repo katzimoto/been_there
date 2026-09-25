@@ -2,6 +2,7 @@ import {
   type ActorId,
   type ConversationId,
   type CorrelationId,
+  type DomainEvent,
   type ReportId,
   type Result,
   type RiskState,
@@ -13,7 +14,9 @@ import {
   type CaseIntake,
   type Case,
   type ContextOptions,
+  type EmitSpec,
   type ModerationContext,
+  type ModerationEventType,
   type ModeratorActor,
   type Report,
   type ReportEvidenceInput,
@@ -65,13 +68,40 @@ export interface Harness {
   readonly ctx: ModerationContext;
   readonly audit: AuditLog;
   readonly clock: TestClock;
+  /** Every event published through the context, in order. */
+  readonly published: readonly DomainEvent[];
+  /** The event types published so far, in order. */
+  typesPublished(): readonly ModerationEventType[];
 }
 
+/**
+ * A spy over the real emitter rather than a second implementation of it: the
+ * recorded envelopes are the ones a deployment would publish, and the functions
+ * that return nothing (`captureEvidence`, `assignCase`, `readEvidence`) become
+ * observable here.
+ */
 export function harness(options: ContextOptions = {}): Harness {
   const clock = createTestClock();
   const audit = createAuditLog();
-  const ctx = createContext({ ...options, audit, now: clock.now });
-  return { ctx, audit, clock };
+  const { events, ...rest } = createContext({ ...options, audit, now: clock.now });
+  const published: DomainEvent[] = [];
+  const ctx: ModerationContext = {
+    ...rest,
+    events: {
+      emit<P extends Readonly<Record<string, unknown>>>(spec: EmitSpec<P>): DomainEvent<P> {
+        const event = events.emit(spec);
+        published.push(event);
+        return event;
+      },
+    },
+  };
+  return {
+    ctx,
+    audit,
+    clock,
+    published,
+    typesPublished: () => published.map((event) => event.type as ModerationEventType),
+  };
 }
 
 export const REPORTER: UserId = castId<'UserId'>('u-reporter');

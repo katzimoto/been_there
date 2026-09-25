@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   type DomainError,
+  type IdentityState,
   type Result,
   type VerificationId,
   assertMachineIsTotal,
@@ -8,10 +9,12 @@ import {
 } from '@been-there/core';
 import {
   ATTEMPT_POLICY,
+  REVIEW_ESCALATION_POLICY,
   type VerificationAttempt,
   attemptMachine,
   beginCapture,
   completeFromProvider,
+  escalateAfterRepeatedFailure,
   expireAttempt,
   planVerificationStart,
   recordCapture,
@@ -25,6 +28,7 @@ import {
   check,
   finding,
   hoursLater,
+  daysLater as daysAgo,
   passingChecks,
   providerResult,
 } from './support.js';
@@ -430,3 +434,178 @@ function awaitingProviderInit(): VerificationAttempt {
     }),
   ).attempt;
 }
+
+describe('repeated failure reaches a person', () => {
+  const failed = (index: number, at: Date): VerificationAttempt => ({
+    ...attemptInFlight(),
+    verificationId: castId<'VerificationId'>(`vrf-fail-${index}`),
+    state: 'failed',
+    startedAt: at,
+    updatedAt: at,
+  });
+
+  it('leaves the first two failures with another retry', () => {
+    for (const count of [1, 2]) {
+      const attempts = Array.from({ length: count }, (_, index) =>
+        failed(index, daysAgo(index)),
+      );
+      const result = escalateAfterRepeatedFailure({
+        identityState: 'verification_failed',
+        attempts,
+      });
+
+      expect(succeeded(result)).toBeNull();
+    }
+  });
+
+  it('escalates the third consecutive failure to review_required', () => {
+    // Before the kernel had the edge, `flag_for_review` from
+    // `verification_failed` was `invalid_transition`, so the only thing an
+    // implementer could build from "repeated failure leads to review_required"
+    // was an error.
+    const attempts = [0, 1, 2].map((index) => failed(index, daysAgo(index)));
+    const escalation = succeeded(
+      escalateAfterRepeatedFailure({ identityState: 'verification_failed', attempts }),
+    );
+
+    expect(escalation?.viaEvent).toBe('flag_for_review');
+    expect(escalation?.state).toBe<IdentityState>('review_required');
+    expect(escalation?.consecutiveFailures).toBe(REVIEW_ESCALATION_POLICY.consecutiveFailuresBeforeReview);
+  });
+
+  it('counts the run of failures, not every failure the account ever had', () => {
+    // Three failures last March must not escalate a person who failed once
+    // yesterday and is failing again now.
+    const attempts = [
+      failed(0, new Date('2026-01-04T09:00:00.000Z')),
+      failed(1, new Date('2026-01-05T09:00:00.000Z')),
+      failed(2, new Date('2026-01-06T09:00:00.000Z')),
+      attemptInFlight({
+        verificationId: castId<'VerificationId'>('vrf-pass'),
+        state: 'passed',
+        startedAt: new Date('2026-01-07T09:00:00.000Z'),
+      }),
+      failed(3, T0),
+      failed(4, hoursLater(1)),
+    ];
+    const result = escalateAfterRepeatedFailure({
+      identityState: 'verification_failed',
+      attempts,
+    });
+
+    expect(succeeded(result)).toBeNull();
+  });
+
+  it('cannot escalate a state that is not a failed verification', () => {
+    // The counter is not the authority: the kernel still decides. An escalation
+    // attempted from a state that never failed is refused rather than invented.
+    const attempts = [0, 1, 2].map((index) => failed(index, daysAgo(index)));
+    const error = errorOf(
+      escalateAfterRepeatedFailure({ identityState: 'unverified', attempts }),
+    );
+
+    expect(error.code).toBe('invalid_transition');
+  });
+
+  it('never touches account standing on the way to a review', () => {
+    // A review is a verification outcome, not an enforcement: the escalation
+    // resolves to `review_required` and nothing else exists on this path.
+    const attempts = [0, 1, 2].map((index) => failed(index, daysAgo(index)));
+    const escalation = succeeded(
+      escalateAfterRepeatedFailure({ identityState: 'verification_failed', attempts }),
+    );
+
+    expect(escalation?.state).toBe<IdentityState>('review_required');
+    expect(REVIEW_ESCALATION_POLICY.consecutiveFailuresBeforeReview).toBe(3);
+  });
+});
+
+describe('a rate limit a person can read', () => {
+  it('tells the person when the attempt cap lifts', () => {
+    // The copy says "Try again" and the cap refuses it three times out of five.
+    // The error now carries the moment the oldest of today's attempts leaves the
+    // 24-hour window, so the screen can say when rather than lying by omission.
+    const startedAt = new Date('2026-03-01T06:00:00.000Z');
+    const existing = Array.from({ length: ATTEMPT_POLICY.maxAttemptsPerDay }, (_, index) => ({
+      ...attemptInFlight(),
+      verificationId: castId<'VerificationId'>(`vrf-${index}`),
+      state: 'expired' as const,
+      startedAt: new Date(startedAt.getTime() + index * 30 * 60 * 1000),
+    }));
+    const error = errorOf(
+      planVerificationStart({
+        verificationId: castId<'VerificationId'>('vrf-new'),
+        subjectId: SUBJECT,
+        identityState: 'verification_failed',
+        now: hoursLater(2),
+        reVerification: false,
+        reason: { code: 'user_requested' },
+        existing,
+      }),
+    );
+
+    expect(error.code).toBe('rate_limited');
+    expect(error.details?.retryAt).toBe(
+      new Date(startedAt.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+    );
+  });
+
+  it('tells the person when a retake cooldown lifts', () => {
+    const attempt = succeeded(
+      recordCapture(
+        succeeded(beginCapture(awaitingProviderInit(), T0)),
+        {
+          kind: 'selfie_image',
+          check: 'liveness',
+          storageRef: 'blob://selfie-1',
+          digest: 'sha256:selfie-1',
+        },
+        T0,
+      ),
+    );
+    const error = errorOf(
+      recordCapture(
+        attempt,
+        {
+          kind: 'selfie_image',
+          check: 'liveness',
+          storageRef: 'blob://selfie-2',
+          digest: 'sha256:selfie-2',
+        },
+        hoursLater(ATTEMPT_POLICY.retakeCooldownMinutes / 60 - 0.1),
+      ),
+    );
+
+    expect(error.code).toBe('rate_limited');
+    expect(error.details?.retryAt).toBe(
+      new Date(T0.getTime() + ATTEMPT_POLICY.retakeCooldownMinutes * 60_000).toISOString(),
+    );
+  });
+
+  it('lets a retake through once the cooldown has elapsed', () => {
+    const attempt = succeeded(
+      recordCapture(
+        succeeded(beginCapture(awaitingProviderInit(), T0)),
+        {
+          kind: 'selfie_image',
+          check: 'liveness',
+          storageRef: 'blob://selfie-1',
+          digest: 'sha256:selfie-1',
+        },
+        T0,
+      ),
+    );
+    const retake = recordCapture(
+      attempt,
+      {
+        kind: 'selfie_image',
+        check: 'liveness',
+        storageRef: 'blob://selfie-2',
+        digest: 'sha256:selfie-2',
+      },
+      hoursLater(ATTEMPT_POLICY.retakeCooldownMinutes / 60 + 0.1),
+    );
+
+    expect(retake.ok).toBe(true);
+  });
+});

@@ -44,6 +44,7 @@ export type ReportReason =
   | 'sexual_content'
   | 'non_consensual_intimacy'
   | 'minor_safety'
+  | 'unsafe_contact'
   | 'scam_or_solicitation'
   | 'impersonation'
   | 'fake_or_misleading_profile'
@@ -66,6 +67,14 @@ export const REPORT_REASON_POLICY: Readonly<Record<ReportReason, ReportTriagePol
   sexual_content: { priority: 'normal', requiresStatement: false, isPersonSafety: true },
   non_consensual_intimacy: { priority: 'urgent', requiresStatement: false, isPersonSafety: true },
   minor_safety: { priority: 'urgent', requiresStatement: false, isPersonSafety: true },
+  // Being steered off-platform, or having personal details used, is the report a
+  // member makes when the danger is the *channel* rather than the content. It
+  // is deliberately not folded into `scam_or_solicitation`: that reason triages
+  // as `normal` and is not person-safety, and a report about being moved into
+  // an unmoderated channel is the one where the clock matters. It is `high`
+  // rather than `urgent` because nothing in it is a threat, an image of a minor,
+  // or non-consensual — the three the platform treats as immediately urgent.
+  unsafe_contact: { priority: 'high', requiresStatement: false, isPersonSafety: true },
   scam_or_solicitation: { priority: 'normal', requiresStatement: false, isPersonSafety: false },
   impersonation: { priority: 'high', requiresStatement: false, isPersonSafety: false },
   fake_or_misleading_profile: { priority: 'low', requiresStatement: false, isPersonSafety: false },
