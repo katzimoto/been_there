@@ -70,7 +70,7 @@ export const identityMachine: StateMachine<IdentityState, IdentityEvent, Identit
         to: 'pending',
         note: "Trust-triggered re-verification (issue #15). Deliberately NOT reachable from review_required: while a human is looking at a case, an automatic request must not be able to walk the account back out of it. That is commitment 2 in shape — automation must not undo a human's involvement — and the kernel is the right place for it, because a policy check in the calling package can be bypassed by a direct call here. A flagged case leaves review only through review_cleared or review_confirmed_fraud.",
       },
-      { event: 'withdraw', to: 'unverified' },
+      { event: 'withdraw', from: ['unverified', 'pending', 'verified', 'expired', 'verification_failed'], to: 'unverified', note: 'Not reachable from review_required. Withdrawing is safe in itself - it only ever removes discoverability - but it would strand an open case with nobody able to resolve it, and that is commitment 2 in shape: a case a human is looking at must not be walkable out from under them. A user who wants out deletes the account, which is a different and terminal path.' },
     ],
   });
 
