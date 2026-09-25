@@ -11,3 +11,5 @@ export * from './notification-render.js';
 export * from './location.js';
 export * from './observability.js';
 export * from './integration.js';
+export * from './telemetry.js';
+export * from './safety-metric.js';

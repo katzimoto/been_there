@@ -26,8 +26,9 @@ Package: `packages/communication`.
 
 Every cross-domain fact arrives as a projection defined in
 `packages/communication/src/read-models.ts`: the match projection (Dating Core),
-the block ledger view and the capability projection (Moderation & Enforcement).
-This package imports no other domain.
+the block ledger view, the capability projection, and the counterpart's
+messaging standing (Moderation & Enforcement). This package imports no other
+domain.
 
 ## 2. Conversation lifecycle
 
@@ -136,7 +137,8 @@ nothing, and returns the first denial. The rules are **data**, in this order:
 | 3 | `match_not_for_conversation` | the match projection describes a different conversation | `conflict` |
 | 4 | `match_not_active` | the match is `unmatched` | `not_eligible` |
 | 5 | `conversation_not_open` | the conversation is blocked, frozen, un-matched, or ended | `not_eligible` |
-| 6 | `missing_send_message_capability` | the sender's capability projection omits `send_message` | `permission_denied` |
+| 6 | `standing_unidentifiable` | a party's standing is absent, or names somebody other than the party it was consulted for | `external_dependency_failed` |
+| 7 | `missing_send_message_capability` | **either** participant's standing forbids sending | `permission_denied` |
 
 **Block dominates, and it dominates by being first.** If the block were rule
 four, a restricted user who had blocked someone would be told their
@@ -144,10 +146,76 @@ conversation was unavailable "because of your restriction" — which leaks the
 existence of an enforcement action into a product surface, and makes the
 strongest fact the weakest one. Rule 1 also covers a block whose conversation
 has already ended, so the answer to "why can I not message here" never depends
-on which condition happened to be checked first.
+on which condition happened to be checked first. The same reasoning now covers
+rule 7: where a block and a counterpart restriction both apply, the answer is
+`blocked`, and its `details` are `{ rule: 'blocked' }` and nothing else.
 
 Every denial carries `details.rule`, so a client renders a correct, uniform
 explanation and never guesses at a reason.
+
+### The refusal is symmetric
+
+§8.4 of [`account-restrictions-and-reverification.md`](../features/account-restrictions-and-reverification.md)
+promises that a restriction disables the composer *for the restricted account
+and for every counterpart*, both ways. That is implemented here rather than
+described, and it took a contract change rather than a check:
+`CommunicationDependencies` grew a fourth member, `peerStanding`, and it is
+required — an optional counterpart standing is a default-to-permit bug waiting
+for a caller to forget it.
+
+**What crosses the boundary, and what does not.** `PeerStanding` is a user id
+and one bit, `canSendMessages`. It is deliberately *not* a
+`CapabilityProjection`:
+
+| Crosses | Does not cross |
+|---------|----------------|
+| whether the counterpart of a conversation the sender already participates in may send at all | the account state, so `limited`, `suspended` and `banned` stay indistinguishable |
+| nothing else | any other capability — `appeal_request` must not be readable off a banned peer |
+| | the reason for a restriction, any case id, and any history of standing changes |
+
+The clearance it carries is **none**. It is not a subscription to moderation's
+events and not a read of an account record: the application layer narrows
+moderation's capability projection to this bit at the boundary and passes the
+answer in. A sender learns *that* the conversation is closed to them — which is
+the product behaviour the composer has to act on — and learns nothing about
+why, nor anything else about the other person. Collapsing the three restricted
+states into a single answer is what makes the projection safe to hand over: any
+field that distinguished them would carry the profile-reachability leak of §8.5
+into this package through the transport. The question to ask before this grows
+is not "could the gate use another field" but "would this let a sender learn
+something about a person they are not".
+
+**One rule, two parties.** Rule 7 evaluates the sender and the counterpart
+through a single `denial(...)` call, so a restricted sender and a sender whose
+counterpart is restricted receive the same `code`, the same `message` and the
+same `details` — no user id in any of them. The test asserts the *whole* error
+objects are equal rather than only the rule name, because the two branches
+drifting apart is exactly how a restriction becomes probeable, and a restricted
+user is precisely the person who would benefit from learning whether the
+silence they are getting is their own doing.
+
+That is also the answer to the case this document's own promise leaves open —
+**one party limited, the other active**, which is the ordinary state of the
+world rather than an edge case. Both composers are disabled, and the refusal
+does not depend on who is pressing send.
+
+**It fails closed.** Rule 6 exists because "I could not tell" must never read
+as "allowed": a gate that opens when its projection failed to load looks like
+the feature working. A standing that is absent, or that describes somebody
+other than the party it was consulted for, refuses the send with
+`external_dependency_failed` and `details.party` naming the side that could not
+be evaluated. Naming it is safe precisely because a wiring fault says nothing
+about capabilities — it fires whatever the restrictions in play, so probing it
+measures the health of the projection rather than the state of the person. It
+sits *above* rule 7 so a mis-wired caller is never laundered into an ordinary
+refusal that nobody would ever page about. `details.party` appears on this one
+error and on no other.
+
+**Reading is not symmetric, and is not meant to be.** Rule 7 is a *sending*
+gate. A restriction removes the ability to message; it does not erase history,
+and the read side is governed by the conversation state and by `canView` below.
+Promising symmetry in both directions would be the wrong promise: a restricted
+user keeps the evidence a case would want.
 
 Reading is separate, and deliberately asymmetric (`canView`):
 
@@ -247,7 +315,13 @@ reading the case itself still requires `restricted` clearance.
 |---|---|---|---|---|
 | **Unmatch** | permanently closed for this conversation; a new match creates a new one | both keep the history | full, on the same clock as any conversation | yes, with the whole transcript |
 | **Block** | closed both ways, immediately | blocker keeps it; blocked party loses it | full | yes — the blocker is the most likely reporter, so their copy is the one that must survive |
-| **Restriction (`limited` without `send_message`)** | frozen until the restriction is lifted | unchanged for both | full | yes; a conversation frozen by enforcement is exactly the one a case will want |
+| **Restriction (no `send_message`)** | frozen until the restriction is lifted, for the restricted account *and* for its counterpart | unchanged for both | full | yes; a conversation frozen by enforcement is exactly the one a case will want |
+
+The restriction row is the symmetric refusal of §4 seen from the product side:
+while it holds, neither party's composer works, and neither is told which of
+them the restriction is about. `suspended` and `banned` land in the same row —
+they also carry no `send_message` — and the counterpart is not told which state
+the other person is in.
 
 The unmatch row is commitment #4 in practice. The record outlives the
 relationship, the conversation stays addressable by a conversation id that a

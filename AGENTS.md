@@ -3,6 +3,12 @@
 How to work in this repository. What the system *is* lives in `docs/`; this file
 describes how to change it, and is short on purpose: a working agreement nobody
 reads is not an agreement.
+>
+> The user's standing working preferences — team decomposition, session review,
+> skill and memory hygiene, parallel work, and research — are recorded at
+> `~/.omp/memory/working-preferences.md`. They outlast this repository; read
+> them at the start of a session and check whether what happened last time
+> should change them.
 
 ## Before you touch anything
 

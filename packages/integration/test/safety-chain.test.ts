@@ -16,6 +16,7 @@ import {
   type ActorId,
   type Result,
   castId,
+  capabilitiesFor,
   isClearedToConsume,
 } from '@been-there/core';
 import {
@@ -119,6 +120,13 @@ function deliver(overrides: {
       senderStanding: {
         userId: ALICE,
         capabilities: overrides.capabilities ?? ['send_message'],
+      },
+      // The counterpart's standing is a caller claim, so derive it the way the
+      // application layer would rather than hard-coding the bit: a `true` here
+      // would pass whether or not the gate actually consults it.
+      peerStanding: {
+        userId: BOB,
+        canSendMessages: capabilitiesFor('active').includes('send_message'),
       },
       recentSendTimestamps: [],
       recentConversationStarts: [],

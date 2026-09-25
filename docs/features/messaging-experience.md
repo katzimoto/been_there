@@ -134,8 +134,9 @@ Two rules fall out of the ordering and are load-bearing:
 A message may be sent only if all hold:
 
 1. the conversation state is `active`;
-2. the sender's account capability set includes `send_message` at the time of
-   the write (the check happens on the server write path, not in the client);
+2. **both participants'** account capability sets include `send_message` at the
+   time of the write (the check happens on the server write path, not in the
+   client, and it covers the counterpart as well as the sender — see §5.3);
 3. the sender's identity state is `verified` — commitment 1, unverified is
    undiscoverable, and messaging an undiscoverable identity is the same class of
    leak;
@@ -144,6 +145,29 @@ A message may be sent only if all hold:
 A failed check is a rejected write, not a queued message. Messages are never
 accepted-then-withheld: a withheld message is indistinguishable from a delivered
 one for the receiver, so a sender must be told at write time, not later.
+
+**The two refusals are one refusal on the wire, and two screens in the product.**
+When condition 2 fails, the server returns the *same* error, byte for byte,
+whether the restricted account is the sender or the counterpart: same code,
+same message, no user id, nothing that distinguishes the two. That is what
+makes a restriction unprobeable, and it is asserted as whole-error equality
+rather than as a shared rule name, because the branches drifting apart is how
+it would become probeable.
+
+What the two people then *see* is deliberately different, and the difference
+comes from the per-viewer read model rather than from the refusal:
+
+| Who is restricted | What the restricted party sees | What the counterpart sees |
+|---|---|---|
+| the sender | `MSG_CONV_FROZEN_RESTRICTED_ME` — messaging is off for your account, and the conversation is paused for both of you | `MSG_CONV_CLOSED` |
+| the counterpart | `MSG_CONV_CLOSED` | `MSG_CONV_FROZEN_RESTRICTED_ME` |
+
+The asymmetry is not a disclosure. Each string tells someone about their *own*
+account, which they already know, or gives them the same generic "no longer
+active" copy that an unmatch produces — so a counterpart cannot run a probe.
+What the transport must never do is turn one shared error into two different
+ones, because that difference is visible to both sides and is exactly what
+§5.3 forbids.
 
 ### 4.3 Message and delivery states
 

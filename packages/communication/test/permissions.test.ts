@@ -1,4 +1,4 @@
-import { type Result, castId } from '@been-there/core';
+import { type Result, type UserId, castId, capabilitiesFor } from '@been-there/core';
 import { describe, expect, it } from 'vitest';
 import {
   type SendDependencies,
@@ -13,6 +13,7 @@ import {
   sendMessage,
 } from '../src/index.js';
 import {
+  type DependencyOverrides,
   ALICE,
   BOB,
   CONVERSATION_ID,
@@ -22,6 +23,7 @@ import {
   conversationIn,
   dependencies,
   match,
+  peerStandingOf,
   standing,
 } from './fixtures.js';
 
@@ -40,6 +42,12 @@ function ruleOf(result: Result<unknown, { details?: Record<string, unknown> }>):
   return result.ok ? null : result.error.details?.['rule'];
 }
 
+function errorOf(
+  result: Result<unknown, { code: string; message: string; details?: Record<string, unknown> }>,
+): { code: string; message: string; details?: Record<string, unknown> } | null {
+  return result.ok ? null : result.error;
+}
+
 const OTHER_CONVERSATION = castId<'ConversationId'>('c-other');
 
 describe('the send permission gate', () => {
@@ -50,6 +58,7 @@ describe('the send permission gate', () => {
       'match_not_for_conversation',
       'match_not_active',
       'conversation_not_open',
+      'standing_unidentifiable',
       'missing_send_message_capability',
     ]);
   });
@@ -251,7 +260,7 @@ describe('the send path', () => {
 
   it('sends the other direction just as well', () => {
     const sent = succeeded(
-      send(BOB, 'hi', at(30), { senderStanding: standing(BOB) }, 'msg-2'),
+      send(BOB, 'hi', at(30), { senderStanding: standing(BOB), peerStanding: peerStandingOf(ALICE) }, 'msg-2'),
     );
     expect(sent.message.conversationId).toBe(CONVERSATION_ID);
     expect(sent.signal.senderId).toBe(BOB);
@@ -320,5 +329,97 @@ describe('the send path', () => {
       blocking: activeBlockView([blockBetween(BOB, ALICE)]),
     });
     expect(ruleOf(verdict)).toBe('blocked');
+  });
+
+  /**
+   * The same send, expressed in the fixture's vocabulary for the projections —
+   * which is the only way to model a standing that is loaded, absent, or
+   * describing somebody other than the party it is consulted for. The sender's
+   * own projection follows the sender unless a test deliberately mis-wires it.
+   */
+  function sendAgainst(overrides: DependencyOverrides, senderId: UserId = ALICE, id = 'msg-projection') {
+    return sendMessage(
+      { conversation, senderId, messageId: castId<'MessageId'>(id), body: 'hi', at: at(10) },
+      { ...deps(), ...dependencies({ ...overrides, sender: overrides.sender ?? senderId }) },
+    );
+  }
+
+  it('refuses a send into a conversation whose counterpart may not send', () => {
+    // ALICE is in good standing. The point of §8.4 is that BOB's restriction
+    // closes the composer for ALICE too, in the same words it would use if
+    // ALICE were the restricted one.
+    const counterpartRestricted = sendAgainst({ peerCanSendMessages: false }, ALICE, 'msg-peer');
+    const senderRestricted = sendAgainst({ capabilities: ['report'] }, ALICE, 'msg-self');
+    expect(ruleOf(counterpartRestricted)).toBe('missing_send_message_capability');
+    // The whole error, not merely the rule name: a restriction readable from
+    // the difference between the two branches is a restriction that can be
+    // probed.
+    expect(errorOf(counterpartRestricted)).toEqual(errorOf(senderRestricted));
+  });
+
+  it('refuses both directions when one party of the conversation is restricted', () => {
+    // The ordinary case, not an edge case: one limited, one active. Neither may
+    // message, and the refusal does not depend on which of them is talking.
+    const activeToRestricted = sendAgainst({ peerCanSendMessages: false }, ALICE, 'msg-a');
+    const restrictedToActive = sendAgainst({ capabilities: ['report'] }, BOB, 'msg-b');
+    expect(rejected(activeToRestricted)).toBe(true);
+    expect(rejected(restrictedToActive)).toBe(true);
+    expect(errorOf(activeToRestricted)).toEqual(errorOf(restrictedToActive));
+  });
+
+  it('lets a block outrank a counterpart restriction, and mentions nothing else', () => {
+    const verdict = sendAgainst(
+      { edges: [blockBetween(BOB, ALICE)], peerCanSendMessages: false },
+      ALICE,
+      'msg-blocked',
+    );
+    expect(ruleOf(verdict)).toBe('blocked');
+    // Exactly one key: no capability, no user id. A block that also reported
+    // the counterpart's standing would tell a blocked party what state the
+    // person who blocked them is in.
+    expect(errorOf(verdict)?.details).toEqual({ rule: 'blocked' });
+  });
+
+  it('refuses a counterpart whose real capability set has no send_message, in any restricted state', () => {
+    for (const state of ['limited', 'suspended', 'banned'] as const) {
+      const verdict = sendAgainst(
+        { peerCanSendMessages: capabilitiesFor(state).includes('send_message') },
+        ALICE,
+        `msg-${state}`,
+      );
+      expect(ruleOf(verdict)).toBe('missing_send_message_capability');
+    }
+  });
+
+  it('fails closed when the counterpart standing never loaded', () => {
+    const verdict = sendAgainst({ peerStanding: undefined }, ALICE, 'msg-missing');
+    expect(ruleOf(verdict)).toBe('standing_unidentifiable');
+    // `external_dependency_failed`, not a refusal: a projection that could not
+    // be read is an operator's problem, and laundering it into an ordinary
+    // refusal is how a broken read looks like a working feature.
+    expect(errorOf(verdict)?.code).toBe('external_dependency_failed');
+    expect(errorOf(verdict)?.details?.['party']).toBe('counterpart');
+  });
+
+  it('fails closed on a standing that describes somebody else, and names the party', () => {
+    const wrongPeer = sendAgainst({ peerStanding: peerStandingOf(STRANGER) }, ALICE, 'msg-wrong-peer');
+    const wrongSender = sendAgainst({ sender: ALICE, capabilities: ['report'] }, BOB, 'msg-wrong-sender');
+    expect(rejected(wrongPeer)).toBe(true);
+    expect(errorOf(wrongPeer)?.details?.['party']).toBe('counterpart');
+    // BOB is the sender here and the projection on the wire names ALICE, so the
+    // gate must blame the sender's side rather than assume the counterpart's
+    // standing is the suspect one.
+    expect(errorOf(wrongSender)?.details?.['party']).toBe('sender');
+  });
+
+  it('refuses when the counterpart field holds the sender\'s own standing', () => {
+    // The caller's mistake that would defeat the rule outright: a peer
+    // standing naming the sender satisfies the type, and the gate would then
+    // read one party twice and call the result symmetric. Comparing the id
+    // against the *other* participant turns that into a refusal rather than a
+    // silent bypass.
+    const verdict = sendAgainst({ peerStanding: peerStandingOf(ALICE) }, ALICE, 'msg-same-standing');
+    expect(ruleOf(verdict)).toBe('standing_unidentifiable');
+    expect(errorOf(verdict)?.details?.['party']).toBe('counterpart');
   });
 });

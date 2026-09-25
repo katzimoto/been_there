@@ -1,0 +1,23 @@
+{
+  "name": "@been-there/service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@been-there/communication": "0.1.0",
+    "@been-there/contracts": "0.1.0",
+    "@been-there/core": "0.1.0",
+    "@been-there/dating": "0.1.0",
+    "@been-there/identity": "0.1.0",
+    "@been-there/moderation": "0.1.0",
+    "@been-there/platform": "0.1.0"
+  }
+}
