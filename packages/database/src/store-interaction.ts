@@ -375,7 +375,7 @@ export class PostgresInteractionStore implements InteractionStore {
 
   async findPreferences(userId: UserId, tx: Transaction): Promise<Readonly<Record<string, unknown>> | null> {
     const client = clientOf(tx);
-    const found = await query<{ value: unknown }>('SELECT value FROM app.preferences WHERE user_id = $1', [
+    const found = await query<{ value: unknown }>(client, 'SELECT value FROM app.preferences WHERE user_id = $1', [
       userId,
     ]);
     const row = found.rows[0];
@@ -705,11 +705,12 @@ export class PostgresInteractionStore implements InteractionStore {
       assignments.push(`${column} = $${values.length}`);
     }
     if (assignments.length === 0) {
-      const present = await query<MatchDbRow>('SELECT * FROM app.matches WHERE match_id = $1', [matchId]);
+      const present = await query<MatchDbRow>(client, 'SELECT * FROM app.matches WHERE match_id = $1', [matchId]);
       return present.rowCount > 0;
     }
     values.push(matchId);
     const patched = await query<MatchDbRow>(
+      client,
       `UPDATE app.matches SET ${assignments.join(', ')} WHERE match_id = $${values.length} RETURNING *`,
       values,
     );

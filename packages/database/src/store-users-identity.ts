@@ -1,5 +1,6 @@
 import type { AccountId, UserId, VerificationId } from '@been-there/core';
 import { castId } from '@been-there/core';
+import type { QueryResult, QueryResultRow } from 'pg';
 import type { IdentityRecordRow, IdentityStore, Page, Transaction, UserRecord, UserStore } from '@been-there/contracts';
 import { StoreError } from '@been-there/contracts';
 import { isConflict } from './errors.js';
@@ -151,6 +152,29 @@ export class PostgresUserStore implements UserStore {
     );
     const row = result.rows[0];
     return row === undefined ? null : toUserRecord(row);
+  }
+
+  /**
+   * A page of the population for discovery to judge. The ordering is total —
+   * `created_at` with `user_id` as the tiebreak — because a page whose order
+   * depends on the planner hands out the same candidate twice across two pages
+   * and skips one, which looks to a user like the app is ignoring them.
+   *
+   * No eligibility filter here, deliberately: who may see whom is the dating
+   * domain's answer, and a store that pre-filtered would quietly become the
+   * second place that answer is given.
+   */
+  async listCandidateIds(page: Page, tx: Transaction): Promise<readonly UserId[]> {
+    const result = await query<{ readonly user_id: string }>(
+      tx,
+      `SELECT user_id
+         FROM app.users
+        ORDER BY created_at, user_id
+        LIMIT $1
+        OFFSET $2`,
+      [page.limit, page.offset],
+    );
+    return result.rows.map((row) => castId<'UserId'>(row.user_id));
   }
 }
 

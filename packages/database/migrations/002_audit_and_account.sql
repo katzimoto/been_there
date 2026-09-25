@@ -105,3 +105,39 @@ CREATE TABLE IF NOT EXISTS verification_attempts (
 CREATE UNIQUE INDEX IF NOT EXISTS verification_attempts_one_open
   ON app.verification_attempts (user_id)
   WHERE closed_at IS NULL;
+
+-- 8. Risk assessments need the same optimistic concurrency as identity. A lost
+--    update is survivable in the way that matters - the assessment is a pure
+--    fold over `risk_signals`, so the next signal recomputes it - but until that
+--    signal the subject is under-scored, and under-scoring is the direction
+--    that hurts. The window is wider than two concurrent signals: decay sweeps,
+--    applyDispute and reassessByHuman all rewrite this row.
+ALTER TABLE app.risk_assessments
+  ADD COLUMN generation integer NOT NULL DEFAULT 1 CHECK (generation > 0);
+
+-- 9. Arrival order. `compareSignals` in trust-safety sorts a ledger by
+--    (occurredAt, detector, subjectId), so the store orders to match. The
+--    residual tie - same instant and same detector - is arrival order, which no
+--    column recorded. A sequence closes it, so a replayed ledger produces the
+--    same repeat count as an in-memory one.
+ALTER TABLE app.risk_signals ADD COLUMN seq bigserial;
+CREATE INDEX IF NOT EXISTS risk_signals_ordered
+  ON app.risk_signals (subject_id, occurred_at, detector, seq);
+
+-- 10. A released block must be re-creatable. `blocks_pair` was a UNIQUE index
+--     on the canonical unordered pair with no WHERE clause, so the row left
+--     behind by a release permanently blocked any future block between the same
+--     two people. The port says "at most one *active* block", and the index
+--     said otherwise: a user who blocked and then unblocked could never block
+--     that person again. The history row stays; only the uniqueness is partial.
+DROP INDEX IF EXISTS app.blocks_pair;
+CREATE UNIQUE INDEX IF NOT EXISTS blocks_pair
+  ON app.blocks (LEAST(blocker_id, blocked_id), GREATEST(blocker_id, blocked_id))
+  WHERE lifted_at IS NULL;
+
+-- 11. `ProfileRow.profileId` had no column. The domain identifies a profile by
+--     its own id, and dropping it from the port to match the key would lose the
+--     identity a photo or a prompt references.
+ALTER TABLE app.profiles ADD COLUMN IF NOT EXISTS profile_id text;
+CREATE UNIQUE INDEX IF NOT EXISTS profiles_profile_id
+  ON app.profiles (profile_id) WHERE profile_id IS NOT NULL;

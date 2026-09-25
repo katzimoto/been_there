@@ -352,11 +352,12 @@ const AUDIT_COLUMNS = `seq, occurred_at, actor_id, action, entity_type, entity_i
        subject_id, case_id, detail, dedupe_key`;
 
 /**
- * The conflict target for `appendAudit`, predicate included: the unique index
- * is partial, and Postgres will only infer a partial index if the statement
- * states the same predicate.
+ * The conflict target for `appendAudit`, index predicate included: the unique
+ * index is partial, and Postgres only infers a partial index when the
+ * statement states the same predicate after the column list.
  */
-const AUDIT_DEDUPE_CONFLICT = 'dedupe_key WHERE dedupe_key IS NOT NULL';
+const AUDIT_DEDUPE_CONFLICT = 'ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING';
+
 
 /**
  * Fields the domain's `NewAuditEntry` carries that the table has no column for.
@@ -588,7 +589,7 @@ export function createModerationStore(): ModerationStore {
           `INSERT INTO app.audit_log
              (occurred_at, actor_id, action, entity_type, entity_id, subject_id, case_id, detail, dedupe_key)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-           ON CONFLICT (${AUDIT_DEDUPE_CONFLICT}) DO NOTHING`,
+           ${AUDIT_DEDUPE_CONFLICT}`,
           auditParameters(row),
         );
       } catch (error) {

@@ -104,6 +104,42 @@ describeIfDb('users and identity stores, against Postgres', () => {
     );
   }
 
+  it('pages the population in a total order, so two pages never repeat or skip', async () => {
+    // Four users sharing one instant, in a run-unique slot. With no tiebreak
+    // the order among rows sharing a `created_at` is whatever the plan
+    // produced, and two pages of the same query can then disagree — which
+    // discovery has no way to detect downstream.
+    const at = new Date(Date.UTC(2000, 0, 1 + Math.floor(Math.random() * 30000)));
+    const created: UserRecord[] = [];
+    await transaction.run(async (tx) => {
+      for (let index = 0; index < 4; index += 1) {
+        const user = newUser({ createdAt: at });
+        created.push(user);
+        await users.create(user, tx);
+      }
+    });
+
+    const first = await transaction.run((tx) => users.listCandidateIds({ limit: 3, offset: 0 }, tx));
+    const second = await transaction.run((tx) => users.listCandidateIds({ limit: 3, offset: 3 }, tx));
+    expect(first).toHaveLength(3);
+    expect(first.filter((id) => second.includes(id))).toHaveLength(0);
+    // No phantom candidates: every id on a page is a user that exists.
+    const resolved = await transaction.run((tx) => Promise.all(first.map((id) => users.find(id, tx))));
+    expect(resolved.every((record) => record !== null)).toBe(true);
+
+    // A query returning a subset — the newest, say, or a hardcoded page — would
+    // pass everything above and still hide users from discovery.
+    const everyone = await transaction.run((tx) => users.listCandidateIds({ limit: 10000, offset: 0 }, tx));
+    expect(created.every((user) => everyone.includes(user.userId))).toBe(true);
+    // The documented tiebreak: rows sharing `created_at` come back by `user_id`,
+    // so the four appear in id order whatever else the population contains.
+    const positions = created
+      .map((user) => user.userId)
+      .sort()
+      .map((id) => everyone.indexOf(id));
+    expect(positions).toEqual([...positions].sort((left, right) => left - right));
+  });
+
   it('reads back a user it created, with the timestamp the domain expects', async () => {
     const user = newUser();
     await transaction.run((tx) => users.create(user, tx));

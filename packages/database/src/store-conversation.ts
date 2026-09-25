@@ -56,6 +56,9 @@ function conflictMessage(reason: ConversationConflict): string {
   }
 }
 
+const MIN_BODY = 1;
+const MAX_BODY = 4000;
+
 /**
  * A body the schema will refuse. It is a validation failure the caller can act
  * on — a message that was never sent — and it must not be reported as an
@@ -65,18 +68,18 @@ export class InvalidMessageBodyError extends StoreError {
   readonly length: number;
 
   constructor(length: number) {
-    super(`message body must be 1 to 4000 characters; received ${length}`, { retryable: false });
+    super(`message body must be ${MIN_BODY} to ${MAX_BODY} characters; received ${length}`, {
+      retryable: false,
+    });
     this.name = 'InvalidMessageBodyError';
     this.length = length;
   }
 }
 
-const MIN_BODY = 1;
-const MAX_BODY = 4000;
-
 /**
  * The CHECK counts characters, not bytes and not UTF-16 code units, so a body
- * of emoji is measured the way Postgres measures it.
+ * of emoji is measured the way Postgres measures it rather than the way
+ * `String.length` would measure it.
  */
 function bodyLength(body: string): number {
   return Array.from(body).length;
@@ -192,12 +195,14 @@ const CONVERSATION_COLUMNS =
 
 const MESSAGE_COLUMNS = 'message_id, conversation_id, sender_id, body, created_at';
 
+/**
+ * `ConversationStore` on Postgres.
+ *
+ * The constructor deliberately takes nothing. A store holding a pool could
+ * reach around the caller's transaction, and the only defence against that is
+ * not having one.
+ */
 export class PgConversationStore {
-  /**
-   * Deliberately takes nothing. A store that held a pool could reach around
-   * the caller's transaction; refusing to is what makes the atomicity promise
-   * enforceable rather than aspirational.
-   */
   async create(row: ConversationRow, tx: Transaction): Promise<void> {
     const client = clientOf(tx);
     await storeQuery(async () => {

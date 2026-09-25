@@ -44,7 +44,16 @@ export function createTransaction(pool: Pool): Transaction {
     },
     async run<T>(body: (tx: Transaction) => Promise<T>): Promise<T> {
       const client = await pool.connect();
-      const scoped: Transaction = { client, run: async () => undefined as never };
+      // The scoped handle hands out a `run` that re-enters the *same* body
+      // with the same client. An earlier version returned `undefined as never`,
+      // which meant a nested `tx.run(...)` silently did nothing: a service
+      // method composing another would look correct and write nothing. The
+      // port promises nested calls join the outer transaction, so this must
+      // actually call the body.
+      const scoped: Transaction = {
+        client,
+        run: <U>(inner: (tx: Transaction) => Promise<U>) => inner(scoped),
+      };
       try {
         await client.query('BEGIN');
         const value = await body(scoped);

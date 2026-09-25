@@ -67,12 +67,18 @@ export type RiskAssessmentRow = {
 /**
  * Every fault leaves here as a `StoreError`, classified.
  *
- * The classification is the point: a unique violation on `signal_id` is a
- * duplicate delivery the caller handles as a fact, a check violation is a
- * caller bug worth surfacing verbatim, and a serialization failure is
- * contention worth retrying. Collapsing the three would mean either inflating
- * a repeat count on a retried delivery, or reporting a transient blip as a
- * refusal nobody hears about.
+ * The classification is the point: a check violation is a caller bug worth
+ * surfacing verbatim, a serialization failure is contention worth retrying,
+ * and anything else is a plain fault. Collapsing them would mean either
+ * reporting a transient blip as a refusal nobody hears about, or retrying a
+ * bad request forever.
+ *
+ * The duplicate-delivery case is deliberately *not* here, because it never
+ * arrives: `appendSignal` collapses a repeated `signal_id` in SQL, so the one
+ * conflict a caller must not see as a fault is resolved before it can be
+ * raised. What reaches this function as a conflict is a check or foreign-key
+ * violation — a weight the machine does not allow, a state the risk machine
+ * cannot produce, a subject that is not a user.
  */
 function toStoreError(operation: string, error: unknown): StoreError {
   if (error instanceof StoreError) {
@@ -191,21 +197,25 @@ export class PgRiskStore implements RiskStore {
    */
   async appendSignal(signal: RiskSignalInput, tx: Transaction): Promise<void> {
     const facts = asFactObject(signal.facts ?? {}, 'risk_signals.facts');
-    await clientOf(tx).query(
-      `INSERT INTO app.risk_signals (${SIGNAL_COLUMNS})
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
-       ON CONFLICT (signal_id) DO NOTHING`,
-      [
-        signal.signalId,
-        signal.subjectId,
-        signal.detector,
-        signal.behaviour,
-        signal.entityId ?? null,
-        JSON.stringify(facts),
-        signal.weight,
-        signal.occurredAt,
-      ],
-    );
+    try {
+      await clientOf(tx).query(
+        `INSERT INTO app.risk_signals (${SIGNAL_COLUMNS})
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+         ON CONFLICT (signal_id) DO NOTHING`,
+        [
+          signal.signalId,
+          signal.subjectId,
+          signal.detector,
+          signal.behaviour,
+          signal.entityId ?? null,
+          JSON.stringify(facts),
+          signal.weight,
+          signal.occurredAt,
+        ],
+      );
+    } catch (error) {
+      throw toStoreError('appendSignal', error);
+    }
   }
 
   /**
@@ -239,19 +249,26 @@ export class PgRiskStore implements RiskStore {
     if (!Number.isInteger(limit) || limit < 1) {
       throw new StoreError(`findSignalsFor: limit must be a positive integer, got ${limit}`);
     }
-    const result = await clientOf(tx).query<SignalDbRow>(
-      `SELECT ${SIGNAL_COLUMNS}
-         FROM (
-           SELECT ${SIGNAL_COLUMNS}
-             FROM app.risk_signals
-            WHERE subject_id = $1
-            ORDER BY occurred_at DESC, detector ASC, signal_id DESC
-            LIMIT $2
-         ) AS newest_window
-        ORDER BY occurred_at ASC, detector ASC, signal_id ASC`,
-      [subjectId, limit],
-    );
-    return result.rows.map(toSignalRow);
+    try {
+      const result = await clientOf(tx).query<SignalDbRow>(
+        `SELECT ${SIGNAL_COLUMNS}
+           FROM (
+             SELECT ${SIGNAL_COLUMNS}
+               FROM app.risk_signals
+              WHERE subject_id = $1
+              ORDER BY occurred_at DESC, detector ASC, signal_id DESC
+              LIMIT $2
+           ) AS newest_window
+          ORDER BY occurred_at ASC, detector ASC, signal_id ASC`,
+        [subjectId, limit],
+      );
+      // Decoding inside the try is deliberate: `toStoreError` passes a
+      // `StoreError` through untouched, so a corrupt row keeps its own message
+      // instead of being reported as a query failure.
+      return result.rows.map(toSignalRow);
+    } catch (error) {
+      throw toStoreError('findSignalsFor', error);
+    }
   }
 
   /**
@@ -263,37 +280,41 @@ export class PgRiskStore implements RiskStore {
    * never be confused by a caller that forgot to check.
    */
   async findAssessment(subjectId: SubjectId, tx: Transaction): Promise<RiskAssessmentRow | null> {
-    const result = await clientOf(tx).query<{
-      readonly subject_id: string;
-      readonly assessment_id: string;
-      readonly state: string;
-      readonly last_signal_at: unknown;
-      readonly contributing_detectors: unknown;
-      readonly updated_at: unknown;
-    }>(
-      `SELECT subject_id, assessment_id, state, last_signal_at, contributing_detectors, updated_at
-         FROM app.risk_assessments
-        WHERE subject_id = $1`,
-      [subjectId],
-    );
-    const row = result.rows[0];
-    if (row === undefined) {
-      return null;
+    try {
+      const result = await clientOf(tx).query<{
+        readonly subject_id: string;
+        readonly assessment_id: string;
+        readonly state: string;
+        readonly last_signal_at: unknown;
+        readonly contributing_detectors: unknown;
+        readonly updated_at: unknown;
+      }>(
+        `SELECT subject_id, assessment_id, state, last_signal_at, contributing_detectors, updated_at
+           FROM app.risk_assessments
+          WHERE subject_id = $1`,
+        [subjectId],
+      );
+      const row = result.rows[0];
+      if (row === undefined) {
+        return null;
+      }
+      return {
+        subjectId: row.subject_id as SubjectId,
+        assessmentId: row.assessment_id as RiskAssessmentId,
+        state: row.state,
+        lastSignalAt:
+          row.last_signal_at === null
+            ? null
+            : asDate(row.last_signal_at, 'risk_assessments.last_signal_at'),
+        contributingDetectors: asDetectorList(
+          row.contributing_detectors,
+          'risk_assessments.contributing_detectors',
+        ),
+        updatedAt: asDate(row.updated_at, 'risk_assessments.updated_at'),
+      };
+    } catch (error) {
+      throw toStoreError('findAssessment', error);
     }
-    return {
-      subjectId: row.subject_id as SubjectId,
-      assessmentId: row.assessment_id as RiskAssessmentId,
-      state: row.state,
-      lastSignalAt:
-        row.last_signal_at === null
-          ? null
-          : asDate(row.last_signal_at, 'risk_assessments.last_signal_at'),
-      contributingDetectors: asDetectorList(
-        row.contributing_detectors,
-        'risk.risk_assessments.contributing_detectors',
-      ),
-      updatedAt: asDate(row.updated_at, 'risk_assessments.updated_at'),
-    };
   }
 
   /**
@@ -332,17 +353,21 @@ export class PgRiskStore implements RiskStore {
     if (lastSignalAt !== null && Number.isNaN(lastSignalAt.getTime())) {
       throw new StoreError('upsertAssessment: lastSignalAt is not a valid timestamp');
     }
-    await clientOf(tx).query(
-      `INSERT INTO app.risk_assessments
-         (subject_id, assessment_id, state, last_signal_at, contributing_detectors, updated_at)
-       VALUES ($1, $2, $3, $4, $5, now())
-       ON CONFLICT (subject_id) DO UPDATE
-          SET assessment_id = EXCLUDED.assessment_id,
-              state = EXCLUDED.state,
-              last_signal_at = EXCLUDED.last_signal_at,
-              contributing_detectors = EXCLUDED.contributing_detectors,
-              updated_at = now()`,
-      [subjectId, assessmentId, state, lastSignalAt, [...detectors]],
-    );
+    try {
+      await clientOf(tx).query(
+        `INSERT INTO app.risk_assessments
+           (subject_id, assessment_id, state, last_signal_at, contributing_detectors, updated_at)
+         VALUES ($1, $2, $3, $4, $5, now())
+         ON CONFLICT (subject_id) DO UPDATE
+            SET assessment_id = EXCLUDED.assessment_id,
+                state = EXCLUDED.state,
+                last_signal_at = EXCLUDED.last_signal_at,
+                contributing_detectors = EXCLUDED.contributing_detectors,
+                updated_at = now()`,
+        [subjectId, assessmentId, state, lastSignalAt, [...detectors]],
+      );
+    } catch (error) {
+      throw toStoreError('upsertAssessment', error);
+    }
   }
 }

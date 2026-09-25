@@ -1,3 +1,4 @@
+import { StoreError } from './result.js';
 import type { Page, PageResult, Transaction } from './result.js';
 import type {
   AccountId,
@@ -165,12 +166,22 @@ export interface InteractionStore {
 }
 
 /** Communication: conversations and messages. */
+/**
+ * Every read takes the reader. Not an optional convenience and not a filter the
+ * caller can forget: a conversation id is guessable, and so is a match id now
+ * that it is the domain's own `match:{a}|{b}` derivation rather than a uuid —
+ * anyone who knows two user ids can construct one. Participation is therefore
+ * checked in SQL, and a non-participant gets `null`, identical to an id that
+ * does not exist, so a probe cannot tell the two apart.
+ */
 export interface ConversationRow {
   readonly conversationId: ConversationId;
   readonly matchId: MatchId;
   readonly participants: readonly [UserId, UserId];
   readonly state: string;
   readonly openedAt: Date;
+  /** The instant the state last changed; the domain's `Conversation` has one. */
+  readonly stateChangedAt: Date | null;
   readonly lastMessageAt: Date | null;
 }
 
@@ -180,37 +191,99 @@ export interface MessageRow {
   readonly senderId: UserId;
   readonly body: string;
   readonly createdAt: Date;
+  /** `sent` is the only state a newly created message can be in. */
+  readonly state: 'sent' | 'delivered' | 'read' | 'failed' | 'deleted';
+}
+
+/**
+ * A store that must report a *refusal* — a duplicate conversation, a body
+ * outside the allowed length — throws this rather than returning a `Result`.
+ * The reasoning: these are integrity outcomes the database enforced, not
+ * business decisions the domain made, and a service that caught them as domain
+ * errors would have to enumerate constraint names to tell them apart. The
+ * `reason` is a closed vocabulary so a caller branches on it without parsing a
+ * message.
+ */
+export type ConversationConflictReason =
+  | 'conversation_id_taken'
+  | 'match_already_has_conversation'
+  | 'match_does_not_exist'
+  | 'message_body_out_of_range';
+
+export class ConversationStoreError extends StoreError {
+  readonly reason: ConversationConflictReason;
+  constructor(reason: ConversationConflictReason, message: string) {
+    super(message, { retryable: false });
+    this.name = 'ConversationStoreError';
+    this.reason = reason;
+  }
 }
 
 export interface ConversationStore {
+  /** Throws `ConversationStoreError` on a duplicate id or a missing match. */
   create(row: ConversationRow, tx: Transaction): Promise<void>;
-  find(conversationId: ConversationId, tx: Transaction): Promise<ConversationRow | null>;
-  findByMatch(matchId: MatchId, tx: Transaction): Promise<ConversationRow | null>;
+  find(conversationId: ConversationId, reader: UserId, tx: Transaction): Promise<ConversationRow | null>;
+  /**
+   * Participant-scoped, and this one matters most: a match id is derived from
+   * two user ids, so it is *more* guessable than a conversation uuid.
+   */
+  findByMatch(matchId: MatchId, reader: UserId, tx: Transaction): Promise<ConversationRow | null>;
   updateState(conversationId: ConversationId, state: string, at: Date, tx: Transaction): Promise<boolean>;
   listFor(userId: UserId, page: Page, tx: Transaction): Promise<PageResult<ConversationRow>>;
   /**
    * Appends, or returns the existing row for a replayed `messageId`. Delivery
    * is at-least-once on the wire, so a duplicate must collapse here rather
-   * than showing the same message twice.
+   * than showing the same message twice. Also advances the conversation's
+   * activity instant monotonically, because `listFor` orders by it and nothing
+   * else in this port writes it.
    */
   appendMessage(row: MessageRow, tx: Transaction): Promise<{ readonly created: boolean }>;
-  findMessages(conversationId: ConversationId, page: Page, tx: Transaction): Promise<PageResult<MessageRow>>;
+  findMessages(
+    conversationId: ConversationId,
+    page: Page,
+    reader: UserId,
+    tx: Transaction,
+  ): Promise<PageResult<MessageRow>>;
 }
 
 /** Trust & Safety: signals and the current risk record. */
+/**
+ * Trust & Safety: signals and the current risk record.
+ *
+ * The assessment carries a `generation` for the same reason identity's does.
+ * It is a pure fold over `risk_signals`, so a lost update is a lost fold
+ * *step* rather than lost evidence — but until the next signal the subject is
+ * under-scored, and under-scoring is the direction that hurts. The writer set
+ * is wider than "two signals at once": decay, dispute and human reassessment
+ * all rewrite the row.
+ */
 export interface RiskStore {
+  /** First delivery of a `signalId` wins; a replay is ignored, never merged. */
   appendSignal(signal: Readonly<Record<string, unknown>>, tx: Transaction): Promise<void>;
-  /** Ordered oldest-first, which is what corroboration and decay windows need. */
+  /**
+   * The newest `limit`, returned oldest-first, in the same order the domain's
+   * `compareSignals` uses — so a replayed ledger folds to the same result as an
+   * in-memory one. Taking the *oldest* N and truncating would hide the most
+   * recent behaviour, which is the opposite of what a safety system should do.
+   */
   findSignalsFor(subjectId: SubjectId, limit: number, tx: Transaction): Promise<readonly Readonly<Record<string, unknown>>[]>;
+  /** Includes `generation`, so a stale write is detectable. */
   findAssessment(subjectId: SubjectId, tx: Transaction): Promise<Readonly<Record<string, unknown>> | null>;
+  /**
+   * Writes the assessment, or returns `{ applied: false }` when the generation
+   * it read has been superseded. `expectedGeneration: null` means "no row was
+   * read", so this inserts. The service re-runs the fold on `false`, which is
+   * safe precisely because the fold is pure.
+   */
   upsertAssessment(
     subjectId: SubjectId,
     assessmentId: RiskAssessmentId,
     state: string,
     lastSignalAt: Date | null,
     detectors: readonly string[],
+    expectedGeneration: number | null,
     tx: Transaction,
-  ): Promise<void>;
+  ): Promise<{ applied: boolean }>;
 }
 
 /** Moderation: reports, cases, decisions, and the append-only audit. */

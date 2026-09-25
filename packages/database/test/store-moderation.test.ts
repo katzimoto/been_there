@@ -3,11 +3,11 @@
  *
  * Each test here asserts a property the port promises and the application
  * cannot enforce on its own: a replayed append does not duplicate a decision in
- * the appeal record, the queue is ordered by priority rather than alphabetically
- * and excludes what is resolved, a reversal of something that does not exist is
- * a conflict and not a fault, and two reversals of one decision leave the
- * original exactly as it was. A test that inserted a row and read it back would
- * prove only that the driver works.
+ * the appeal record, the queue is ordered by priority rather than
+ * alphabetically and excludes what is resolved, a reversal of something that
+ * does not exist is a conflict and not a fault, and two reversals of one
+ * decision leave the original exactly as it was. A test that inserted a row and
+ * read it back would prove only that the driver works.
  *
  * `DATABASE_URL` is read from the environment and then from `.env`, the same
  * way `scripts/migrate.mjs` does. With no database the suite says so loudly
@@ -19,8 +19,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
-import type { Transaction } from '@been-there/contracts';
-import { StoreError } from '@been-there/contracts';
+import { castId, type CaseId, type ReportId, type UserId } from '@been-there/core';
+import { StoreError, type ModerationStore, type Transaction } from '@been-there/contracts';
 import { isConflict } from '../src/errors.js';
 import { clientOf, createTransaction } from '../src/transaction.js';
 import { createModerationStore } from '../src/store-moderation.js';
@@ -29,9 +29,9 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '
 const ENV_FILE = join(REPO_ROOT, '.env');
 if (existsSync(ENV_FILE)) {
   for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
-    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
-import { StoreError, type ModerationStore, type Transaction } from '@been-there/contracts';
-      process.env[match[1]] = match[2];
+    const [, key, value] = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line) ?? [];
+    if (key !== undefined && value !== undefined && process.env[key] === undefined) {
+      process.env[key] = value;
     }
   }
 }
@@ -40,12 +40,16 @@ const connectionString = process.env['DATABASE_URL'];
 const describeIfDb = connectionString === undefined ? describe.skip : describe;
 
 const HOUR = 60 * 60 * 1000;
+const OPENED_AT = new Date('2026-01-01T09:00:00.000Z');
+const at = (hoursAgo: number): Date => new Date(OPENED_AT.getTime() - hoursAgo * HOUR);
+
+const aCaseId = (): CaseId => castId<'CaseId'>(randomUUID());
 
 describeIfDb('ModerationStore, against Postgres', () => {
   let pool: pg.Pool;
   let transaction: Transaction;
-  let store: ReturnType<typeof createModerationStore>;
   let store: ModerationStore;
+
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString });
     transaction = createTransaction(pool);
@@ -61,9 +65,9 @@ describeIfDb('ModerationStore, against Postgres', () => {
     return transaction.run(body);
   }
 
-  /** A subject to be reported on. Every test makes its own, so none interfere. */
-  async function aSubject(): Promise<string> {
-    const userId = randomUUID();
+  /** A subject to be reported on. Each test makes its own, so none interfere. */
+  async function aSubject(): Promise<UserId> {
+    const userId = castId<'UserId'>(randomUUID());
     await run(async (tx) => {
       await clientOf(tx).query('INSERT INTO app.users (user_id, account_id) VALUES ($1,$2)', [
         userId,
@@ -74,29 +78,28 @@ describeIfDb('ModerationStore, against Postgres', () => {
   }
 
   /** A `Case` as the domain's own `openCase` produces it. */
-  function aCase(subjectId: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
-    const openedAt = new Date('2026-01-01T09:00:00.000Z');
+  function aCase(subjectId: UserId, overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
-      caseId: randomUUID(),
+      caseId: aCaseId(),
       subjectId,
       origin: { source: 'user_report', reasons: ['spam'] },
       state: 'open',
       priority: 'normal',
       queue: 'safety',
-      openedAt,
-      dueAt: new Date(openedAt.getTime() + 48 * HOUR),
+      openedAt: OPENED_AT,
+      dueAt: new Date(OPENED_AT.getTime() + 48 * HOUR),
       openedBy: 'mod-1',
       assignedModeratorId: null,
       reportIds: [],
       evidenceIds: [],
       resolutionDecisionId: null,
-      updatedAt: openedAt,
+      updatedAt: OPENED_AT,
       ...overrides,
     };
   }
 
   /** A `NewAuditEntry` as the domain's audit log produces it. */
-  function anEntry(subjectId: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  function anEntry(subjectId: UserId, overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
       occurredAt: new Date('2026-01-02T10:00:00.000Z'),
       actorId: 'mod-1',
@@ -114,9 +117,10 @@ describeIfDb('ModerationStore, against Postgres', () => {
     };
   }
 
+  /** A `Decision` as the domain's own `decide` produces it. */
   function aDecision(
-    subjectId: string,
-    caseId: string,
+    subjectId: UserId,
+    caseId: CaseId,
     overrides: Record<string, unknown> = {},
   ): Record<string, unknown> {
     return {
@@ -143,8 +147,12 @@ describeIfDb('ModerationStore, against Postgres', () => {
     }
   }
 
-  async function auditRowsFor(entityId: string): Promise<readonly Record<string, unknown>[]> {
+  function auditRowsFor(entityId: string): Promise<readonly Record<string, unknown>[]> {
     return run((tx) => store.findAuditForEntity('decision', entityId, tx));
+  }
+
+  function entityIdOf(row: Record<string, unknown>): string {
+    return row['entityId'] as string;
   }
 
   it('keeps one row when the same audit append is replayed', async () => {
@@ -152,7 +160,8 @@ describeIfDb('ModerationStore, against Postgres', () => {
     const entityId = randomUUID();
     // The key the caller supplies is what makes this one append rather than
     // two: a retried request and a moderator's second identical action are the
-    // same four columns, and only the caller knows which it is sending.
+    // same four columns, and only the caller knows which of the two it is
+    // sending. A duplicate here is a duplicated decision in the appeal record.
     const entry = anEntry(subjectId, { entityId, dedupeKey: `decision.recorded:${entityId}` });
 
     await run((tx) => store.appendAudit(entry, tx));
@@ -165,9 +174,9 @@ describeIfDb('ModerationStore, against Postgres', () => {
   it('keeps both rows of an action the caller says may legitimately repeat', async () => {
     const subjectId = await aSubject();
     const entityId = randomUUID();
-    // A moderator re-reading the same evidence twice is two real events, and
-    // the appeal record must not collapse them. The absence of a key is the
-    // caller saying so, and it has to mean it.
+    // A moderator re-reading the same evidence twice is two real events and
+    // the appeal record must not collapse them, so the absence of a key has to
+    // mean exactly that rather than "the store could not tell".
     const read = anEntry(subjectId, { entityId, action: 'evidence.read' });
 
     await run((tx) => store.appendAudit(read, tx));
@@ -178,9 +187,8 @@ describeIfDb('ModerationStore, against Postgres', () => {
 
   it('assigns the audit sequence itself and keeps the whole entry readable', async () => {
     const subjectId = await aSubject();
-    const first = anEntry(subjectId, { entityId: randomUUID(), dedupeKey: null });
+    const first = anEntry(subjectId, { dedupeKey: null });
     const second = anEntry(subjectId, {
-      entityId: randomUUID(),
       dedupeKey: null,
       occurredAt: new Date('2026-01-02T11:00:00.000Z'),
     });
@@ -188,8 +196,8 @@ describeIfDb('ModerationStore, against Postgres', () => {
     await run((tx) => store.appendAudit({ ...first, seq: 999_999 }, tx));
     await run((tx) => store.appendAudit(second, tx));
 
-    const firstRows = await auditRowsFor(first['entityId'] as string);
-    const secondRows = await auditRowsFor(second['entityId'] as string);
+    const firstRows = await auditRowsFor(entityIdOf(first));
+    const secondRows = await auditRowsFor(entityIdOf(second));
     const low = firstRows[0]?.['sequence'];
     const high = secondRows[0]?.['sequence'];
 
@@ -204,13 +212,12 @@ describeIfDb('ModerationStore, against Postgres', () => {
 
   it('lists the open queue by priority, oldest first within a priority, and omits resolved cases', async () => {
     const subjectId = await aSubject();
-    const caseId = randomUUID();
-    const mine = new Set<string>();
-    const open = async (priority: string, hoursAgo: number): Promise<string> => {
-      const row = aCase(subjectId, { caseId: randomUUID(), priority, openedAt: at(-hoursAgo) });
-      mine.add(row['caseId'] as string);
-      await run((tx) => store.insertCase(row, tx));
-      return row['caseId'] as string;
+    const mine: string[] = [];
+    const open = async (priority: string, hoursAgo: number): Promise<CaseId> => {
+      const caseId = aCaseId();
+      await run((tx) => store.insertCase(aCase(subjectId, { caseId, priority, openedAt: at(hoursAgo) }), tx));
+      mine.push(caseId);
+      return caseId;
     };
 
     const urgent = await open('urgent', 1);
@@ -221,29 +228,29 @@ describeIfDb('ModerationStore, against Postgres', () => {
 
     // Resolved, and urgent besides: if the ordering were right but the filter
     // were missing, this is the row that would still be in the queue.
-    const resolved = aCase(subjectId, { caseId, priority: 'urgent', openedAt: at(0) });
-    await run((tx) => store.insertCase(resolved, tx));
-    const decision = aDecision(subjectId, caseId, { action: 'clear', removedCapabilities: [] });
+    const resolvedId = aCaseId();
+    await run((tx) => store.insertCase(aCase(subjectId, { caseId: resolvedId, priority: 'urgent' }), tx));
+    const decision = aDecision(subjectId, resolvedId, { action: 'clear', removedCapabilities: [] });
     await run((tx) => store.insertDecision(decision, tx));
     await run((tx) =>
       store.updateCase(
-        caseId,
+        resolvedId,
         { state: 'resolved', resolutionDecisionId: decision['decisionId'], updatedAt: at(0) },
         tx,
       ),
     );
 
     const page = await run((tx) => store.listOpenCases({ limit: 500, offset: 0 }, tx));
-    const mineInOrder = page.items.map((item) => item.caseId).filter((id) => mine.has(id));
+    const mineInOrder = page.items.map((item) => item.caseId).filter((id) => mine.includes(id));
 
     expect(mineInOrder).toEqual([urgent, highOld, highNew, normal, low]);
-    expect(page.items.map((item) => item.caseId)).not.toContain(caseId);
-    expect(page.total).toBeGreaterThanOrEqual(mine.size);
+    expect(page.items.map((item) => item.caseId)).not.toContain(resolvedId);
+    expect(page.total).toBeGreaterThanOrEqual(mine.length);
   });
 
   it('refuses a decision that reverses one which does not exist, as a conflict', async () => {
     const subjectId = await aSubject();
-    const caseId = randomUUID();
+    const caseId = aCaseId();
     await run((tx) => store.insertCase(aCase(subjectId, { caseId }), tx));
     const dangling = aDecision(subjectId, caseId, { action: 'clear', reverses: randomUUID() });
 
@@ -259,7 +266,7 @@ describeIfDb('ModerationStore, against Postgres', () => {
 
   it('retains two reversals of one decision and leaves the original exactly as it was', async () => {
     const subjectId = await aSubject();
-    const caseId = randomUUID();
+    const caseId = aCaseId();
     await run((tx) => store.insertCase(aCase(subjectId, { caseId }), tx));
 
     const original = aDecision(subjectId, caseId);
@@ -267,8 +274,8 @@ describeIfDb('ModerationStore, against Postgres', () => {
     const before = (await run((tx) => store.findDecisionsFor(caseId, tx)))[0];
 
     // The appeal-readiness property: a second appeal answered against the same
-    // decision is a second decision naming it. If a reversal were an update,
-    // these two calls would leave one row and the original would be gone.
+    // decision is a second decision naming it. Were a reversal an update, these
+    // two calls would leave one row and the original would have been rewritten.
     const first = aDecision(subjectId, caseId, {
       decisionId: randomUUID(),
       action: 'clear',
@@ -282,7 +289,7 @@ describeIfDb('ModerationStore, against Postgres', () => {
       action: 'clear',
       removedCapabilities: [],
       reverses: original['decisionId'],
-      rationale: 'Second appeal: the appeal reviewer read the evidence the first did not.',
+      rationale: 'Second appeal: the reviewer read the evidence the first did not.',
       decidedAt: new Date('2026-03-01T11:00:00.000Z'),
     });
     await run((tx) => store.insertDecision(first, tx));
@@ -296,8 +303,8 @@ describeIfDb('ModerationStore, against Postgres', () => {
       first['decisionId'],
       second['decisionId'],
     ]);
-    // Every one of the three is its own row: the reversals name the original
-    // rather than replacing it, and the original still says what it said.
+    // All three are their own row: the reversals name the original rather than
+    // replacing it, and the original still says what it said.
     expect(after[0]).toEqual(before);
     expect(after[0]?.['action']).toBe('ban');
     expect(after[0]?.['reverses']).toBeNull();
@@ -307,8 +314,8 @@ describeIfDb('ModerationStore, against Postgres', () => {
       original['decisionId'],
     ]);
 
-    // The original is still one row and the case still points at nothing,
-    // because a reversal resolves the account, not the case's own record.
+    // And the original is still exactly one row in the table, not a row whose
+    // columns were rewritten twice under the same id.
     const stored = await run((tx) =>
       clientOf(tx).query('SELECT count(*)::int AS total FROM app.decisions WHERE decision_id = $1', [
         original['decisionId'],
@@ -319,22 +326,22 @@ describeIfDb('ModerationStore, against Postgres', () => {
 
   it('raises rather than returning an empty document when a stored report is malformed', async () => {
     const subjectId = await aSubject();
-    const reportId = randomUUID();
+    const reportId = castId<'ReportId'>(randomUUID());
     const report = {
       reportId,
       subjectId,
       reporterId: null,
       reason: 'threats_or_violence',
       statement: 'He said he would find me.',
-      relationship: { matchId: 'match:a|b', at: at(0) },
+      relationship: { matchId: 'match:a|b', at: OPENED_AT },
       capturedEvidence: [],
       state: 'submitted',
       mergedCaseId: null,
-      submittedAt: at(0),
-      updatedAt: at(0),
+      submittedAt: OPENED_AT,
+      updatedAt: OPENED_AT,
     };
     await run((tx) => store.insertReport(report, tx));
-    expect(await run((tx) => store.findReport(reportId as never, tx))).toMatchObject({ reason: report.reason });
+    expect(await run((tx) => store.findReport(reportId, tx))).toMatchObject({ reason: report.reason });
 
     // The relationship is frozen at submission and read months later. A row
     // that no longer holds a document must raise, not read as "no relationship
@@ -343,41 +350,40 @@ describeIfDb('ModerationStore, against Postgres', () => {
       clientOf(tx).query("UPDATE app.reports SET relationship = '[]'::jsonb WHERE report_id = $1", [reportId]),
     );
 
-    const failure = await captureFailure(() => run((tx) => store.findReport(reportId as never, tx)));
+    const failure = await captureFailure(() => run((tx) => store.findReport(reportId, tx)));
     expect(failure).toBeInstanceOf(StoreError);
     expect((failure as Error).message).toContain('relationship');
   });
 
   it('refuses to change a fact intake froze, and reports a case that is not there', async () => {
     const subjectId = await aSubject();
-    const caseId = randomUUID();
+    const caseId = aCaseId();
     await run((tx) => store.insertCase(aCase(subjectId, { caseId }), tx));
 
     const refused = await captureFailure(() =>
-      run((tx) => store.updateCase(caseId as never, { subjectId: randomUUID() }, tx)),
+      run((tx) => store.updateCase(caseId, { subjectId: castId<'UserId'>(randomUUID()) }, tx)),
     );
     expect(refused).toBeInstanceOf(StoreError);
     expect((refused as Error).message).toContain('subjectId');
 
     const moved = await run((tx) =>
-      store.updateCase(caseId as never, { state: 'assigned', assignedModeratorId: 'mod-9' }, tx),
+      store.updateCase(caseId, { state: 'assigned', assignedModeratorId: 'mod-9' }, tx),
     );
     expect(moved).toBe(true);
-    const reread = await run((tx) => store.findCase(caseId as never, tx));
+    const reread = await run((tx) => store.findCase(caseId, tx));
     expect(reread?.state).toBe('assigned');
     expect(reread?.assignedModeratorId).toBe('mod-9');
     expect(reread?.subjectId).toBe(subjectId);
 
-    expect(await run((tx) => store.updateCase(randomUUID() as never, { state: 'open' }, tx))).toBe(false);
+    expect(await run((tx) => store.updateCase(aCaseId(), { state: 'open' }, tx))).toBe(false);
   });
 
   it('leaves nothing behind when the unit of work rolls back', async () => {
     const subjectId = await aSubject();
-    const caseId = randomUUID();
-    const entityId = randomUUID();
-    const entry = anEntry(subjectId, { entityId, dedupeKey: `decision.recorded:${entityId}` });
+    const caseId = aCaseId();
+    const entry = anEntry(subjectId, { dedupeKey: `decision.recorded:${aCaseId()}` });
 
-    // A decision and the audit row that explains it are one unit of work: if
+    // A case and the audit row that explains it are one unit of work: if
     // either half fails, neither may survive, or the appeal record describes
     // something that did not happen.
     const failure = await captureFailure(() =>
@@ -389,11 +395,7 @@ describeIfDb('ModerationStore, against Postgres', () => {
     );
 
     expect(failure).toBeInstanceOf(StoreError);
-    expect(await run((tx) => store.findCase(caseId as never, tx))).toBeNull();
-    expect(await auditRowsFor(entityId)).toHaveLength(0);
+    expect(await run((tx) => store.findCase(caseId, tx))).toBeNull();
+    expect(await auditRowsFor(entityIdOf(entry))).toHaveLength(0);
   });
-
-  function at(hoursAgo: number): Date {
-    return new Date(Date.UTC(2026, 0, 1, 9) - hoursAgo * HOUR);
-  }
 });
