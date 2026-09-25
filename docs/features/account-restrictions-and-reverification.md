@@ -406,12 +406,46 @@ record is handed to the caller, which is Trust & Safety's to turn into a case.
 
 ### 8.4 Bypassing a messaging freeze
 
-Covered in detail in [`messaging-experience.md`](./messaging-experience.md) §5.3,
-and repeated here because it is an enforcement surface: a restricted sender's
-messages are not delivered, and the refusal is symmetric and silent to the
-counterpart, so a restriction cannot be probed, cannot be used to make a
-counterpart look unreliable, and cannot be evaded by the counterpart's continued
-sending. Outstanding messages are refused at write time, not held.
+Covered in detail in [`messaging-experience.md`](./messaging-experience.md) §5.3.
+Repeated here because it is an enforcement surface, and restated to match what
+the code does.
+
+**A restricted account's messages are not sent, and the refusal is symmetric.**
+The composer is disabled for the restricted account *and* for every
+counterpart, in both directions: while a `limited`, `suspended` or `banned`
+participant is in a conversation, neither party's composer works. This is
+implemented, not aspirational — `canSend` evaluates both participants under one
+rule, so the error a restricted sender receives and the error a sender whose
+counterpart is restricted receives are the same `code`, the same `message` and
+the same `details`, and neither names a user.
+
+**Silent to the counterpart, and symmetric in the honest sense.** The counterpart
+learns that the conversation is closed to them, because their composer has to
+stop working and the product has to render a uniform explanation. They do not
+learn the reason, the account state, or which of the two parties it is about.
+The projection that makes the check possible is one bit — `canSendMessages` —
+and it collapses `limited`, `suspended` and `banned` into a single answer, so a
+sender cannot read a counterpart's standing out of the response, cannot tell a
+banned peer from a limited one, and therefore cannot use a restriction to make
+a counterpart look unreliable or to probe for one. See
+[`architecture/communication.md`](../architecture/communication.md) §4 for why
+that is the narrowest projection that can carry the check.
+
+**It fails closed.** If the counterpart's standing cannot be read, the send is
+refused with `external_dependency_failed` rather than allowed. A block still
+outranks all of it, and a refusal that discloses nothing discloses nothing: a
+blocked party learns neither the counterpart's standing nor that any other
+condition applied.
+
+Outstanding messages are refused at write time, not held.
+
+**What this section does not promise.** That the restriction is invisible to
+the counterpart in the sense of "they cannot tell anything changed" — they
+cannot. Nor does it promise the counterpart keeps sending: the freeze closes
+the conversation in both directions, so a restricted user's continued silence
+costs them the conversation for as long as the restriction lasts. Read access
+is untouched, deliberately: the history is evidence, and removing it would
+remove exactly what a case would want.
 
 ### 8.5 Bypassing a discovery removal
 

@@ -7,6 +7,7 @@ import {
   type ConversationState,
   type MatchProjection,
   type Message,
+  type PeerStanding,
   activeBlockView,
   startConversation,
 } from '../src/index.js';
@@ -47,23 +48,50 @@ export interface DependencyOverrides {
   readonly edges?: readonly BlockEdge[];
   readonly capabilities?: readonly string[];
   readonly sender?: UserId;
+  /** Defaults to the other participant of `match.participants`. */
+  readonly peer?: UserId;
+  /** Defaults to true: a counterpart who may send. */
+  readonly peerCanSendMessages?: boolean;
+  /**
+   * The wire value of the counterparty's standing. Pass `undefined` to model a
+   * projection that never loaded — omit the key for a live one, which defaults
+   * to a counterpart who may send.
+   */
+  readonly peerStanding?: PeerStanding | undefined;
 }
 
 export function dependencies(
   overrides: DependencyOverrides = {},
 ): CommunicationDependencies {
+  const projection = match(overrides.match);
+  const sender = overrides.sender ?? ALICE;
+  const counterparty = overrides.peer ?? projection.participants.find((id) => id !== sender) ?? BOB;
+  // Unchecked on purpose, and the only cast in this file: a standing that
+  // never loaded cannot be spelled in `CommunicationDependencies`, which is
+  // exactly why the gate has to survive one. This is what it looks like on
+  // the wire.
+  const peerStanding =
+    'peerStanding' in overrides
+      ? (overrides.peerStanding as PeerStanding)
+      : peerStandingOf(counterparty, overrides.peerCanSendMessages ?? true);
   return {
-    match: match(overrides.match),
+    match: projection,
     blocking: activeBlockView(overrides.edges ?? []),
-    senderStanding: standing(overrides.sender ?? ALICE, overrides.capabilities),
+    senderStanding: standing(sender, overrides.capabilities),
+    peerStanding,
   };
 }
+
 
 export function standing(
   userId: UserId,
   capabilities: readonly string[] = ['send_message', 'report', 'block'],
 ): CapabilityProjection {
   return { userId, capabilities };
+}
+
+export function peerStandingOf(userId: UserId, canSendMessages = true): PeerStanding {
+  return { userId, canSendMessages };
 }
 
 export function blockBetween(blocker: UserId, blocked: UserId, lifted = false): BlockEdge {

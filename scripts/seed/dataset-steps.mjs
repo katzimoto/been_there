@@ -376,14 +376,24 @@ export function matchFromLedger(likes, actorId, counterpartId, conversation) {
 export function conversationWithMessages(projection, entries, now) {
   const conversation = startConversation(projection, projection.matchedAt);
   const blocking = activeBlockView([]);
-  const messages = entries.map(([id, sender, body], index) =>
-    must(
+  const messages = entries.map(([id, sender, body], index) => {
+    const senderId = asUser(sender);
+    // The counterpart's standing is a claim by this caller, and the send gate
+    // refuses one that does not name the *other* participant — so it is derived
+    // from the match rather than asserted, and a seed that got it wrong would
+    // fail here instead of quietly producing a conversation nobody can send in.
+    const counterpartId = projection.participants.find((participant) => participant !== senderId);
+    return must(
       sendMessage(
-        { conversation, senderId: asUser(sender), messageId: asMessage(id), body, at: now() },
+        { conversation, senderId, messageId: asMessage(id), body, at: now() },
         {
           match: projection,
           blocking,
-          senderStanding: { userId: sender, capabilities: capabilitiesFor('active') },
+          senderStanding: { userId: senderId, capabilities: capabilitiesFor('active') },
+          peerStanding: {
+            userId: counterpartId,
+            canSendMessages: capabilitiesFor('active').includes('send_message'),
+          },
           recentSendTimestamps: [],
           recentConversationStarts: [],
           previousMessageAt: null,
@@ -392,8 +402,8 @@ export function conversationWithMessages(projection, entries, now) {
         },
       ),
       `send ${id}`,
-    ),
-  );
+    );
+  });
   return { conversation, messages: messages.map((sent) => sent.message) };
 }
 
