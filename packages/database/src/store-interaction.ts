@@ -28,7 +28,6 @@
  * rather than inserts that kill the transaction. A duplicate like therefore
  * never reaches the caller as a 25P02.
  */
-import type { PoolClient, QueryResultRow } from 'pg';
 import type { MatchId, UserId } from '@been-there/core';
 import type {
   InteractionStore,
@@ -40,7 +39,42 @@ import type {
 import { StoreError } from '@been-there/contracts';
 import { pairKey } from './pair-key.js';
 import { clientOf } from './transaction.js';
+import {
+  fault,
+  jsonObject,
+  optionalDate,
+  optionalString,
+  query,
+  requiredDate,
+  requiredString,
+  stringArray,
+  stringPair,
+} from './store-support.js';
 
+import {
+  blockView,
+  CURRENT_LIKE_STATES,
+  INSERT_BLOCK,
+  INSERT_LIKE,
+  INSERT_PASS,
+  LIVE_PASS_OWNED,
+  likeView,
+  matchView,
+  PATCH_COLUMNS,
+  passView,
+  patchValue,
+  SUPERSEDE_PASS_BY_ID,
+  SUPERSEDE_PASS_BY_PAIR,
+  UPSERT_MATCH,
+} from './store-interaction-rows.js';
+import type {
+  BlockDbRow,
+  CountRow,
+  LikeDbRow,
+  MatchDbRow,
+  PassDbRow,
+  ProfileDbRow,
+} from './store-interaction-rows.js';
 /**
  * A duplicate the caller must resolve, kept distinct from a fault so a caller
  * can answer "you have already liked them" instead of "something broke".
@@ -54,290 +88,6 @@ export class InteractionConflictError extends StoreError {
     super(message, { retryable: false });
     this.name = 'InteractionConflictError';
   }
-}
-
-// ---------------------------------------------------------------- row shapes --
-
-type ProfileDbRow = {
-  readonly user_id: string;
-  readonly profile_id: string | null;
-  readonly state: string;
-  readonly content: unknown;
-  readonly updated_at: Date;
-};
-type LikeDbRow = {
-  readonly like_id: string;
-  readonly from_user_id: string;
-  readonly to_user_id: string;
-  readonly created_at: Date;
-  readonly state: string;
-  readonly superseded_pass_id: string | null;
-};
-type PassDbRow = {
-  readonly pass_id: string;
-  readonly from_user_id: string;
-  readonly to_user_id: string;
-  readonly created_at: Date;
-  readonly state: string;
-};
-type BlockDbRow = {
-  readonly block_id: string;
-  readonly blocker_id: string;
-  readonly blocked_id: string;
-  readonly created_at: Date;
-  readonly lifted_at: Date | null;
-};
-type MatchDbRow = {
-  readonly match_id: string;
-  readonly pair_key: string;
-  readonly participants: string[];
-  readonly like_ids: string[];
-  readonly standings: string[];
-  readonly created_at: Date;
-  readonly ended_at: Date | null;
-  readonly ended_cause: string | null;
-};
-type CountRow = { readonly total: string };
-
-/** The `likes` states `isCurrentLike` counts, and so the only ones a read keeps. */
-const CURRENT_LIKE_STATES = "('live', 'matched')";
-
-// ------------------------------------------------------------------- queries --
-
-/**
- * The one live pass the liker placed over the person they are now liking, and
- * only that one: the counterpart's pass is never theirs to supersede.
- *
- * `created_at <= $3` is the `at` guard, and `supersedePass` applies the same
- * one: an event cannot supersede a pass that had not been recorded yet, so a
- * replayed command carrying an old clock leaves the pass alone instead of
- * overriding something that happened after it.
- */
-const LIVE_PASS_OWNED = `
-  SELECT * FROM app.passes
-   WHERE from_user_id = $1 AND to_user_id = $2 AND state = 'live' AND created_at <= $3`;
-
-const INSERT_LIKE = `
-  INSERT INTO app.likes (like_id, from_user_id, to_user_id, created_at, state, superseded_pass_id)
-  VALUES ($1, $2, $3, $4, 'live', $5)
-  ON CONFLICT DO NOTHING
-  RETURNING *`;
-
-const INSERT_PASS = `
-  INSERT INTO app.passes (pass_id, from_user_id, to_user_id, created_at, state)
-  VALUES ($1, $2, $3, $4, 'live')
-  ON CONFLICT DO NOTHING
-  RETURNING *`;
-
-const INSERT_BLOCK = `
-  INSERT INTO app.blocks (block_id, blocker_id, blocked_id, created_at)
-  VALUES ($1, $2, $3, $4)
-  ON CONFLICT DO NOTHING
-  RETURNING *`;
-
-/**
- * The convergence. The `like_ids` union is the only thing a losing writer adds:
- * its like is a real fact, and the match already on record is the truth about
- * when the match happened, who is in it and whether it has ended. An ended
- * match must not be revived by a like that raced its ending, so `ended_at` and
- * `ended_cause` are left alone rather than overwritten.
- */
-const UPSERT_MATCH = `
-  INSERT INTO app.matches (match_id, pair_key, participants, like_ids, standings, created_at, ended_at, ended_cause)
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-  ON CONFLICT (pair_key) DO UPDATE
-     SET like_ids = matches.like_ids || (
-           SELECT coalesce(array_agg(fresh.like_id), '{}'::uuid[])
-             FROM unnest(EXCLUDED.like_ids) AS fresh (like_id)
-            WHERE NOT (fresh.like_id = ANY (matches.like_ids))
-         )
-  RETURNING *`;
-
-/** One direction, `live` only: the only rows a supersession may move. */
-const SUPERSEDE_PASS_BY_ID = `
-  UPDATE app.passes SET state = 'superseded'
-   WHERE pass_id = $1 AND state = 'live' AND created_at <= $2
-  RETURNING *`;
-
-/** The same move addressed by pair, which is the address the port gives. */
-const SUPERSEDE_PASS_BY_PAIR = `
-  UPDATE app.passes SET state = 'superseded'
-   WHERE from_user_id = $1 AND to_user_id = $2 AND state = 'live' AND created_at <= $3
-  RETURNING *`;
-
-/** The patch columns, so an unknown key is a fault rather than a dropped write. */
-const PATCH_COLUMNS: Readonly<Record<string, string>> = {
-  standings: 'standings',
-  endedAt: 'ended_at',
-  endedCause: 'ended_cause',
-};
-
-// ------------------------------------------------------------------ plumbing --
-
-/**
- * Sends one statement and turns anything that is not already a `StoreError`
- * into one, so "the query failed" can never look like "no rows".
- *
- * No retry here, deliberately: a serialization failure has already poisoned
- * the caller's transaction, so re-sending the statement would fail for a
- * different reason. Retrying a unit of work belongs to the transaction that
- * owns it, the only layer that knows whether the work so far — the like, the
- * match, the events — may be redone together.
- */
-async function query<Row extends QueryResultRow>(
-  client: PoolClient,
-  text: string,
-  values: unknown[],
-): Promise<{ rows: Row[]; rowCount: number }> {
-  try {
-    const result = await client.query<Row>(text, values);
-    return { rows: result.rows, rowCount: result.rowCount ?? 0 };
-  } catch (error) {
-    if (error instanceof StoreError) {
-      throw error;
-    }
-    throw new StoreError(error instanceof Error ? error.message : 'query failed', { cause: error });
-  }
-}
-
-/** A caller wrote a row the store cannot store. Never swallowed, never defaulted. */
-function fault(message: string): StoreError {
-  return new StoreError(message, { retryable: false });
-}
-
-function requiredString(
-  bag: Readonly<Record<string, unknown>>,
-  key: string,
-  where: string,
-): string {
-  const value = bag[key];
-  if (typeof value !== 'string' || value === '') {
-    throw fault(`${where}: '${key}' must be a non-empty string`);
-  }
-  return value;
-}
-
-function optionalString(
-  bag: Readonly<Record<string, unknown>>,
-  key: string,
-  where: string,
-): string | null {
-  const value = bag[key];
-  if (value === undefined || value === null) {
-    return null;
-  }
-  if (typeof value !== 'string' || value === '') {
-    throw fault(`${where}: '${key}' must be a non-empty string or null`);
-  }
-  return value;
-}
-
-/** A Date from the domain, or a string from an HTTP boundary. Never an epoch. */
-function toDate(value: unknown, key: string, where: string): Date {
-  const parsed = value instanceof Date ? value : typeof value === 'string' ? new Date(value) : null;
-  if (parsed === null || Number.isNaN(parsed.getTime())) {
-    throw fault(`${where}: '${key}' must be a Date or an ISO-8601 string`);
-  }
-  return parsed;
-}
-
-function requiredDate(bag: Readonly<Record<string, unknown>>, key: string, where: string): Date {
-  return toDate(bag[key], key, where);
-}
-
-function optionalDate(
-  bag: Readonly<Record<string, unknown>>,
-  key: string,
-  where: string,
-): Date | null {
-  const value = bag[key];
-  return value === undefined || value === null ? null : toDate(value, key, where);
-}
-
-function stringArray(bag: Readonly<Record<string, unknown>>, key: string, where: string): string[] {
-  const value = bag[key];
-  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string' || entry === '')) {
-    throw fault(`${where}: '${key}' must be an array of non-empty strings`);
-  }
-  return [...(value as string[])];
-}
-
-/** The two-entry arrays the schema CHECKs, as a tuple so no cast is needed. */
-function stringPair(
-  bag: Readonly<Record<string, unknown>>,
-  key: string,
-  where: string,
-): [string, string] {
-  const entries = stringArray(bag, key, where);
-  if (entries.length !== 2) {
-    throw fault(`${where}: '${key}' must hold exactly 2 entries, got ${entries.length}`);
-  }
-  return [entries[0] as string, entries[1] as string];
-}
-
-/** A `jsonb` column arrives parsed; a value that is not an object is a broken row. */
-function jsonObject(value: unknown, what: string): Readonly<Record<string, unknown>> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw fault(`${what} is not a jsonb object`);
-  }
-  return value as Readonly<Record<string, unknown>>;
-}
-
-function patchValue(key: string, patch: Readonly<Record<string, unknown>>): unknown {
-  const where = `updateMatch('${key}')`;
-  switch (key) {
-    case 'standings':
-      return stringPair(patch, key, where);
-    case 'endedAt':
-      return optionalDate(patch, key, where);
-    default:
-      return optionalString(patch, key, where);
-  }
-}
-
-function likeView(row: LikeDbRow): Readonly<Record<string, unknown>> {
-  return {
-    likeId: row.like_id,
-    from: row.from_user_id,
-    to: row.to_user_id,
-    createdAt: row.created_at,
-    state: row.state,
-    supersededPassId: row.superseded_pass_id,
-  };
-}
-
-function passView(row: PassDbRow): Readonly<Record<string, unknown>> {
-  return {
-    passId: row.pass_id,
-    from: row.from_user_id,
-    to: row.to_user_id,
-    createdAt: row.created_at,
-    state: row.state,
-  };
-}
-
-function blockView(row: BlockDbRow): Readonly<Record<string, unknown>> {
-  return {
-    blockId: row.block_id,
-    blocker: row.blocker_id,
-    blocked: row.blocked_id,
-    createdAt: row.created_at,
-    liftedAt: row.lifted_at,
-    active: row.lifted_at === null,
-  };
-}
-
-function matchView(row: MatchDbRow): Readonly<Record<string, unknown>> {
-  return {
-    matchId: row.match_id,
-    pairKey: row.pair_key,
-    participants: row.participants,
-    likeIds: row.like_ids,
-    standings: row.standings,
-    createdAt: row.created_at,
-    endedAt: row.ended_at,
-    endedCause: row.ended_cause,
-  };
 }
 
 // --------------------------------------------------------------------- store --

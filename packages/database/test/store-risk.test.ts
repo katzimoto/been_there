@@ -222,36 +222,36 @@ describeIfDb('RiskStore, against Postgres', () => {
     expect((await signalsOf(theirs)).map((row) => row.behaviour)).toHaveLength(1);
   });
 
-  it('orders signals that share a timestamp deterministically', async () => {
+  it('orders a tied window by the whole domain comparator: instant, then detector, then arrival', async () => {
     const subject = await newSubject();
     const instant = new Date('2026-04-01T12:00:00.000Z');
-    for (let index = 0; index < 4; index += 1) {
-      await append(signal(subject, { occurredAt: instant, behaviour: `same_${index}` }));
-    }
+    // Every one of these shares an instant, so the first term of
+    // `compareSignals` ties and the rest decide. `a_second` and `a_third`
+    // arrive *after* `m_only` and still come before it, which is what proves
+    // `detector` outranks `seq` rather than the other way round — a uuid
+    // tiebreak would interleave these five differently.
+    await append(signal(subject, { occurredAt: instant, detector: 'z.detector', behaviour: 'z_only' }));
+    await append(signal(subject, { occurredAt: instant, detector: 'a.detector', behaviour: 'a_first' }));
+    await append(signal(subject, { occurredAt: instant, detector: 'm.detector', behaviour: 'm_only' }));
+    await append(signal(subject, { occurredAt: instant, detector: 'a.detector', behaviour: 'a_second' }));
+    await append(signal(subject, { occurredAt: instant, detector: 'a.detector', behaviour: 'a_third' }));
 
-    const first = await signalsOf(subject);
-    const second = await signalsOf(subject);
-    expect(first).toHaveLength(4);
-    // Two detectors can observe the same instant; an order that changed
-    // between reads would make the domain's repeat count non-deterministic.
-    expect(first.map((row) => row.signalId)).toEqual(second.map((row) => row.signalId));
-  });
-
-  it('orders same-instant signals by detector, as the domain ledger does', async () => {
-    const subject = await newSubject();
-    const instant = new Date('2026-04-02T12:00:00.000Z');
-    // Inserted in reverse order: the domain sorts a ledger by
-    // (occurredAt, detector, subjectId), so a replayed ledger has to come back
-    // in that order or the repeat count changes across a restart.
-    await append(signal(subject, { occurredAt: instant, detector: 'z.detector' }));
-    await append(signal(subject, { occurredAt: instant, detector: 'a.detector' }));
-    await append(signal(subject, { occurredAt: instant, detector: 'm.detector' }));
-
-    expect((await signalsOf(subject)).map((row) => row.detector)).toEqual([
-      'a.detector',
-      'm.detector',
-      'z.detector',
+    const rows = await signalsOf(subject);
+    expect(rows.map((row) => row.behaviour)).toEqual([
+      'a_first',
+      'a_second',
+      'a_third',
+      'm_only',
+      'z_only',
     ]);
+    expect(rows.map((row) => row.seq)).toEqual(
+      [...rows.map((row) => row.seq)].sort((a, b) => a - b),
+    );
+    // `seq` arrives from the driver as a string, because it is a `bigint`. A
+    // string would still order correctly here — five consecutive values share a
+    // digit count — so the type itself is what has to be asserted: `'10' < '9'`
+    // is a corrupt arrival order that no small fixture would ever expose.
+    expect(typeof rows[0]?.seq).toBe('number');
   });
 
   it('returns an empty list for a subject with no signals rather than failing', async () => {

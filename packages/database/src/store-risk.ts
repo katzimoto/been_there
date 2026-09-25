@@ -145,8 +145,24 @@ function asDate(value: unknown, context: string): Date {
   return value;
 }
 
+/**
+ * `seq` is a `bigint`, and the driver hands those back as strings rather than
+ * lose precision. Left as a string it would order lexically — `'10' < '9'` —
+ * which is a quietly corrupt arrival order rather than a type error, so it is
+ * converted here and checked while converting.
+ */
+function asSequence(value: unknown, context: string): number {
+  const parsed = typeof value === 'string' ? Number(value) : value;
+  if (typeof parsed !== 'number' || !Number.isInteger(parsed) || parsed < 1) {
+    throw new StoreError(`${context} is not a sequence number`);
+  }
+  return parsed;
+}
+
 const SIGNAL_COLUMNS =
-  'signal_id, subject_id, detector, behaviour, entity_id, facts, weight, occurred_at';
+  'signal_id, subject_id, detector, behaviour, entity_id, facts, weight, occurred_at, seq';
+/** `seq` is assigned by the sequence on insert, so it is never bound. */
+const INSERT_COLUMNS = SIGNAL_COLUMNS.replace(', seq', '');
 
 /** The driver's row shape, before validation. */
 type SignalDbRow = {
@@ -158,6 +174,7 @@ type SignalDbRow = {
   readonly facts: unknown;
   readonly weight: number;
   readonly occurred_at: unknown;
+  readonly seq: unknown;
 };
 
 function toSignalRow(row: SignalDbRow): RiskSignalRow {
@@ -170,6 +187,7 @@ function toSignalRow(row: SignalDbRow): RiskSignalRow {
     facts: asFactObject(row.facts, 'risk_signals.facts'),
     weight: row.weight,
     occurredAt: asDate(row.occurred_at, 'risk_signals.occurred_at'),
+    seq: asSequence(row.seq, 'risk_signals.seq'),
   };
 }
 
@@ -209,7 +227,7 @@ export class PgRiskStore implements RiskStore {
     const facts = asFactObject(signal.facts ?? {}, 'risk_signals.facts');
     try {
       await clientOf(tx).query(
-        `INSERT INTO app.risk_signals (${SIGNAL_COLUMNS})
+        `INSERT INTO app.risk_signals (${INSERT_COLUMNS})
          VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
          ON CONFLICT (signal_id) DO NOTHING`,
         [
@@ -240,16 +258,16 @@ export class PgRiskStore implements RiskStore {
    *  * The result is then re-ordered **ascending**, because corroboration
    *    reads a window and the repeat counter walks the sequence; handing back
    *    descending would make "the last signal" the first element.
-   *  * Ties are broken the way the domain breaks them. `occurred_at` is not
-   *    unique — two detectors can observe the same instant — and
-   *    `correlation.ts`'s `compareSignals` sorts a ledger by
-   *    `(occurredAt, detector, subjectId)`. Ordering here by
-   *    `(occurred_at, detector, signal_id)` keeps a replayed ledger in the
-   *    same order as an in-memory one, which is what makes a restart produce
-   *    the same repeat count. `signal_id` closes the last gap — the domain
-   *    leaves signals that share an instant *and* a detector in arrival
-   *    order, which no column here records; a monotonic `seq` on
-   *    `risk_signals` is the change worth asking for.
+   *  * Ties are broken the way the domain breaks them, all the way down.
+   *    `occurred_at` is not unique — two detectors can observe the same
+   *    instant — and `correlation.ts`'s `compareSignals` sorts a ledger by
+   *    `(occurredAt, detector, subjectId)`, leaving signals that share an
+   *    instant *and* a detector in arrival order. Ordering here by
+   *    `(occurred_at, detector, seq)` reproduces that comparator exactly, so a
+   *    ledger replayed from the database folds to the same repeat count as the
+   *    in-memory one that produced it. `seq` is the reason the last term is
+   *    expressible at all: an arrival-ordered column, which a uuid cannot be.
+   *    `risk_signals_ordered` is built on exactly this key order.
    */
   async findSignalsFor(
     subjectId: SubjectId,
@@ -266,10 +284,10 @@ export class PgRiskStore implements RiskStore {
              SELECT ${SIGNAL_COLUMNS}
                FROM app.risk_signals
               WHERE subject_id = $1
-              ORDER BY occurred_at DESC, detector ASC, signal_id DESC
+              ORDER BY occurred_at DESC, detector ASC, seq DESC
               LIMIT $2
            ) AS newest_window
-          ORDER BY occurred_at ASC, detector ASC, signal_id ASC`,
+          ORDER BY occurred_at ASC, detector ASC, seq ASC`,
         [subjectId, limit],
       );
       // Decoding inside the try is deliberate: `toStoreError` passes a

@@ -14,9 +14,40 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import type { PoolClient } from 'pg';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const connectionString = process.env.DATABASE_URL;
+// Load `.env` the way `scripts/migrate.mjs` does. Without this the suite read
+// `process.env.DATABASE_URL` before anything had exported it, and skipped
+// itself in every run outside a shell that had — nine tests that looked green
+// and ran nothing. A suite that silently skips is the same failure mode as one
+// running stale code.
+const connectionString = resolveDatabaseUrl();
 const describeIfDb = connectionString === undefined ? describe.skip : describe;
+
+/**
+ * The connection, from the environment or from the repository's `.env`.
+ *
+ * Kept here rather than imported so the suite stays self-contained: a test
+ * that cannot run because a helper is missing is a test that does not run.
+ */
+function resolveDatabaseUrl(): string | undefined {
+  if (process.env.DATABASE_URL !== undefined) {
+    return process.env.DATABASE_URL;
+  }
+  const envFile = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '.env');
+  if (!existsSync(envFile)) {
+    return undefined;
+  }
+  for (const line of readFileSync(envFile, 'utf8').split('\n')) {
+    const match = /^\s*DATABASE_URL\s*=\s*(.*?)\s*$/.exec(line);
+    if (match !== null) {
+      return match[1];
+    }
+  }
+  return undefined;
+}
 
 describeIfDb('schema guarantees, against Postgres', () => {
   let pool: pg.Pool;
@@ -121,18 +152,26 @@ describeIfDb('schema guarantees, against Postgres', () => {
 
   it('gives a pair at most one match, so two concurrent reciprocal likes converge', async () => {
     const { a, b } = await twoUsers();
-    const pairKey = [a, b].sort().join('|');
+    const sorted = [a, b].sort();
+    const pairKey = sorted.join('|');
     // `match_id` is text, because the domain's own derivation is `match:{a}|{b}`
-    // rather than a uuid — uniqueness is carried by `pair_key`.
-    const row = (matchId: string) => [matchId, pairKey, [a, b], [randomUUID()], ['active', 'active']];
+    // over the canonical pair rather than a uuid — uniqueness is carried by
+    // `pair_key`. Deriving it rather than hardcoding, so a rerun against the
+    // same database tests `pair_key` instead of tripping over a leftover row
+    // from the previous one.
+    const matchId = `match:${pairKey}`;
+    const row = (id: string) => [id, pairKey, [a, b], [randomUUID()], ['active', 'active']];
     await client.query(
       'INSERT INTO app.matches (match_id, pair_key, participants, like_ids, standings) VALUES ($1,$2,$3,$4,$5)',
-      row('match:x|y'),
+      row(matchId),
     );
+    // Same pair, a different match id: the second insert must fail on
+    // `pair_key`, which is what makes two concurrent reciprocal likes converge
+    // on one match rather than two.
     await expect(
       client.query(
         'INSERT INTO app.matches (match_id, pair_key, participants, like_ids, standings) VALUES ($1,$2,$3,$4,$5)',
-        row('match:x|y-2'),
+        row(`${matchId}-duplicate`),
       ),
     ).rejects.toThrow();
   });
