@@ -68,6 +68,12 @@ jobs:
             echo "::endgroup::"
           done
 
+      # Before Test, deliberately. The database suites probe the schema and
+      # fail loudly when a table is absent, which is the behaviour we want -
+      # but only if the schema was meant to be there.
+      - name: Migrate
+        run: node packages/database/scripts/migrate.mjs
+
       - name: Test
         run: npm test
 
@@ -84,8 +90,3 @@ jobs:
 
       - name: Check the lockfile covers every workspace package
         run: node scripts/dev/check-workspace-lockfile.mjs
-
-      # The schema has to exist before the suites run, or every database test
-      # skips on a missing table and the job is green for the wrong reason.
-      - name: Migrate
-        run: node packages/database/scripts/migrate.mjs
