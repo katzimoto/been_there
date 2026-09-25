@@ -29,12 +29,12 @@ import {
   auditAppender,
   caseOf,
   decisionRowOf,
-  evidenceRecordOf,
   flushAudit,
-  loadDecisions,
   reportOf,
   requestModerationContext,
 } from '../wiring/moderation.js';
+import { loadDecisions } from '../wiring/moderation-decisions.js';
+import { evidenceRecordOf } from '../wiring/moderation-evidence.js';
 
 /**
  * The moderator workspace: one case, its evidence, and the answer to a decision.
