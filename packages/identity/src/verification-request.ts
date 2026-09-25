@@ -330,12 +330,26 @@ export interface CaptureInput {
  * Records one captured artefact. A retake of the same kind replaces the earlier
  * artefact rather than adding to it: a user who re-uploads their passport six
  * times must not leave six copies of their passport behind.
+ *
+ * Retakes are also rate-limited. An uncapped capture endpoint is both a
+ * vendor-cost problem and a way to keep someone in a permanent retry loop, so
+ * a second capture of the same kind inside the cooldown is refused.
  */
 export function recordCapture(
   attempt: VerificationAttempt,
   capture: CaptureInput,
   now: Date,
 ): Result<VerificationAttempt, DomainError> {
+  const previous = attempt.evidence.find((item) => item.kind === capture.kind);
+  if (
+    previous !== undefined &&
+    now.getTime() - previous.capturedAt.getTime() < ATTEMPT_POLICY.retakeCooldownMinutes * 60_000
+  ) {
+    return domainError('rate_limited', 'identity', 'a retake of this artefact is too soon', {
+      kind: capture.kind,
+      retakeCooldownMinutes: ATTEMPT_POLICY.retakeCooldownMinutes,
+    });
+  }
   const supersede = attempt.evidence.filter((item) => item.kind !== capture.kind);
   const completedChecks = [...new Set([...attempt.completedChecks, capture.check])];
   const evidence: VerificationEvidence = {

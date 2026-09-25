@@ -59,7 +59,7 @@ export interface MatchCreatedPayload {
 
 export interface MatchEndedPayload {
   readonly matchId: MatchId;
-  readonly reason: MatchStatus;
+  readonly reason: Exclude<MatchStatus, 'active'>;
   readonly actorId: UserId | 'system';
   readonly endedAt: string;
   /** Retained, not deleted: the right to report outlives the match. */

@@ -1,5 +1,13 @@
 {
   "$schema": "https://json.schemastore.org/tsconfig",
   "files": [],
-  "references": [{ "path": "./packages/core" }]
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/identity" },
+    { "path": "./packages/dating" },
+    { "path": "./packages/communication" },
+    { "path": "./packages/trust-safety" },
+    { "path": "./packages/moderation" },
+    { "path": "./packages/platform" }
+  ]
 }

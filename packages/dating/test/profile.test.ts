@@ -105,21 +105,30 @@ describe('profile machine', () => {
     }
   });
 
-  it('lands a save on complete or incomplete, never on the other one', () => {
-    expect(succeeded(profileMachine.next('draft', 'save', { requirementsMet: true }))).toBe('complete');
-    expect(succeeded(profileMachine.next('draft', 'save', { requirementsMet: false }))).toBe('incomplete');
-    expect(succeeded(profileMachine.next('complete', 'save', { requirementsMet: false }))).toBe('incomplete');
+  it('refuses to mark a profile complete that does not meet the requirements', () => {
+    const result = profileMachine.next('draft', 'mark_complete', { requirementsMet: false });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('validation_failed');
+    }
   });
 
-  it('pauses and resumes without losing the profile', () => {
+  it('refuses to mark a qualifying profile incomplete', () => {
+    const result = profileMachine.next('complete', 'mark_incomplete', { requirementsMet: true });
+    expect(result.ok).toBe(false);
+  });
+
+  it('follows the content: a save that drops a requirement lands on incomplete', () => {
+    expect(succeeded(profileMachine.next('draft', 'mark_complete', { requirementsMet: true }))).toBe('complete');
+    expect(succeeded(profileMachine.next('draft', 'mark_incomplete', { requirementsMet: false }))).toBe('incomplete');
+    expect(succeeded(profileMachine.next('complete', 'mark_incomplete', { requirementsMet: false }))).toBe('incomplete');
+  });
+
+  it('pauses and comes back only as far as the content allows', () => {
     const paused = succeeded(profileMachine.next('complete', 'pause', { requirementsMet: true }));
     expect(paused).toBe('paused');
-    expect(succeeded(profileMachine.next(paused, 'resume', { requirementsMet: true }))).toBe('complete');
-  });
-
-  it('refuses to resume into complete when the content no longer qualifies', () => {
-    const paused = succeeded(profileMachine.next('complete', 'pause', { requirementsMet: true }));
-    expect(succeeded(profileMachine.next(paused, 'resume', { requirementsMet: false }))).toBe('incomplete');
+    expect(succeeded(profileMachine.next(paused, 'mark_complete', { requirementsMet: true }))).toBe('complete');
+    expect(succeeded(profileMachine.next(paused, 'mark_incomplete', { requirementsMet: false }))).toBe('incomplete');
   });
 
   it('only allows a hide with a reason, so a client cannot hide itself out of sight', () => {
@@ -130,12 +139,12 @@ describe('profile machine', () => {
   });
 
   it('restores a hidden profile only as far as its content allows', () => {
-    expect(succeeded(profileMachine.next('hidden', 'unhide', { requirementsMet: true }))).toBe('complete');
-    expect(succeeded(profileMachine.next('hidden', 'unhide', { requirementsMet: false }))).toBe('incomplete');
+    expect(succeeded(profileMachine.next('hidden', 'mark_complete', { requirementsMet: true }))).toBe('complete');
+    expect(succeeded(profileMachine.next('hidden', 'mark_incomplete', { requirementsMet: false }))).toBe('incomplete');
   });
 
   it('rejects an event that is not legal from the current state', () => {
-    const result = profileMachine.next('deleted', 'save', { requirementsMet: true });
+    const result = profileMachine.next('deleted', 'mark_complete', { requirementsMet: true });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error.code).toBe('invalid_transition');

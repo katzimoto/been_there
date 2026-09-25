@@ -8,6 +8,7 @@ import {
 } from '@been-there/core';
 import {
   ATTEMPT_POLICY,
+  type VerificationAttempt,
   attemptMachine,
   beginCapture,
   completeFromProvider,
@@ -178,12 +179,12 @@ describe('starting an attempt', () => {
 
 describe('capturing evidence', () => {
   it('supersedes an earlier capture of the same kind instead of accumulating', () => {
-    let attempt = succeeded(beginCapture(awaitingProviderInit(), T0));
+    const attempt = succeeded(beginCapture(awaitingProviderInit(), T0));
     const first = succeeded(
       recordCapture(
         attempt,
         { check: 'likeness', kind: 'selfie_image', storageRef: 'ref:selfie-1', digest: 'd1' },
-        hoursLater(0.1),
+        T0,
       ),
     );
     expect(first.evidence).toHaveLength(1);
@@ -191,15 +192,55 @@ describe('capturing evidence', () => {
       recordCapture(
         first,
         { check: 'likeness', kind: 'selfie_image', storageRef: 'ref:selfie-2', digest: 'd2' },
-        hoursLater(0.2),
+        hoursLater(ATTEMPT_POLICY.retakeCooldownMinutes / 60 + 0.1),
       ),
     );
     expect(second.evidence).toHaveLength(1);
     expect(second.evidence[0]?.storageRef).toBe('ref:selfie-2');
     expect(second.evidence[0]?.digest).toBe('d2');
     expect(second.completedChecks).toEqual(['likeness']);
-    attempt = second;
-    expect(attempt.state).toBe('capturing');
+    expect(second.state).toBe('capturing');
+  });
+
+  it('rate-limits a retake inside the cooldown', () => {
+    const first = succeeded(
+      recordCapture(
+        succeeded(beginCapture(awaitingProviderInit(), T0)),
+        { check: 'likeness', kind: 'selfie_image', storageRef: 'ref:selfie-1', digest: 'd1' },
+        T0,
+      ),
+    );
+    const tooSoon = errorOf(
+      recordCapture(
+        first,
+        { check: 'likeness', kind: 'selfie_image', storageRef: 'ref:selfie-2', digest: 'd2' },
+        hoursLater(ATTEMPT_POLICY.retakeCooldownMinutes / 60 - 0.01),
+      ),
+    );
+    expect(tooSoon.code).toBe('rate_limited');
+    // A refused retake leaves the stored artefact untouched.
+    expect(first.evidence[0]?.storageRef).toBe('ref:selfie-1');
+  });
+
+  it('allows a different artefact kind inside the cooldown', () => {
+    const first = succeeded(
+      recordCapture(
+        succeeded(beginCapture(awaitingProviderInit(), T0)),
+        { check: 'likeness', kind: 'selfie_image', storageRef: 'ref:selfie-1', digest: 'd1' },
+        T0,
+      ),
+    );
+    const second = succeeded(
+      recordCapture(
+        first,
+        { check: 'liveness', kind: 'liveness_video', storageRef: 'ref:liveness-1', digest: 'd2' },
+        hoursLater(0.05),
+      ),
+    );
+    expect(second.evidence.map((item) => item.kind).sort()).toEqual([
+      'liveness_video',
+      'selfie_image',
+    ]);
   });
 
   it('stores evidence as restricted with a retention deadline and no bytes', () => {

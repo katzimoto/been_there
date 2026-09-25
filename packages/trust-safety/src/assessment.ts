@@ -3,8 +3,10 @@ import {
   type DomainError,
   type Result,
   type RiskAssessment,
+  domainError,
   type RiskAssessmentId,
   type SubjectId,
+  type RiskState,
 } from '@been-there/core';
 import { type SignalLedger, appendSignal, corroborate } from './correlation.js';
 import { type RiskDispute, handleDispute, isOpenDispute } from './dispute.js';
@@ -19,7 +21,7 @@ import {
 import type { IdFactory } from './ids.js';
 import { RISK_RANK, assessDecay, assessHumanReassessment, assessSignal } from './policy.js';
 import type { ReviewCandidate } from './review.js';
-import type { Signal } from './signal.js';
+import { TRUST_SAFETY_DOMAIN, type Signal } from './signal.js';
 
 /**
  * Everything Trust & Safety knows about one subject.
@@ -82,13 +84,22 @@ function envelope(context: AssessmentContext) {
   };
 }
 
-/** One entry per kind, newest wins, always in catalogue order. */
-function mergeFriction(
+/**
+ * The friction a subject currently carries, as a function of the risk state.
+ *
+ * A new proposal restarts the clock for its kind; a kind the state no longer
+ * justifies is dropped; a kind nobody renewed expires. This is the only place
+ * friction is computed, so a subject can never be left holding a proposal that
+ * its own risk state would not produce today.
+ */
+function frictionForState(
+  state: RiskState,
   current: readonly ReversibleFriction[],
   incoming: readonly ReversibleFriction[],
+  now: Date,
 ): readonly ReversibleFriction[] {
   const byKind = new Map<FrictionKind, ReversibleFriction>();
-  for (const entry of current) {
+  for (const entry of expireFriction(current, now)) {
     byKind.set(entry.kind, entry);
   }
   for (const entry of incoming) {
@@ -96,7 +107,9 @@ function mergeFriction(
   }
   return FRICTION_KINDS.flatMap((kind) => {
     const entry = byKind.get(kind);
-    return entry === undefined ? [] : [entry];
+    return entry !== undefined && RISK_RANK[state] >= RISK_RANK[REVERSIBLE_FRICTION[kind].minRiskState]
+      ? [entry]
+      : [];
   });
 }
 
@@ -117,6 +130,14 @@ export function applySignal(
   ledger: SignalLedger,
   context: AssessmentContext,
 ): Result<RiskTransition, DomainError> {
+  if (signal.subjectId !== record.assessment.subjectId) {
+    return domainError(
+      'validation_failed',
+      TRUST_SAFETY_DOMAIN,
+      'a signal can only be applied to the record of the account it is about',
+    );
+  }
+
   const corroboration = corroborate(ledger, signal);
   const decision = assessSignal(
     {
@@ -149,10 +170,11 @@ export function applySignal(
     events.push(reviewCandidateRaised(envelope(context), decision.candidate));
   }
 
-  // A quarantined signal leaves no trace on the record: no state, no detector,
-  // no clock. It stays in the ledger precisely because that is how the campaign
-  // stays visible to a human, and precisely not as evidence against the target.
-  const detectors = decision.quarantined
+  // A discarded signal leaves no trace on the record: no state, no detector, no
+  // clock. It stays in the ledger precisely because that is what makes a
+  // campaign visible to a human, and precisely not as evidence against the
+  // account it was aimed at.
+  const detectors = decision.discarded
     ? record.assessment.contributingDetectors
     : [...new Set([...record.assessment.contributingDetectors, signal.detector])].sort();
 
@@ -166,11 +188,11 @@ export function applySignal(
           ...record.assessment,
           state: decision.next,
           contributingDetectors: detectors,
-          lastSignalAt: decision.quarantined
+          lastSignalAt: decision.discarded
             ? record.assessment.lastSignalAt
             : laterOf(record.assessment.lastSignalAt, signal.occurredAt),
         },
-        friction: mergeFriction(expireFriction(record.friction, context.now), decision.friction),
+        friction: frictionForState(decision.next, record.friction, decision.friction, context.now),
         candidate: isAccountCandidate ? decision.candidate : record.candidate,
         disputes: record.disputes,
         updatedAt: context.now,
@@ -211,9 +233,7 @@ export function applyDecay(
       ]
     : [];
 
-  const friction = expireFriction(record.friction, context.now).filter(
-    (entry) => RISK_RANK[next] >= RISK_RANK[REVERSIBLE_FRICTION[entry.kind].minRiskState],
-  );
+  const friction = frictionForState(next, record.friction, [], context.now);
   const candidate =
     record.candidate !== null && RISK_RANK[next] < RISK_RANK.high ? null : record.candidate;
 

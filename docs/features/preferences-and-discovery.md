@@ -51,7 +51,7 @@ Concretely, when this issue is done:
 
 | State | Owner | How this feature learns about it |
 |-------|-------|----------------------------------|
-| `IdentityState` | Identity & Verification | `identity_status.changed` → `DiscoveryStandingProjection` |
+| `IdentityState` | Identity & Verification | `identity_status.changed` → `IdentityStandingProjection` |
 | `AccountState` + removed capabilities | Moderation & Enforcement | `account_state.changed` → `AccountStandingProjection` |
 | Block edges (both directions) | User Safety Controls | block events → `BlockListProjection` |
 | Profile content and publish state | Profile (#10) | `profile.published` / `profile.state_changed` (`draft\|incomplete\|live\|paused\|hidden`) consumed as a projection; the boolean completeness gate is Dating Core's own `profile.completed` |
@@ -72,10 +72,11 @@ interface DiscoveryPreferences {
 	readonly ageRange: { readonly minAge: number | null; readonly maxAge: number | null } | null;
 	readonly maxDistanceKm: number | null;
 	readonly seekingGenders: readonly Gender[] | null;      // null = any
-	readonly openTo: readonly OrientationGroup[] | null;    // null = default openness
+	readonly openTo: readonly OrientationGroup[] | null;    // null = unexpressed
 	readonly locationPrecision: CoarseBucket;               // coarsening only
 	readonly hidden: boolean;                               // pause discovery
 	readonly verifiedOnly: true;                            // not user-configurable
+}
 ```
 
 ### 3.2 The axes
@@ -108,17 +109,23 @@ re-query. If a filter yields nothing, the user is told it yields nothing.
 
 ### 3.4 Gender and orientation compatibility
 
-Compatibility is **symmetric and evaluated from both sides**. Two users are
-orientation-compatible iff each one's declared group is in the other's
-`openTo` set. Compatibility is a property of the pair, never of one user's
-settings, and it is evaluated identically in discovery (§4, rule P4) and in
-matching (#12), so a like can never lead to a pair that discovery would have
-refused.
+Compatibility is **symmetric and evaluated from both sides**, and it is the only
+pair-wise filter. `age_out_of_range`, `gender_out_of_scope` and
+`beyond_distance_limit` are evaluated from the **viewer's own preferences
+alone** — they are one-sided questions about what this viewer asked for.
+`not_mutually_compatible` is the extra constraint that requires **both** sides
+to have expressed the same dimension.
 
-The system never infers orientation, never infers gender, and never widens
-`openTo` to make a pool look healthier. A user who has declared nothing is
-treated as open to their own declared group only, and is shown that as a
-sentence in settings rather than as an empty preference.
+**An unexpressed dimension never excludes anyone.** A user who has declared no
+openness imposes no compatibility requirement, and a candidate who has declared
+none is excluded by no one's declaration. The system never infers orientation,
+never infers gender, and never widens a declaration to make a pool look
+healthier. A user who has declared nothing is told so in settings as a
+sentence, not shown an empty preference that silently excludes them.
+
+The same rule means a like can never lead to a pair that discovery would have
+refused: the pair-wise test is evaluated identically at browse time and at
+match time.
 
 ## 4. Candidate eligibility
 
@@ -133,9 +140,12 @@ Two stages, in this order:
 **Stage 0 — viewer gate (page level, before any candidate is considered).**
 
 - G1. The viewer is discoverable (`isDiscoverableIdentity` over
-  `DiscoveryStandingProjection`). If not, discovery is closed entirely.
+  `IdentityStandingProjection`). If not, discovery is closed entirely.
 - G2. The viewer holds the `browse_discovery` capability
   (`AccountStandingProjection`). If not, discovery is closed entirely.
+- G3. The viewer's own profile is complete (`profile.completed`). A viewer who
+  has not finished a profile has nothing to browse against, and sending them a
+  feed anyway is a way to lose them during onboarding.
 
 The gate is first because evaluating candidates for a viewer who is not
 themselves eligible is work over data that viewer has no right to see, and
@@ -147,16 +157,17 @@ an empty page.
 | # | Rule | Denies when | Why it sits here |
 |---|------|-----------|------------------|
 | R1 | **Identity** | The candidate's identity is not `verified` | Unconditional and first. This is commitment 1: the only discoverable identity state is `verified`. No preference, no rank, no experimental flag can precede it, and no other rule may be evaluated on behalf of a candidate that failed R1 |
-| R2 | **Account standing** | The candidate's account is `banned` or `suspended`, or lacks `browse_discovery` (may appear), or lacks `like` (may reciprocate) | After R1 because a candidate's standing is meaningless without a verified identity, and before everything relational because a candidate who cannot appear or cannot reciprocate is not a useful page slot. Risk state is **not** consulted: `high`/`critical` risk does not remove a candidate from discovery |
-| R3 | **Block, either direction** | A block edge exists between viewer and candidate in *either* direction | Early, because a block is absolute and undiscussable. It outranks every preference and every earlier decision by both parties, including a like the other party already gave |
-| R4 | **Self** | Candidate is the viewer | Absolute, cheap, and independent of any data drift |
-| R5 | **Already decided** | The viewer has an active like on the candidate, or a pass on the candidate within the suppression window (§5.2) | The viewer's own prior decision is the strongest product signal available and must never be overridden by a later page |
-| R6 | **Already matched** | A match exists between viewer and candidate | A match is a resolved relationship; re-showing the profile invites a duplicate like and a duplicate match |
-| R7 | **Hidden / paused** | The candidate's profile is not `live`, or they have set `hidden` (the profile state machine's `live\|paused\|hidden` transitions) | Candidate-side, and therefore weaker than viewer-side state: it is the last fact about the candidate to consider. This consumes a *boolean* — is the profile presentable — never a completeness score, and never a rank |
-| P1 | **Age** | The candidate's age band falls outside `ageRange` | Preference filter |
-| P2 | **Distance** | The candidate's coarse bucket exceeds `maxDistanceKm` | Preference filter |
-| P3 | **Gender** | The candidate's gender is not in `seekingGenders` | Preference filter |
-| P4 | **Orientation** | The pair is not orientation-compatible per §3.4 | Preference filter |
+| R2 | **Profile presentable** | The candidate's profile is not complete and `live` | After identity, because a profile is only a thing that can be shown once there is a verified person behind it. Consumes a *boolean* — never a completeness score, never a rank |
+| R3 | **Account standing** | The candidate's account is not visible in product (`banned`, or `suspended`), or lacks `browse_discovery` (may appear) or `like` (may reciprocate) | Before everything relational, because a candidate who cannot appear or cannot reciprocate is not a useful page slot. Risk state is **not** consulted: `high`/`critical` risk does not remove a candidate from discovery |
+| R4 | **Block, either direction** | A block edge exists between viewer and candidate in *either* direction | Early, because a block is absolute and undiscussable. It outranks every preference and every earlier decision by both parties, including a like the other party already gave |
+| R5 | **Self** | Candidate is the viewer | Absolute, cheap, and independent of any data drift |
+| R6 | **Already passed** | The viewer has a pass on the candidate within the 30-day window (§5.2) | The viewer's own prior decision, and never overridden by a later page |
+| R7 | **Already liked** | The viewer has a live like on the candidate | Same principle, one step later. A candidate who already liked the *viewer* is **not** excluded by this rule — liking them is how the match completes, so hiding them would strand a mutual |
+| R8 | **Already matched** | An **active** match exists between viewer and candidate | A match is a resolved relationship. Only an active match denies; an ended one does not, so an unmatched or block-ended pair is discoverable again |
+| P1 | **Age** | The candidate's age band falls outside the viewer's `ageRange` | Viewer's preferences only |
+| P2 | **Gender** | The candidate's gender is not in the viewer's `seekingGenders` | Viewer's preferences only |
+| P3 | **Distance** | The candidate's coarse bucket exceeds the viewer's `maxDistanceKm` | Viewer's preferences only |
+| P4 | **Mutual compatibility** | The pair fails the both-sides test of §3.4 | The only pair-wise filter; an unexpressed dimension never excludes |
 
 **Why denies precede filters.** Every deny rule is an absolute platform or user
 protection rule. Every filter is a preference. Running denies first means a
@@ -166,7 +177,7 @@ existence of people the viewer is not allowed to know about. It also means the
 exhaustion signal in §5.3 is computed over the set the viewer may actually see,
 which is the only set whose emptiness is safe to report.
 
-Filters are evaluated in the order P1→P4 purely for cost; among themselves they
+Filters P1–P4 are evaluated in that order purely for cost; among themselves they
 are commutative and the product makes no claim about which one is "responsible"
 for an empty page. The UI says which axes are active, never which one was
 applied first.
@@ -179,21 +190,22 @@ any user-visible message, and never inferable from timing or page size.
 
 ```ts
 type ExclusionReason =
-	| 'not_discoverable'      // R1
-	| 'account_standing'      // R2
-	| 'blocked'               // R3
-	| 'self'                  // R4
-	| 'already_decided'       // R5
-	| 'already_matched'       // R6
-	| 'candidate_hidden'      // R7
-	| 'preference_age'        // P1
-	| 'preference_distance'   // P2
-	| 'preference_gender'     // P3
-	| 'preference_orientation';// P4
+	| 'viewer_identity_not_verified'      // G1
+	| 'viewer_lacks_discovery_capability' // G2
+	| 'viewer_profile_not_complete'       // G3
+	| 'candidate_identity_not_verified'  // R1
+	| 'candidate_profile_not_complete'    // R2
+	| 'candidate_account_not_visible'     // R3
+	| 'blocked'                           // R4
+	| 'self_view'                         // R5
+	| 'already_passed'                    // R6
+	| 'already_liked'                     // R7
+	| 'already_matched'                   // R8
+	| 'age_out_of_range'                   // P1, viewer's preferences
+	| 'gender_out_of_scope'                // P2, viewer's preferences
+	| 'beyond_distance_limit'              // P3, viewer's preferences
+	| 'not_mutually_compatible';           // P4, requires both sides
 ```
-
-Aggregates of these codes are what #18 measures. They are not what the user
-sees.
 
 ### 4.3 Freshness
 
@@ -263,7 +275,7 @@ Three mechanisms, in order of strength:
 requested page, the remaining slots are **not** filled with ineligible
 candidates. There is no "people you may have missed", no "outside your
 distance", no "widen your search" auto-relax, no sponsored or boosted filler,
-and no fallback ordering that relaxes R1–R7. Every commitment in the overview is
+and no fallback ordering that relaxes R1–R8. Every commitment in the overview is
 a hard filter, and a hard filter that is relaxed under growth pressure is not a
 hard filter.
 
@@ -278,7 +290,7 @@ The response to a short or empty pool is a **state**, not a substitution:
 **The honesty rule.** A user who reaches the end of the eligible pool is told
 so, explicitly, in plain language, and is never handed a profile as filler to
 avoid that message. Concretely this forbids, at the code level: any query path
-that drops or reorders R1–R7; any "expand" flag on the page request; any
+that drops or reorders R1–R8; any "expand" flag on the page request; any
 secondary ranking that runs on a relaxed filter set; and any test fixture that
 asserts a page size of 10 without also asserting that every card on it passed
 the full rule list.
@@ -322,12 +334,12 @@ that takes four seconds is indistinguishable from a broken app.
 
 How the budget is met:
 
-- R1 and R2 are answered from O(1) in-memory projections
-  (`DiscoveryStandingProjection`, `AccountStandingProjection`). No identity
-  record, no evidence, no cross-domain call.
-- R3 is a membership test against the viewer's own block projection, whose size
+- R1, R2 and R3 are answered from O(1) in-memory projections
+  (`IdentityStandingProjection`, `AccountStandingProjection`, and the profile
+  completeness boolean). No identity record, no evidence, no cross-domain call.
+- R4 is a membership test against the viewer's own block projection, whose size
   is bounded by that user's block count, not by the platform.
-- R5 and R6 are index lookups on the viewer's `InteractionLedgerProjection`.
+- R6, R7 and R8 are index lookups on the viewer's `InteractionLedgerProjection`.
 - Only P1–P4 touch the candidate index, and the index is filtered by the
   primary deny predicates (identity = verified, standing in the eligible set)
   **before** preference predicates, so the expensive predicate is never
@@ -398,7 +410,7 @@ the pool.
 *Given* Dana blocked Eli,
 *when* Eli opens discovery, and separately when any other viewer opens discovery
 and Dana would otherwise be eligible,
-*then* Dana is denied at R3 in both cases, and the card is counted in neither the
+*then* Dana is denied at R4 in both cases, and the card is counted in neither the
 pool size nor the exhaustion message.
 
 **A5 — A restricted account cannot browse, and is told so honestly.**
@@ -410,7 +422,7 @@ removed capability, and he can still report and block.
 **A6 — A candidate who cannot reciprocate does not consume a page slot.**
 *Given* Greta is `verified` but `suspended`,
 *when* a viewer assembles a page,
-*then* Greta is denied at R2 and does not appear.
+*then* Greta is denied at R3 and does not appear.
 
 **A7 — A pass suppresses for 30 days and then expires.**
 *Given* Hana passes a candidate on day 0,
@@ -428,8 +440,8 @@ eligible again, ranked after never-seen candidates.
 **A9 — Already-matched and already-liked profiles never reappear.**
 *Given* Jun likes Kim, and Kim has liked Jun back so a match exists,
 *when* Jun opens discovery,
-*then* Kim is denied at R5 for the live like and R6 for the match, and does not
-appear.
+*then* Kim is denied at R7 for the live like and R8 for the active match, and
+does not appear.
 
 **A10 — The pool is reported honestly, never padded.**
 *Given* Leah's eligible pool contains 3 candidates,

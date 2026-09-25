@@ -241,11 +241,18 @@ export function captureEvidence(
 /**
  * A human working the queue. `identityPrivacyRole` is a separate appointment
  * outside the moderation hierarchy, not a moderator seniority level.
+ *
+ * `automated` must be set by the caller that resolved the actor's identity, and
+ * it exists so that commitment 2 — automation never enforces — is checkable
+ * rather than merely documented. A non-null actor id is not evidence of a
+ * human: any service can mint an id. Only this flag distinguishes them, and
+ * `canWorkCase` refuses an automated actor outright.
  */
 export interface ModeratorActor {
   readonly actorId: ActorId;
   readonly isLead: boolean;
   readonly identityPrivacyRole: boolean;
+  readonly automated: boolean;
 }
 
 export function clearanceFor(actor: ModeratorActor): ReviewerClearance {

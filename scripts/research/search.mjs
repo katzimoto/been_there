@@ -125,13 +125,26 @@ async function hn(query, flags) {
   }));
 }
 
-async function fetchRecord(id) {
-  if (id.includes('openalex.org/works/')) {
-    const slug = id.split('/works/')[1];
-    return getJson(`https://api.openalex.org/works/${slug}`);
+async function fetchRecord(rawId) {
+  const id = rawId.trim();
+  // OpenAlex returns `https://openalex.org/W123` from list endpoints but
+  // documents the record URL as `.../works/W123`; accept either, and a bare
+  // work id, so every id this script prints can be fed straight back in.
+  const openAlexMatch = id.match(/openalex\.org\/(?:works\/)?(W\d+)/);
+  if (openAlexMatch) {
+    return getJson(`https://api.openalex.org/works/${openAlexMatch[1]}`);
   }
-  if (id.includes('arxiv.org/abs/')) {
-    return arxiv(id.split('/abs/')[1], { limit: 1 });
+  if (/^W\d+$/.test(id)) {
+    return getJson(`https://api.openalex.org/works/${id}`);
+  }
+  const arxivMatch = id.match(/arxiv\.org\/abs\/(.+)$/);
+  if (arxivMatch) {
+    return arxiv(arxivMatch[1], { limit: 1 });
+  }
+  if (!/^\d+$/.test(id)) {
+    throw new Error(
+      `unrecognised id '${id}': expected an OpenAlex work id or URL, an arXiv abs URL, or a Hacker News object id`,
+    );
   }
   return getJson(`https://hn.algolia.com/api/v1/items/${id}`);
 }
@@ -160,7 +173,12 @@ if (command === 'fetch') {
     console.error('fetch requires an id: an OpenAlex work URL, an arXiv abs URL, or an HN object id.');
     exit(1);
   }
-  console.log(JSON.stringify(await fetchRecord(id), null, 2));
+  try {
+    console.log(JSON.stringify(await fetchRecord(id), null, 2));
+  } catch (error) {
+    console.error(`Fetch failed: ${error.message}`);
+    exit(1);
+  }
   exit(0);
 }
 

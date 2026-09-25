@@ -43,11 +43,22 @@ Two structural rules this feature inherits and must not soften:
 
 ## 3. Every profile field
 
-Visibility vocabulary: **discovery** = shown on the card in discovery;
-**match-only** = shown after a mutual match, to the matched user;
-**owner-only** = never rendered to anyone else, in any surface.
+Visibility vocabulary: **discovery** = can be shown on the card in discovery;
+**match-only** = shown after a mutual match, to the matched user, and not
+earlier; **owner-only** = never rendered to anyone else, in any surface.
 
-| Field | Required | Limits | Validation | Sensitivity | Visibility |
+**Who owns which half.** This table fixes the field inventory and each field's
+**maximum** visibility — what the product is capable of showing. The per-account
+**default** and the owner's ability to narrow it are the privacy layer's
+([Privacy & User Settings §4](./privacy-and-user-settings.md)): a field listed as
+`discovery` here may still default to match-only for a given account, and the
+card renders whatever the effective visibility is. Nothing in this document may
+widen a visibility that the privacy layer has narrowed, and the privacy layer may
+not invent a field that this document does not define. The two documents agree on
+the defaults: `displayName` and `bio` are public by default, narrowable to
+match-only per field, and `occupation`/`education` are not v0.1 fields.
+
+| Field | Required | Limits | Validation | Sensitivity | Max visibility |
 |---|---|---|---|---|---|
 | `displayName` | yes | 2–40 graphemes | no URLs, no phone numbers, no handles, no "admin/support/mod" style reserved terms, no pure emoji, not identical to another account's name after casefold+strip | `public` | discovery |
 | `ageBand` | derived | 5-year band, floor 18 | not user-editable; derived by Platform from `dateOfBirth` | `public` | discovery (as a phrase, never a number) |
@@ -81,6 +92,25 @@ a field that trips the content screen is **rejected at save with the offending
 field named** (never silently), and repeated rejections on the same field publish
 a signal to Trust & Safety. A content rejection is not an account restriction and
 creates no case on its own.
+
+**`displayName` and impersonation.** `displayName` is public by default, which
+makes it the one profile field a stranger can put into a search box. A curated
+public-figure list is therefore part of R1, and the handling is deliberately not a
+rejection:
+
+| Situation | Behaviour |
+|---|---|
+| Name matches a public figure, plausibly impersonating them | The name is **accepted** — plenty of real people share a famous name, and refusing them is its own harm. The name's effective visibility is held at `matches_only` and the user is asked to either add something that makes it theirs or keep it private. |
+| The user does not resolve it | The name stays match-only indefinitely. Nothing else about the profile is affected, and the account is not restricted. |
+| The user resolves it, or the name is a common-name collision | The name becomes public as normal. |
+| Any of the above | The account is flagged for a possible impersonation subject — `internal`, sent to Trust & Safety, which decides whether a case is opened. A human, not the string match, judges impersonation. |
+
+This is a content gate, the same shape as photo screening: a per-field outcome,
+never an account state, never an automatic enforcement, and never a verdict the
+user is shown as a fact about themselves. A name-match does not block discovery
+by itself; a name-match that a moderator confirms as impersonation is handled
+under the ordinary case route ([#14](https://github.com/katzimoto/been_there/issues/14)),
+with the usual `caseId` requirement.
 
 <!-- contract sketch: illustrative shape, not an implemented API -->
 ```ts
@@ -198,8 +228,8 @@ set of people. Preference-side compatibility logic lives in
 
 ### 5.2 Interest catalogue
 
-Forty values in eight groups, chosen so each group has two or three plausible
-options and a person can pick three without repeating themselves:
+Forty values in eight groups, small enough that a person finds three quickly and
+large enough that most people recognise themselves in at least one group:
 
 | Group | Values |
 |---|---|
@@ -209,7 +239,7 @@ options and a person can pick three without repeating themselves:
 | Sport | climbing, running, cycling, swimming, football, yoga |
 | Learning | languages, cooking classes, volunteering, courses, reading |
 | Life | travel, pets, cats, dogs, gardening, home improvement |
-| People | big groups, small groups, new friends, community, parties |
+| People | big groups, small groups, new friends, community, parties, board games |
 | Slow | walks, coffee, museums, quiet nights in, live music |
 
 Duplicates across groups are deduplicated at selection time (a value appears
@@ -261,7 +291,7 @@ the match view shows both. An unanswered prompt is never shown to anyone.
 | Primary photo | **Index 0, always.** The card's image, the image used in a match, the image other people see first. There is no "auto-pick the best" heuristic and no separate "set as primary" flag that can disagree with the order. |
 | Minimum resolution | Short edge ≥ 600 px, aspect ratio between 2:3 and 3:2. A face must occupy roughly 25–70% of the frame height — a distant shot and a cropped forehead both fail. |
 | Maximum size | 10 MB; JPEG, PNG, or WebP. HEIC is converted on upload; the stored derivative is what everyone sees. |
-| Derivatives | One full-width and one card-sized derivative, both served through the media service. No original upload is served to another user. |
+| Derivatives | One full-width and one card-sized derivative, both served through the media service. No original upload is served to another user. Metadata is **stripped at ingest**, not at serve time: the stored derivative carries no EXIF, no GPS, no capture timestamp and no device identifier. Stripping at ingest is the requirement that matters, because a photo is the most identifying artefact on a profile and a retained original is a retained location history. |
 | Accessibility | Every photo requires alt text (≤ 120 chars) for the owner's own audit trail; other users see the owner's description as an optional caption, never auto-generated identity claims. |
 
 ### 6.2 What a photo may not contain
@@ -269,7 +299,7 @@ the match view shows both. An unanswered prompt is never shown to anyone.
 | Prohibited | Why |
 |---|---|
 | Anyone who is not the account holder, other than as incidental background | A profile is a claim about one person. Extra faces are a route to a stalker's shortlist. |
-| Anyone who appears to be under 18 | Hard refusal, no appeal path at the automated layer: the content is routed to a moderator instead of being auto-approved or auto-rejected. |
+| Anyone who appears to be under 18 | Routed to a moderator rather than auto-approved or auto-rejected; a photo that clearly contains a minor is never published, and the automated layer never makes that call on its own. |
 | Nudity, explicit content, fetish content | Safety and legal exposure. |
 | Weapons in use, gore, graphic violence | Same. |
 | Text overlays, memes, slogans, dating-app screenshots | A dating-app screenshot is a fabricated-match scam, and text overlays defeat screening. |
@@ -325,7 +355,7 @@ This is the common case and it must not be a cliff.
 | The primary photo is rejected and others are approved | The next approved photo is promoted to index 0 automatically; the profile stays `live`; `profile.photo_set_updated` is published with the new count. | "We changed your main photo — here's why the old one wasn't approved." |
 | The primary photo is rejected and **no** approved photo remains | The profile moves `live` → `incomplete`, leaves discovery, and stays in existing matches with a placeholder card. The user is asked for one more photo. | "You're not appearing in discovery until you add a photo we can approve. Your matches are still there." |
 | A photo goes to `needs_human` | It is held out of the live set as if rejected, and the user is told it is "being checked" — not that it failed. | "One photo is being checked. It'll appear if it's approved." |
-| A photo is removed by a moderator from an open case | The photo is withdrawn everywhere, including in existing matches and conversations already delivered. This is the one case of retroactive removal (see §9). | The photo disappears; the user is told it was removed without the case detail. |
+| A photo is removed by a moderator from an open case | The photo is withdrawn everywhere, including in existing matches and conversations already delivered. This is the one case of retroactive removal (see §9.1). | The photo disappears; the user is told it was removed without the case detail. |
 
 Removal never cascades to a punishment: a rejected photo does not hide the
 profile, does not count toward risk by itself, and does not require a human.
@@ -353,7 +383,6 @@ draft ──publish──▶ incomplete ──all rules satisfied──▶ live
 incomplete ◀──any rule broken── live
 live ⇄ paused                      (owner toggle, both directions)
 live|paused ──owner hide──▶ hidden ──unhide──▶ incomplete   (never straight to live)
-hidden ──unhide──▶ incomplete      (must re-pass the rules; no grandfathering)
 ```
 
 `hidden → live` does not exist. A hidden profile that has drifted out of
@@ -374,7 +403,7 @@ Each rule is a boolean. The threshold is: **all rules true**.
 
 | # | Rule | Fails when |
 |---|---|---|
-| R1 | `displayName` present and valid | empty, > 40 graphemes, fails the reserved-term or uniqueness screen |
+| R1 | `displayName` present and valid | empty, > 40 graphemes, fails the reserved-term, impersonation, or uniqueness screen |
 | R2 | `gender` selected | null or outside the vocabulary |
 | R3 | `bio` between 30 and 500 characters and passes the content screen | shorter, longer, or rejected by the screen |
 | R4 | `datingIntent` selected from the vocabulary | null or an unknown value |
@@ -473,10 +502,11 @@ determined evader:
   commitment 4 in practice: evidence for a case is retained independently of the
   content that produced it.
 - **Identity churn.** Exceeding the 24-hour identity-affecting budget does not
-  merely queue the change: the change is applied to the profile but the card does
-  not re-enter the "recently edited" surface, and the pattern publishes a signal
-  to Trust & Safety. A detector proposing, a human deciding — the same shape as
-  every other safety signal in the system.
+  block the edit and does not queue it forever: the change is applied, the
+  profile's card holds the previous identity-facing values until the likeness
+  re-check passes, and the pattern publishes a signal to Trust & Safety. A
+  detector proposing, a human deciding — the same shape as every other safety
+  signal in the system.
 - **Enforcement is not involved.** None of these limits sets an account state
   and none of them appears to the user as a restriction. A rate-limited edit is
   refused with a plain message and a time.
@@ -531,9 +561,9 @@ determined evader:
 
 - *Given* any two profiles and any API response in either direction,
   *when* the response is inspected,
-  *then* no numeric compatibility value is present, no progress/meter/rating UI
-  * exists, and the way compatibility is conveyed is declared-intent chips plus
-  declared differences, as in §4.3.
+  *then* no numeric compatibility value is present, no progress meter, ring,
+  grade or star rating exists anywhere in the client, and the way compatibility
+  is conveyed is declared-intent chips plus declared differences, as in §4.3.
 
 **P7 — Completeness is a gate, not a score**
 
@@ -561,6 +591,16 @@ determined evader:
   disappears from match surfaces with a "profile unavailable" placeholder, and
   unhiding returns it to `incomplete` rather than to `live`.
 
+**P10 — A famous name is not a blocked account**
+
+- *Given* a user who sets a `displayName` that matches a public figure,
+  *when* the profile is published,
+  *then* the name is accepted, the profile is not blocked, no account state
+  changes, and the name's effective visibility is `matches_only` with an
+  invitation to make it distinctive or keep it private.
+- *And* the account is flagged for a possible impersonation subject, which reaches
+  a human as a possible case and is never a decision the string match makes.
+
 ## 11. Events
 
 Names are registered in the Platform catalogue and imported, never re-declared.
@@ -572,7 +612,7 @@ count bucket, never a value.
 | `profile.published` | analytics | `surface` | `incomplete` → `live` — the funnel terminal for [Account & Onboarding §11](./account-and-onboarding.md) |
 | `profile.state_changed` | analytics | `from`, `to` ∈ `draft incomplete live paused hidden` | profile state only; never the account state |
 | `profile.updated` | analytics | `changed_field_count_bucket`, `changed_field` (field **name** enum) | which field changed, not what it says |
-| `profile.photo_uploaded` | analytics | `reason_code`, `bytes_bucket` | upload accepted for screening |
+| `profile.photo_uploaded` | analytics | `bytes_bucket` (the registered `reason_code` carries the upload source, not a verdict) | upload accepted for screening |
 | `profile.photo_rejected` | analytics | `reason_code` (content screen) | content gate refused a photo |
 | `profile.photo_set_updated` | analytics | `photo_count_bucket` | order/count changed, including automatic primary promotion |
 | `identity.duplicate_photo_signal` | **audit** (`sensitive`) | `match_kind: 'deleted_subject' \| 'blocked_party'` | dedupe hit against a deleted, blocked, or banned subject — Trust & Safety only, never analytics |
@@ -591,12 +631,36 @@ about a safety judgement.
   that this is a real harm path — an abusive photo that the owner removes once
   they regret it — the fix is a tombstoned media ref, and it belongs in Platform's
   media design. Owner: Platform + Moderation. Unmeasured.
+- **A photo plus an opt-in coarse city is a triangulation path.** §6.1 requires
+  metadata stripped at ingest and §6.2 forbids identifiable surroundings, which
+  removes the cheap cases, but a photo of a recognisable building or landscape
+  plus a city name is still more identifying than either alone, and a display
+  name is not a comparable artefact. Whether that warrants a rule here (a
+  location-plausibility screen, or a stricter environment list) or belongs to
+  [Privacy & User Settings §9](./privacy-and-user-settings.md) as a design
+  review is undecided. This document does not add a `city` field; the card's only
+  location is the coarse distance bucket.
 - **Likeness threshold and its false-reject rate.** The number that separates
   "different person" from "bad lighting" is unmeasured, and
   [#1](https://github.com/katzimoto/been_there/issues/1) makes verification
   false-reject rate a primary success metric. A too-strict threshold removes real
   people from the product; a too-loose one admits the fake profile P8 exists to
   stop. Owner: Identity + Product. Blocks the threshold value.
+- **Default visibility of `displayName` and `bio`.** Resolved: both are public by
+  default and narrowable to match-only per field, per
+  [Privacy & User Settings §4](./privacy-and-user-settings.md). Recorded here
+  because the card spec in [Preferences & Discovery](./preferences-and-discovery.md)
+  depends on it — a card that renders a name, a photo, an intent and a
+  240-character bio only exists under this default.
+- **`occupation` and `education` are not v0.1 fields** (§3), and the privacy
+  spec carries the same exclusion with the same reasoning, so the decision is on
+  the record in both places. If they are ever introduced they start match-only
+  and need a column in §3 plus a completeness decision.
+- **Size and maintenance of the public-figure list behind the §3 impersonation
+  hold.** A stale list produces false holds on ordinary people and misses every
+  new figure. Whether it is maintained by hand, seeded from a public dataset, or
+  restricted to a few categories is undecided. The hold is reversible and
+  non-punishing, so a miss costs a private name rather than a blocked account.
 - **Whether `displayName` uniqueness should be enforced at all.** It is currently
   a casefolded match, which stops two identical names and inconveniences a person
   whose name is genuinely common. Needs a decision record either way.

@@ -164,6 +164,16 @@ export class InMemoryAuditLog implements AuditSink, AuditReader {
 }
 
 /**
+ * Reads one record at a given clearance, returning the redacted view rather
+ * than the raw fields. The caller's clearance is the gate; the record's own
+ * classification is not. This is the function a moderation console calls, and
+ * the reason a record can be handed around a system without being read.
+ */
+export function readAuditRecord(record: AuditRecord, clearance: Clearance): RedactionResult {
+  return redact(record.fields, clearance);
+}
+
+/**
  * Types that must be audited regardless of how public their payload looks. An
  * identity status flip is `public` on the bus, but the audit log is where "who
  * was verified, when, and on whose authority" is reconstructable.
@@ -179,6 +189,10 @@ export const AUDIT_REQUIRED_PREFIXES: readonly string[] = [
 ];
 
 export const AUDIT_REQUIRED_TYPES: readonly string[] = [
+  // The identity spine's own event name (overview §4). It is `public` on the
+  // bus because a client must know whether the current user is verified — which
+  // is exactly why it must not also be a metrics input.
+  'identity_status.changed',
   'verification.anomaly',
   'message.reported',
   'risk.changed',

@@ -39,7 +39,7 @@ have, and with the ability to report surviving every way a relationship ends.
 | State | Owner | How this feature learns about it |
 |-------|-------|----------------------------------|
 | Like, pass, and match records, including match standing | Dating Core, this feature | local |
-| `IdentityState` | Identity & Verification | `identity_status.changed` → `DiscoveryStandingProjection` |
+| `IdentityState` | Identity & Verification | `identity_status.changed` → `IdentityStandingProjection` |
 | `AccountState` + capabilities | Moderation & Enforcement | `account_state.changed` → `AccountStandingProjection` |
 | Block edges | User Safety Controls | `BlockListProjection` |
 | Conversation state | Communication | `ConversationProjection`; unmatch publishes a request |
@@ -73,11 +73,12 @@ A like is accepted only if, at the moment the command is applied:
   `verified`). A user whose verification lapsed mid-session cannot like, and
   saying so is honest rather than letting them act on a platform state that no
   longer represents them.
-- Target and actor are both discoverable and neither is `banned` or
-  `suspended` (#11 rules R1, R2).
-- No block edge exists in **either** direction (#11 rule R3).
-- Target is not the actor (R4), and no match already exists between them (R6).
-  Liking someone you are already matched with is a no-op, not an error.
+- Target and actor are both discoverable, both have a presentable profile, and
+  neither is `banned` or `suspended` (#11 rules R1, R2, R3).
+- No block edge exists in **either** direction (#11 rule R4).
+- Target is not the actor (R5), and no *active* match already exists between
+  them (R8). Liking someone you are already matched with is a no-op, not an
+  error; an ended match is not a match and does not block a fresh one.
 
 Every one of these is re-evaluated at action time against current projections.
 A card served five minutes ago is not a licence to act on.
@@ -165,11 +166,12 @@ rather than hoped for in application code:
    | Both see a reciprocal like | The compare-and-set admits exactly one. The other observes the open match and is a no-op |
    | A's like is retried after a timeout | Idempotent on `(from, to)` (§3.3), so the retry is the same write |
 
-5. **The like response never claims a match speculatively.** A like returns
-   `pending` (no reciprocal like) or `matched` (a match now exists, because this
-   write created it or found it). Never "probably a match". Both parties'
-   `like.recorded` events are published regardless of which write won, so the
-   #18 funnel measures both sides of the mutual, not just the winning one.
+5. **Nothing claims a match speculatively.** `like.recorded` carries only the
+   like itself; it never carries an outcome, and no consumer infers one. The
+   only thing that tells a client a match exists is `match.created`. Both
+   parties' `like.recorded` events are published regardless of which write
+   won, so the #18 funnel measures both sides of the mutual, not just the
+   winning one.
 
 ### 4.3 Test obligations
 
@@ -227,17 +229,19 @@ told they have run out of matches, because that state does not exist.
 > **A like is private to the liker until it is mutual. No third party ever
 > learns that a specific person liked a specific person.**
 
-- `like.recorded` is `user` sensitivity and reaches only the domains that need
-  it — never a social graph, a public feed, or another user.
+- `like.recorded` is `internal` sensitivity and reaches only the domains that
+  need it — never a social graph, a public feed, or another user.
 - There is no "liked by N people" counter, no "people who liked X" list, and no
   candidate ordering that reveals who liked whom — which is one more reason
   #11's ordering is a deterministic function of `verifiedAt` and never a
   function of inbound likes.
 - The only disclosure is `match.created`, to both parties, and it discloses
   mutual interest and nothing else: not the date, not the content, not the
-  order of the two likes. The liker is told `pending` and nothing more. That is
-  a real product cost — a silent like is frustrating — and it is the cost of a
-  product where being liked cannot be used against you.
+  order of the two likes. The liker is told the like was sent and nothing more;
+  there is no "pending" or "mutual" state the liker can poll, because a state a
+  user watches without progress is worse than silence. That is a real product
+  cost — a silent like is frustrating — and it is the cost of a product where
+  being liked cannot be used against you.
 
 ### 6.2 Exceptions
 
@@ -283,10 +287,12 @@ Standing is not the same thing as the end of a match, and the two are kept apart
 on purpose. `dormant_target_unverified` and `restricted_by_target` are **not**
 ends: no `match.ended` is published, the match is still a match, and it becomes
 fully usable again by itself when the cause clears. Only the `closed_*` standings
-publish `match.ended`, with reason `'blocked'` when a block ended it,
-`'unmatched'` when a person unmatched, and `'declined'` when the party closed
-their own account. `unmatch.performed` is published only for the actor-initiated
-case, so an end nobody chose is never miscounted as a mutual decision.
+publish `match.ended`, and its `reason` is simply the match's new non-active
+status: `'ended_by_block'` when a block ended it, `'unmatched'` otherwise. There
+is no `declined` status and no declined state — a match is created `active` and
+leaves only by one of those two. `unmatch.performed` is published only for the
+actor-initiated case, so an end a block or a deletion caused is never
+miscounted as a mutual decision.
 
 **Why this matters.** The obvious implementation — filter the match list by the
 target's current standing — makes a moderated user's removal look identical to a
@@ -318,11 +324,15 @@ permanent-by-design (see open questions).
 | 7 | The other party is notified | Platform (notification) | §8.4 |
 | 8 | Funnel events published | This feature | For #18 |
 
-**Unmatch does not restore eligibility.** An unmatched profile does not return
-to the other party's browse pool: re-deciding is a new act, and a user who
-unmatched does not get a second, silent look at the same person. This is stated
-explicitly because "unmatch then re-discover" is a plausible implementation
-accident and it would make unmatch meaningless as a signal of disinterest.
+**Unmatch ends the match, not the pool entry.** The ledger keeps the record:
+`already_matched` fires only for an *active* match, so once a match is ended —
+by an unmatch, a block, or a deletion — the pair stops being excluded on that
+ground, and the pair becomes discoverable again. Re-deciding is still a new
+act, and the passes that either party made while the match was live remain
+suppressed on their own 30-day window. This is stated explicitly because the
+two failure modes here are both silent: an implementation that leaves an ended
+match excluding the pair, and one that clears the ledger on unmatch. Neither is
+intended, and the second is worse, because it would erase evidence.
 
 ### 8.3 The rule that matters most
 
@@ -375,12 +385,18 @@ is in [`./preferences-and-discovery.md`](./preferences-and-discovery.md) §8.
 
 | Event | Sensitivity | Emitted when | Payload fields |
 |-------|-------------|--------------|----------------|
-| `like.recorded` | `user` | A like is written for the first time. **Not** on a duplicate or retry | `subjectId` (liker), `targetId`, `likeId`, `outcome: 'pending'\|'matched'` |
-| `like.withdrawn` | `user` | A like is withdrawn — superseded by a later pass on the same target, or killed by a block or an unmatch | `likeId`, `reason: 'superseded_by_pass'\|'blocked'\|'unmatched'` |
-| `pass.recorded` | `user` | A pass is written | `subjectId`, `targetId` — no target identity beyond the viewer's own record, and no retention of a pass beyond the suppression window except as evidence |
-| `match.created` | `user` | Exactly once per match episode (M1) | `matchId`, `partyIds: [a, b]`, `matchedAt` |
-| `match.ended` | `user` | A match stopped being usable, for any reason. This is the domain fact; who caused it is a reason on the event | `matchId`, `reason: 'blocked'\|'unmatched'\|'declined'`, `initiatorId` where there is one |
-| `unmatch.performed` | `user` | An **actor-initiated** unmatch command is accepted. Emitted only when a person did it, so an end caused by a block, a deletion, or a moderator stays distinguishable from one a person chose | `matchId`, `initiatorId`, `idempotencyKey` |
+| `like.recorded` | `internal` | A directed like exists. Private intent: rendered to the recipient, never to anyone else. **Not** on a duplicate or retry | `likeId`, `from`, `to` |
+| `like.withdrawn` | `internal` | A **one-sided** like was retracted before it became a match — superseded by a pass, or killed by a block or an unmatch while still one-sided | `likeId`, `from`, `to` |
+| `pass.recorded` | `internal` | The passer asked not to see the candidate. The most private interaction fact this domain holds | `passId`, `from`, `to` |
+| `match.created` | `internal` | Exactly once per match episode (M1): two reciprocal likes produced exactly one match for the pair | `matchId`, `participants: [a, b]`, `likeIds: [a, b]`, `conversationId` |
+| `match.ended` | `internal` | A match left the `active` status. The cause is the new status itself, not a separate narrative | `matchId`, `reason: 'unmatched'\|'ended_by_block'`, `actorId: UserId\|'system'`, `endedAt`, `conversationRetained: true` |
+| `unmatch.performed` | `internal` | An **actor-initiated** unmatch command is accepted. Emitted only when a person did it, so an end a block or a deletion caused stays distinguishable from one a person chose | `matchId`, `actorId`, `idempotencyKey` |
+
+The envelope sensitivity of every Dating Core event is `internal`, because each
+one carries a decision that a user would consider private. The *fields* inside
+stay classified per field: a card's display name is `public`, a like record is
+user data, and nothing here is ever promoted to a lower class to make an
+analytics query easier.
 
 The recipient's "you were liked" surface is **not** a second event of this
 domain. It is an inbox projection derived from `like.recorded` for the target by
@@ -392,8 +408,10 @@ notification signal must never become a competing one.
 
 Constraints:
 
-- The funnel measures `pending` and `matched` outcomes on `like.recorded`, so
-  match-rate needs no second event and no join.
+- Match rate is computed by joining `like.recorded` to `match.created` through
+  the two `likeIds` the match carries. No outcome field is duplicated onto the
+  like, because a second place to record "this became a match" is a second
+  place to get it wrong.
 - `like.recorded` is emitted once per like. A duplicate like emits nothing, so
   a bot cannot inflate the funnel by double-tapping.
 - No event in this table carries identity evidence, an exact location, a
@@ -410,7 +428,8 @@ list, they can message each other, and either may later unmatch.
 **A2 — A one-sided like discloses nothing.**
 *Given* Rosa likes Sam and Sam has not liked Rosa, *when* Sam views any surface
 of the product, *then* Sam learns nothing about the like — no counter, no list,
-no ordering change, no notification — and Rosa sees `pending`.
+no ordering change, no notification — and Rosa is told only that her like was
+sent.
 
 **A3 — Liking twice creates one like and one match.**
 *Given* Tina likes Uma, *when* Tina likes Uma again, including via a retried

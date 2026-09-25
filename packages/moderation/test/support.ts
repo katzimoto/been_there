@@ -4,11 +4,13 @@ import {
   type CorrelationId,
   type ReportId,
   type Result,
+  type RiskState,
   type UserId,
   castId,
 } from '@been-there/core';
 import {
   type AuditLog,
+  type CaseIntake,
   type Case,
   type ContextOptions,
   type ModerationContext,
@@ -71,6 +73,7 @@ export function harness(options: ContextOptions = {}): Harness {
   const ctx = createContext({ ...options, audit, now: clock.now });
   return { ctx, audit, clock };
 }
+
 export const REPORTER: UserId = castId<'UserId'>('u-reporter');
 export const SUBJECT: UserId = castId<'UserId'>('u-subject');
 export const OTHER_SUBJECT: UserId = castId<'UserId'>('u-other');
@@ -78,16 +81,19 @@ export const MODERATOR: ModeratorActor = {
   actorId: castId<'ActorId'>('mod-rivera'),
   isLead: false,
   identityPrivacyRole: false,
+  automated: false,
 };
 export const LEAD: ModeratorActor = {
   actorId: castId<'ActorId'>('mod-lead'),
   isLead: true,
   identityPrivacyRole: false,
+  automated: false,
 };
 export const IDENTITY_OFFICER: ModeratorActor = {
   actorId: castId<'ActorId'>('privacy-1'),
   isLead: false,
   identityPrivacyRole: true,
+  automated: false,
 };
 
 export const CORRELATION: CorrelationId = castId<'CorrelationId'>('corr-1');
@@ -142,6 +148,13 @@ export function makeReport(h: Harness, options: MakeReportOptions = {}): Result<
   return submitted.ok ? { ok: true, value: submitted.value.report } : submitted;
 }
 
+export function submitAndTriage(h: Harness, options: MakeReportOptions = {}): Report {
+  const report = succeeded(makeReport(h, options));
+  return succeeded(
+    triageReport(h.ctx, { report, moderatorId: MODERATOR.actorId, correlationId: CORRELATION }),
+  );
+}
+
 /** Report → triage → case: the path a queue actually walks. */
 export function openCaseFromReport(h: Harness, report: Report, actor: ModeratorActor = MODERATOR): Case {
   const triaged = succeeded(
@@ -157,33 +170,54 @@ export function openCaseFromReport(h: Harness, report: Report, actor: ModeratorA
   ).moderationCase;
 }
 
+/** The triaged report and the case it opened, for tests about the report itself. */
+export function triagedCaseFromReport(
+  h: Harness,
+  options: MakeReportOptions = {},
+): { readonly report: Report; readonly moderationCase: Case } {
+  const report = submitAndTriage(h, options);
+  const opened = succeeded(
+    openCase(h.ctx, {
+      source: 'user_report',
+      report,
+      openedBy: MODERATOR.actorId,
+      correlationId: CORRELATION,
+    }),
+  );
+  return { report, moderationCase: opened.moderationCase };
+}
+
 /** Case → assigned → in_review, so a decision becomes eligible. */
 export function caseInReview(h: Harness, moderationCase: Case, actor: ModeratorActor = MODERATOR): Case {
   const assigned = succeeded(assignCase(h.ctx, { moderationCase, actor, correlationId: CORRELATION }));
   return succeeded(startCaseReview(h.ctx, { moderationCase: assigned, actor, correlationId: CORRELATION }));
 }
 
-export function trustSafetyIntake(subjectId: UserId = SUBJECT) {
+export function trustSafetyIntake(
+  riskState: RiskState = 'critical',
+): Extract<CaseIntake, { source: 'trust_safety_review' }> {
   return {
-    source: 'trust_safety_review' as const,
-    subjectId,
+    source: 'trust_safety_review',
+    subjectId: SUBJECT,
     riskAssessmentId: castId<'RiskAssessmentId'>('risk-9'),
-    riskState: 'critical' as const,
+    riskState,
     detectors: ['velocity', 'duplicate_device'],
     digest: 'sha256:risk-9',
-    openedBy: 'system' as const,
+    openedBy: 'system',
     correlationId: CORRELATION,
   };
 }
 
-export function identityIntake(subjectId: UserId = SUBJECT) {
+export function identityIntake(
+  anomaly = 'liveness provider disagreement',
+): Extract<CaseIntake, { source: 'identity_anomaly' }> {
   return {
-    source: 'identity_anomaly' as const,
-    subjectId,
+    source: 'identity_anomaly',
+    subjectId: SUBJECT,
     verificationId: castId<'VerificationId'>('ver-3'),
-    anomaly: 'liveness provider disagreement',
+    anomaly,
     digest: 'sha256:ver-3',
-    openedBy: 'system' as const,
+    openedBy: 'system',
     correlationId: CORRELATION,
   };
 }

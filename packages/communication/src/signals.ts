@@ -9,7 +9,6 @@ import type {
   EventId,
   MatchId,
   MessageId,
-  SubjectId,
   UserId,
 } from '@been-there/core';
 import type { ConversationState } from './conversation.js';
@@ -71,7 +70,7 @@ export interface FrictionAppliedSignal {
 export interface EvidenceCapturedSignal {
   readonly caseId: CaseId;
   readonly conversationId: ConversationId;
-  readonly subjectId: SubjectId;
+  readonly subjectId: UserId;
   readonly requestedByUserId: UserId;
   readonly capturedAt: Date;
   readonly scopedMessageCount: number;

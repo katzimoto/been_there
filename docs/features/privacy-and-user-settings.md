@@ -48,29 +48,31 @@ observes any change in behaviour caused by this".
 | 5 | `show_me_distance` | boolean | `true` | self | A matched counterpart sees the distance band instead of "Nearby", and can tell the difference. |
 | 6 | `hide_me_from_search` | boolean | `false` | self | A matched counterpart cannot be found by name in search. |
 | **Privacy** | | | | | |
-| 7 | `profile_visibility` | `public` \| `matches_only` | `public` | self | A non-matched candidate sees the profile card either way; `matches_only` hides the free-text fields from non-matches. |
-| 8 | `exact_location_sharing` | enum: `off` \| `band_only` \| `band_and_city` | `band_only` | self | A matched counterpart may see the coarse band; only `band_and_city` adds city. Exact coordinates are never an option. |
-| 9 | `read_receipts` | boolean | `true` | self | A matched counterpart sees "read" or does not. |
-| 10 | `last_active_visibility` | `nobody` \| `matches` \| `everyone` | `matches` | self | A matched counterpart sees last active. `nobody` hides it; `everyone` is not offered in v0.1 (see open questions). |
-| 11 | `photo_visibility` | `all` \| `matches_only` | `all` | self | A non-matched candidate sees a subset of photos. |
+| 7 | `display_name_visibility` | `public` \| `matches_only` | `public` | self | A non-matched candidate sees a display name unless narrowed. Never a full legal name. |
+| 8 | `bio_visibility` | `card_truncated` \| `matches_only` | `card_truncated` | self | A non-matched candidate sees a truncated bio; a match sees the full text. |
+| 9 | `interests_visibility` | `public` \| `matches_only` | `public` | self | A non-matched candidate sees interests unless narrowed. |
+| 10 | `exact_location_sharing` | enum: `off` \| `band_only` \| `band_and_city` | `band_only` | self | A matched counterpart may see the coarse band; only `band_and_city` adds a coarse area name. Exact coordinates are never an option. |
+| 11 | `read_receipts` | boolean | `true` | self | A matched counterpart sees "read" or does not. |
+| 12 | `last_active_visibility` | `nobody` \| `matches` \| `everyone` | `matches` | self | A matched counterpart sees last active. `nobody` hides it; `everyone` is not offered in v0.1 (see open questions). |
+| 13 | `photo_visibility` | `all` \| `matches_only` | `all` | self | A non-matched candidate sees a subset of photos. |
 | **Safety** | | | | | |
-| 12 | `block_list` | derived view over `block.changed` events | empty | self | Nobody. Not the blocked user, not any product surface. |
-| 13 | `report_history` | derived view over `report.submitted` events | empty | self | Only the user. Never the reported user. |
-| 14 | `auto_hide_reported_profiles` | boolean, not user-toggleable | always `true` | — | A user reported for a confirmed violation is not shown in discovery to anyone until lifted. |
-| 15 | `block_removes_everywhere` | invariant, not user-toggleable | always `true` | — | The blocking user is not shown the blocked user's profile, match, or messages on any surface. |
+| 14 | `block_list` | derived view over `block.changed` events | empty | self | Nobody. Not the blocked user, not any product surface. |
+| 15 | `report_history` | derived view over `report.submitted` events | empty | self | Only the user. Never the reported user. |
+| 16 | `auto_hide_reported_profiles` | boolean, not user-toggleable | always `true` | — | A user reported for a confirmed violation is not shown in discovery to anyone until lifted. |
+| 17 | `block_removes_everywhere` | invariant, not user-toggleable | always `true` | — | The blocking user is not shown the blocked user's profile, match, or messages on any surface. |
 | **Notifications** | | | | | |
-| 16 | `push_likes` | boolean | `false` | self | The counterpart learns nothing. |
-| 17 | `push_messages` | boolean | `true` | self | The counterpart learns nothing. |
-| 18 | `push_matches` | boolean | `true` | self | The counterpart learns nothing. |
-| 19 | `email_digest` | boolean | `true` | self | The counterpart learns nothing. |
-| 20 | `email_discovery_digest` | boolean | `true` | self | The counterpart learns nothing. |
-| 21 | `quiet_hours` | `{ from, to }` local time, or `off` | `22:00`–`08:00` | self | Nobody. Critical notifications ignore it — see [Notifications](./notifications.md) §5. |
+| 18 | `push_likes` | boolean | `false` | self | The counterpart learns nothing. |
+| 19 | `push_messages` | boolean | `true` | self | The counterpart learns nothing. |
+| 20 | `push_matches` | boolean | `true` | self | The counterpart learns nothing. |
+| 21 | `email_digest` | boolean | `true` | self | The counterpart learns nothing. |
+| 22 | `email_discovery_digest` | boolean | `true` | self | The counterpart learns nothing. |
+| 23 | `quiet_hours` | `{ from, to }` local time, or `off` | `22:00`–`08:00` | self | Nobody. Critical notifications ignore it — see [Notifications](./notifications.md) §5. |
 | **Account** | | | | | |
-| 22 | `date_of_birth` / age gate | date, attested at signup | attested | self | Age band only is public. The exact date is `user` and appears in no product surface. |
-| 23 | `account_deletion` | action, not a stored setting | — | self | Nobody. The account leaves discovery. |
-| 24 | `data_export` | action | — | self | Nobody. Delivers a class-`user` archive to the owner. |
-| 25 | `contact_email` | email address | from signup | self | Nobody. Used for critical notifications; never rendered in a profile. |
-| 26 | `marketing_email` | boolean | `false` | self | Nobody. Kept separate from all transactional mail precisely because transactional mail is not suppressible. |
+| 24 | `date_of_birth` / age gate | date, attested at signup | attested | self | Age band only is public. The exact date is `user` and appears in no product surface. |
+| 25 | `account_deletion` | action, not a stored setting | — | self | Nobody. The account leaves discovery. |
+| 26 | `data_export` | action | — | self | Nobody. Delivers a class-`user` archive to the owner. |
+| 27 | `contact_email` | email address | from signup | self | Nobody. Used for critical notifications; never rendered in a profile. |
+| 28 | `marketing_email` | boolean | `false` | self | Nobody. Kept separate from all transactional mail precisely because transactional mail is not suppressible. |
 
 Nothing in this table is a Map or a free-form bag: every setting is a named,
 versioned field in a read-model projection, so adding one is a reviewable diff.
@@ -163,25 +165,32 @@ eligible to see the profile at all — which, per the overview's commitment 1,
 means only to users whose own identity state is `verified`. An unverified viewer
 sees nothing; this table is only about the `verified`-viewer case.
 
+**Ownership split.** [Profile & Personalization](./profile-and-personalization.md)
+§3 owns the field inventory and each field's **maximum** visibility — what the
+product is ever willing to render. This section owns the **per-account default
+and the override**: what a user sees before they change anything, and how far
+they may narrow it. A default here can never exceed the maximum there, and
+adding a field to #10 without a row here means it has no default and no
+privacy override, which is a gap to close rather than a licence to render it.
+
 | Field | Default visibility | Overridable to | Notes |
 |-------|--------------------|----------------|-------|
-| `display_name` | `matches_only` | `public` | Never a full legal name. Never rendered to a non-match by default, because an unmatched display name plus a city is a targeting aid. |
+| `display_name` | `public` | `matches_only` | Never a full legal name. A name on a curated public-figure list is held at `matches_only` — see §4.1. |
 | `age_band` | `public` | — | Five-year bands only, floored at 18. Never an exact age; the 18+ gate is satisfied by attestation, not by disclosure. |
-| `photos` | `public` (all) | `matches_only` | Photo count capped; no photo metadata, EXIF, or capture time is ever served. |
-| `bio` | `matches_only` | `public` | Free text; the only free-text field in the product. |
+| `photos` | `public` (all) | `matches_only` | Photo count capped. Metadata is stripped **at ingest**, not at serve (#10 §6.1): no EXIF, GPS, capture timestamp, or device identifier on the stored derivative. A retained original is a retained location history, so a serve-time-only rule would leave the coordinates in our own storage where the opt-in city choice in §3 means nothing. |
+| `bio` | `public` (card-truncated, full text matches-only) | `matches_only` | Free text; the only free-text field in the product. The card shows a truncated excerpt, the conversation shows the full text. A bio hidden from the card leaves a like decision with no information, which is how a product teaches people to like on photos alone. |
 | `interests` | `public` | `matches_only` | — |
-| `occupation` | `public` | `matches_only` | — |
-| `education` | `public` | `matches_only` | — |
 | `coarse_distance_band` | `public` | (off, via `show_me_distance`) | §3 |
-| `city` | `matches_only` | `public` (via `exact_location_sharing`) | Never a neighbourhood, postcode, or venue. |
+| `city` | `matches_only` | `public` (via `exact_location_sharing`) | Not a profile field in #10 — the coarse distance bucket is the only location on a card. This row covers the derived area name Platform attaches for a match. Opt-in, and the choice is the control. Never a neighbourhood, postcode, or venue. |
 | `last_active_at` | `matches_only` | `nobody` | Granularity is hours, not seconds. |
 | `read_receipts` | `matches_only` | `off` | Per conversation, not global. |
-| `verification_badge` | `public` | — | The badge is public data: it tells others this account is verified. It reveals no verification method, date, or evidence. |
+| `verification_badge` | `public` | — | Owned by the discovery surface, not the profile record. Public data: it tells others this account is verified and reveals no method, date, or evidence. |
 | `date_of_birth` (exact) | `owner_only` | — | Never leaves the owner's account. |
 | `contact_email` | `owner_only` | — | Never in a profile. |
 | `like_history` (who liked whom) | `owner_only` | — | Counterparties are not told. |
 | `block_list` | `owner_only` | — | Never, under any circumstance, to a blocked user. |
 | `report_history` | `owner_only` | — | A reporter is not told the outcome. |
+| `occupation`, `education` | **not in v0.1** | — | Deliberately excluded by #10 as the highest-value doxxing target for someone who already has a name. Listed here so the exclusion is a decision on the record and not an omission. Reserved for a later issue, and if introduced they would start `matches_only`. |
 | `identity_evidence`, `liveness_artifacts` | `sensitive` | — | Identity domain only. No product surface, no export, no analytics. |
 | `verification_provider_response` | `sensitive` | — | Same. |
 | `risk_state`, `risk_scores`, `detector_names` | `internal` | — | Trust & Safety and Moderation only. Never rendered to any user, including the subject of the risk. |
@@ -190,10 +199,51 @@ sees nothing; this table is only about the `verified`-viewer case.
 | `moderation_case`, `case_notes`, `moderator_decision` | `restricted` | — | Moderation role only, every read access-logged. Never in a product surface, never in a notification. |
 | `report_evidence` | `restricted` | — | Moderation role only. |
 
-The default posture is **matches-only for anything that identifies a person in
-the world, public for anything that helps evaluate a date.** That is the
-tension the whole dating surface is negotiating, and the defaults are chosen so
-that a user must opt *in* to widening exposure.
+The default posture is **narrow-where-it-identifies, open-where-it-helps**.
+`display_name`, `age_band`, `photos`, and `bio` are public because a like is a
+decision and hiding the decision inputs produces a photo-only product.
+`occupation` and `education` are not in v0.1 at all (#10), and `city` is
+opt-in rather than public, because a location identifies a person *outside* the
+dating context to someone who is not a counterparty. Note the asymmetry: the
+four public fields identify a user **to another member of the app**, which is
+the context they were written for; a city is identifying outside it. That is
+also why `city` needs no compensating rule for `display_name` being public —
+the user chose it, once, explicitly, and the choice is the control.
+
+The user can narrow anything in the first group, and nothing in either group
+can be widened past #10's maximum.
+
+### 4.1 Names that collide with a public figure
+
+`display_name` defaults to public, so a name a stranger can search is a
+default, not an edge case. The handling is set by
+[Profile & Personalization](./profile-and-personalization.md) §3 (rule R1) and
+restated here because it changes a *default* and that is this document's job:
+
+| Step | Effect | Class |
+|------|--------|-------|
+| The name matches a curated public-figure list | The name is **accepted** — plenty of real people share a famous name, and refusing them is its own harm | — |
+| …and the field's effective visibility | Held at `matches_only` until the user does something about it | `public` field, narrowed |
+| The user is invited to change the name or keep it private | Nothing else about the profile changes. If they do nothing the name stays match-only indefinitely | — |
+| The account is flagged as a possible impersonation subject | A **signal** to Trust & Safety, which decides whether a case opens. A human judges impersonation; the string match never does | `internal` |
+
+Three properties make this consistent with the overview, and they are the
+reason this is a default rather than an enforcement:
+
+- **It is not a rejection.** No account is refused a name, and no account state
+  moves. The overview's commitment 2 is that automation never enforces, and a
+  name match moving an account to any state would break it.
+- **It is a per-field content outcome, exactly like photo screening.** A field
+  gets a narrower visibility; the account is unaffected.
+- **Nothing is shown to the user as a fact about themselves.** The prompt reads
+  as an ordinary choice ("add something that makes it yours, or keep it
+  private"), not as an accusation. A user told "your name resembles a public
+  figure's" learns something they did not need and cannot act on.
+
+The failure mode is deliberately mild: a false positive costs a private name,
+not a blocked account. The list's size and maintenance are the real exposure
+here — a list that is too small misses impersonators, and one that is too large
+silently privatises ordinary people's names. Both are recorded in §9.
 
 ## 5. Blocked-user separation
 
@@ -267,13 +317,13 @@ setting or action exists:
 
 | Right in issue #1 | Where it lives in the settings surface |
 |-------------------|----------------------------------------|
-| Account recovery | `contact_email` (#25) is the recovery address; the action is initiated from Settings → Account. Recovery mail is critical and unsuppressible. |
-| 18+ age gate | `date_of_birth` (#22), attested at sign-up and immutable by the user. Self-attestation is a false-attestation risk, not a settings problem; the 18+ claim is confirmed at verification, not here. |
-| Account deletion | `account_deletion` (#23). Cross-references the deletion and recovery flow in [Account & Onboarding](./account-and-onboarding.md) — this spec owns only that the affordance exists, the irreversible confirmation, and that deletion is never deferred by an unsuppressed-mail setting. |
-| Data portability / access | `data_export` (#24) — a class-`user` archive. Evidence and moderation records are excluded, and the export says so. |
-| Stopping contact | `block_list` (#12), the reverse of which is exercised via block. |
+| Account recovery | `contact_email` (#27) is the recovery address; the action is initiated from Settings → Account. Recovery mail is critical and unsuppressible. |
+| 18+ age gate | `date_of_birth` (#24), attested at sign-up and immutable by the user. Self-attestation is a false-attestation risk, not a settings problem; the 18+ claim is confirmed at verification, not here. |
+| Account deletion | `account_deletion` (#25). Cross-references the deletion and recovery flow in [Account & Onboarding](./account-and-onboarding.md) §8 — this spec owns only that the affordance exists, the irreversible confirmation, and that deletion is never deferred by an unsuppressed-mail setting. |
+| Data portability / access | `data_export` (#26) — a class-`user` archive. Evidence and moderation records are excluded, and the export says so. |
+| Stopping contact | `block_list` (#14), the reverse of which is exercised via block. |
 | Reporting | No setting; the affordance is a capability, and it exists even on a `limited`, `suspended`, or `banned` account. |
-| Contacting support for a moderation outcome | `contact_email` (#25) plus the `caseRef` printed in the enforcement notification. |
+| Contacting support for a moderation outcome | `contact_email` (#27) plus the `caseRef` printed in the enforcement notification. |
 
 ## 7. Settings a user may NOT turn off
 
@@ -295,10 +345,13 @@ Stated plainly, with the reason, because each of these will be requested.
 
 ## 8. Cross-references
 
-- [Notifications](./notifications.md) — the settings in §2 rows 16–21 are
+- [Notifications](./notifications.md) — the settings in §2 rows 18–23 are
   `NotificationPreferences`, and the non-suppressible kinds are defined there.
-- [Account & Onboarding](./account-and-onboarding.md) — deletion and recovery
-  mechanics referenced in §6.
+- [Account & Onboarding](./account-and-onboarding.md) §7–§8 — deletion and
+  recovery mechanics referenced in §6.
+- [Profile & Personalization](./profile-and-personalization.md) §3 — the field
+  inventory and each field's maximum visibility; §4 here holds only the default
+  and the per-account narrowing.
 - [User Safety Controls](./user-safety-controls.md) — block and report
   affordances, evidence retention.
 - [Preferences & Discovery](./preferences-and-discovery.md) — how rows 1–4
@@ -312,9 +365,16 @@ Stated plainly, with the reason, because each of these will be requested.
 - Whether `last_active_visibility = everyone` is safe to offer. Current default
   is `matches`; `everyone` is deferred because last-active is a location proxy
   at a coarse time granularity.
-- Whether photo visibility should default to `matches_only` for users who have
-  enabled `city` visibility, on the theory that photos plus city is a recognisable
-  combination. Not decided; needs a design review, not a default flip.
+- **Photo + opt-in coarse area is a triangulation path.** A photo is a face, a
+  landmark, and a room at once, and it is an artefact the other person did not
+  choose to see, so the "the choice is the control" reasoning that answers
+  `city` on its own does not transfer to it. Stripping metadata at ingest
+  (#10 §6.1) removes the explicit signal but not a recognisable building or
+  landscape, which no list enumerates. Whether this warrants a rule — a
+  location-plausibility screen, or a stricter environment list — or stays a
+  design review is undecided, and the same question is now open on the #10
+  side so it is visible from both documents rather than living only here.
+  Needs a design review, not a default flip.
 - Whether `data_export` may include the coarse band history (a `public` class
   field) or only the current value. Current draft: current value only, because the
   history is a location track.
@@ -325,5 +385,8 @@ Stated plainly, with the reason, because each of these will be requested.
 - The exact k-anonymity floor. `k = 10` is drafted; the right value depends on
   market density and is a launch-time decision informed by the
   `discovery.exhausted` rate.
-- Whether a `public` `display_name` should be permitted at all for a user whose
-  name matches a public figure's, given a no-reputation-score stance.
+- The public-figure list's **size and maintenance** (§4.1). How large it
+  should be, who curates it, and how stale it may get. This is the only
+  residual from the `display_name` default, and both directions of error are
+  non-punishing — a miss costs a private name, not a blocked account — so it is
+  a tuning question rather than a safety one.

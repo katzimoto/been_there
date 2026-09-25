@@ -94,7 +94,7 @@ export function contactPermission(
   block: BlockRecord | null,
   matchIsActive: boolean,
 ): ContactPermission {
-  if (block !== null) {
+  if (block !== null && block.active) {
     return { allowed: false, reason: 'blocked' };
   }
   return matchIsActive ? { allowed: true } : { allowed: false, reason: 'no_match' };

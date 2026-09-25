@@ -21,7 +21,12 @@ export type ProfileState =
   | 'hidden'
   | 'deleted';
 
-export type ProfileEvent = 'save' | 'pause' | 'resume' | 'hide' | 'unhide' | 'delete';
+export type ProfileEvent =
+  | 'mark_complete'
+  | 'mark_incomplete'
+  | 'pause'
+  | 'hide'
+  | 'delete';
 
 /** Why a profile left the visible pool without the owner asking. */
 export type ProfileHiddenReason = 'account_restricted' | 'policy_enforced';
@@ -43,14 +48,10 @@ export const profileMachine: StateMachine<ProfileState, ProfileEvent, ProfileCon
     domain: 'dating.profile',
     initial: 'draft',
     transitions: [
-      { event: 'save', to: 'complete', guard: (ctx) => ctx.requirementsMet, note: 'Ordered first: a save that meets every requirement lands on complete, never on incomplete.' },
-      { event: 'save', to: 'incomplete', guard: (ctx) => !ctx.requirementsMet },
+      { event: 'mark_complete', from: ['draft', 'incomplete', 'complete', 'paused', 'hidden'], to: 'complete', guard: (ctx) => ctx.requirementsMet, note: 'The only way in. Completeness is evaluated, not declared: a command that claims a complete profile without meeting the requirements is rejected.' },
+      { event: 'mark_incomplete', from: ['draft', 'incomplete', 'complete', 'paused', 'hidden'], to: 'incomplete', guard: (ctx) => !ctx.requirementsMet, note: 'Any edit that drops a requirement lands here, including out of `hidden` and `paused` — resuming and restoring are the same domain action, and only the content decides how far the profile comes back.' },
       { event: 'pause', from: ['incomplete', 'complete'], to: 'paused', note: 'Owner-initiated: take a break without losing the profile.' },
-      { event: 'resume', from: ['paused'], to: 'complete', guard: (ctx) => ctx.requirementsMet },
-      { event: 'resume', from: ['paused'], to: 'incomplete', guard: (ctx) => !ctx.requirementsMet },
       { event: 'hide', from: ['incomplete', 'complete', 'paused'], to: 'hidden', guard: (ctx) => ctx.hiddenReason !== undefined, note: 'System-only: an account standing or a policy action hides the profile. Never a client call.' },
-      { event: 'unhide', from: ['hidden'], to: 'complete', guard: (ctx) => ctx.requirementsMet, note: 'A lifted account restriction makes the profile visible again — but only as far as its content allows.' },
-      { event: 'unhide', from: ['hidden'], to: 'incomplete', guard: (ctx) => !ctx.requirementsMet },
       { event: 'delete', to: 'deleted', from: ['draft', 'incomplete', 'complete', 'paused', 'hidden'], note: 'Content removal. The interaction history and any moderation evidence are retained elsewhere and are not deleted with the profile.' },
     ],
   });

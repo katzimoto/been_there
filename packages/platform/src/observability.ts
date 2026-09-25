@@ -129,7 +129,11 @@ export function inheritEventContext<P>(
     type: overrides.type,
     sensitivity: overrides.sensitivity,
     actorId: context.actorId,
-    ...(overrides.subjectId === undefined ? {} : { subjectId: overrides.subjectId }),
+    // The subject defaults to the request's subject: an event published while
+    // serving a request is about that request's user unless it says otherwise.
+    ...(overrides.subjectId ?? context.subjectId) === undefined
+      ? {}
+      : { subjectId: overrides.subjectId ?? context.subjectId },
     // Inherited, never re-minted: re-minting is how a cross-domain trace
     // silently splits in two.
     correlationId: context.correlationId,

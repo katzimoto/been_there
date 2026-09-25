@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { IdentityState } from '@been-there/core';
 import {
+  DATING_READ_MODEL_VERSION,
   DISCOVERABLE_IDENTITY_STATE,
   type DiscoverySnapshot,
   type EligibilityReason,
   ELIGIBILITY_RULES,
   type EligibilityRule,
+  STANDING_PROJECTION_VERSION,
   evaluateEligibility,
   selectEligibleCards,
 } from '../src/index.js';
@@ -143,6 +145,13 @@ describe('discovery eligibility', () => {
     });
   });
 
+  it('still shows a candidate who has already liked the viewer', () => {
+    // A pending like is a decision the viewer has not made yet: hiding the
+    // person would strand it. Liking them completes the match instead.
+    const view = relationship({ likes: [like(B, A, 'like-b-a')] });
+    expect(evaluateEligibility(snapshotWith(standing(A), standing(B), view))).toEqual({ eligible: true });
+  });
+
   it('applies the viewer’s own age range, but not an unknown age', () => {
     const viewer = standing(A, { preferences: { ageRange: { min: 30, max: 40 } } });
     expect(reasonOf(snapshotWith(viewer, standing(B, { age: 22 })))).toBe<EligibilityReason>('age_out_of_range');
@@ -156,9 +165,15 @@ describe('discovery eligibility', () => {
     expect(reasonOf(snapshot)).toBe<EligibilityReason>('beyond_distance_limit');
   });
 
-  it('refuses a pair that fails the mutual compatibility test', () => {
+  it('applies the viewer’s own interest list to their own page', () => {
     const viewer = standing(A, { preferences: { interestedIn: ['man'] } });
     const candidate = standing(B, { genderIdentities: ['woman', 'non_binary'] });
+    expect(reasonOf(snapshotWith(viewer, candidate))).toBe<EligibilityReason>('gender_out_of_scope');
+  });
+
+  it('refuses a pair that fails the mutual test in the candidate’s own direction', () => {
+    const viewer = standing(A, { genderIdentities: ['woman'], preferences: { interestedIn: ['man'] } });
+    const candidate = standing(B, { genderIdentities: ['man'], preferences: { interestedIn: ['man'] } });
     expect(reasonOf(snapshotWith(viewer, candidate))).toBe<EligibilityReason>('not_mutually_compatible');
   });
 
@@ -180,7 +195,7 @@ describe('discovery eligibility', () => {
 
 describe('selectEligibleCards', () => {
   const cardFor = (user: typeof B | typeof C): CandidateCardProjection => ({
-    projectionVersion: 1,
+    projectionVersion: STANDING_PROJECTION_VERSION,
     userId: user,
     displayName: 'Card',
     age: 30,
@@ -197,7 +212,7 @@ describe('selectEligibleCards', () => {
       [C]: standing(C, { identityState: 'pending' }),
     };
     return {
-      version: 1,
+      version: DATING_READ_MODEL_VERSION,
       standingFor: (user) => standings[user] ?? null,
       cardFor: (_viewer, candidate) =>
         candidate === B ? cardFor(B) : candidate === C ? cardFor(C) : null,
@@ -223,6 +238,11 @@ describe('selectEligibleCards', () => {
       model({ standingFor: (user) => (user === A ? unverified : standing(B)) }),
       [B],
     );
+    expect(served).toEqual([]);
+  });
+
+  it('serves nothing from a read model whose version it cannot read', () => {
+    const served = selectEligibleCards(A, model({ version: DATING_READ_MODEL_VERSION + 1 }), [B]);
     expect(served).toEqual([]);
   });
 });

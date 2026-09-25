@@ -63,6 +63,7 @@ export type RiskDecisionReason =
   | 'escalated_by_corroboration'
   | 'below_threshold'
   | 'already_critical'
+  | 'report_not_risk_bearing'
   | 'mass_report_quarantined';
 
 export interface PolicyInput {
@@ -83,15 +84,19 @@ export interface PolicyDecision {
   readonly friction: readonly ReversibleFriction[];
   /** Queue entry this decision would open, if any. */
   readonly candidate: ReviewCandidate | null;
-  /** The signal was discarded as part of a coordinated reporting campaign. */
-  readonly quarantined: boolean;
+  /**
+   * The signal describes something done *to* the subject and contributed
+   * nothing: no state, no detector, no clock, no friction. It stays in the
+   * ledger, because that is what makes a campaign visible to a human.
+   */
+  readonly discarded: boolean;
 }
 
 /** The weighted evidence, before the shared machine is asked anything. */
 function effectiveScoreOf(signal: Signal, corroboration: Corroboration): number {
   const base = signal.weight * RELIABILITY_DISCOUNT[signal.reliability];
   const repeatMultiplier = Math.min(
-    1 + Math.min(corroboration.repetitions, 4) * REPEAT_STEP,
+    1 + corroboration.repetitions * REPEAT_STEP,
     REPEAT_MULTIPLIER_CAP,
   );
   if (corroboration.independentDetectors < 2) {
@@ -146,33 +151,43 @@ export function assessSignal(input: PolicyInput, now: Date): PolicyDecision {
   const { current, signal, corroboration } = input;
   const reason = `${signal.detector} observed ${signal.behaviour.kind}`;
 
-  // A coordinated reporting campaign is evidence about the reporters, never
-  // about the account being reported. The signal stays in the ledger — the
-  // campaign is exactly what makes it visible — but contributes nothing here.
-  if (corroboration.massReport !== null) {
-    const target: ReviewTarget = {
-      kind: 'cluster',
-      key: corroboration.massReport.key,
-      members: corroboration.massReport.reporters,
-    };
+  // A report is an accusation, not evidence. Whatever the reports say, the
+  // account being reported keeps the risk state it had: not because reporting
+  // is unimportant, but because a risk state is a statement about observed
+  // behaviour, and "other people said so" is not observed behaviour. It is also
+  // the only defence against retaliation, where an attacker with three accounts
+  // buys a stranger a `critical` risk state in under a minute.
+  //
+  // The signals stay in the ledger, because a *pattern* of them is evidence —
+  // about the reporters. The moment three distinct reporters show up, the
+  // campaign, not the victim, is what goes in front of a human.
+  if (signal.behaviour.kind === 'report_against') {
+    const cluster = corroboration.massReport;
     return {
       next: current,
       changed: false,
       event: null,
       effectiveScore: 0,
-      reason: 'mass_report_quarantined',
+      reason: cluster === null ? 'report_not_risk_bearing' : 'mass_report_quarantined',
       friction: [],
-      quarantined: true,
-      candidate: {
-        target,
-        state: 'high',
-        origin: 'mass_report_attack',
-        raisedAt: now,
-        expiresAt: addHours(now, REVERSIBLE_FRICTION.human_review_candidate.ttlHours),
-        detectors: corroboration.detectors,
-        independentDetectors: corroboration.massReport.reporters.length,
-        confidence: signal.weight,
-      },
+      discarded: true,
+      candidate:
+        cluster === null
+          ? null
+          : {
+              target: {
+                kind: 'cluster',
+                key: cluster.key,
+                members: cluster.reporters,
+              },
+              state: 'high',
+              origin: 'mass_report_attack',
+              raisedAt: now,
+              expiresAt: addHours(now, REVERSIBLE_FRICTION.human_review_candidate.ttlHours),
+              detectors: corroboration.detectors,
+              independentDetectors: cluster.reporters.length,
+              confidence: signal.weight,
+            },
     };
   }
 
@@ -222,7 +237,7 @@ export function assessSignal(input: PolicyInput, now: Date): PolicyDecision {
     reason: decisionReason,
     friction: selectFriction(next, signal.subjectId, reason, now, input.disputeOpen),
     candidate,
-    quarantined: false,
+    discarded: false,
   };
 }
 

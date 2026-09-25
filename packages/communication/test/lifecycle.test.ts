@@ -44,9 +44,13 @@ describe('conversation machine', () => {
     expect(peerOf(conversation, STRANGER)).toBeNull();
   });
 
-  it('leaves no declared state stranded and no terminal state with a way out', () => {
+  it('leaves every non-terminal state a way out and every terminal state none', () => {
     assertMachineIsTotal(conversationMachine, ['ended', 'ended_by_unmatch']);
     for (const state of conversationMachine.states) {
+      if (state === 'ended' || state === 'ended_by_unmatch') {
+        expect(conversationMachine.legalEvents(state)).toEqual([]);
+        continue;
+      }
       expect(conversationMachine.legalEvents(state).length).toBeGreaterThan(0);
     }
   });
@@ -82,18 +86,17 @@ describe('conversation machine', () => {
     ).toBe<ConversationState>('active');
   });
 
-  it('drops a lifted block into frozen, not active, while a restriction is live', () => {
+  it('keeps a lifted block un-sendable by state alone only until the capability says otherwise', () => {
     const blocked = succeeded(
       applyConversationEvent(startConversation(match(), OPENED_AT), 'block_applied', { at: at(1) }),
     );
-    const result = succeeded(
-      applyConversationEvent(blocked, 'block_lifted', {
-        at: at(2),
-        matchState: 'active',
-        restrictionActive: true,
-      }),
-    );
-    expect(result.state).toBe<ConversationState>('frozen_by_restriction');
+    // The conversation state returns to active, but sending is still gated by
+    // the moderation-owned capability projection — see the permission suite.
+    expect(
+      succeeded(
+        applyConversationEvent(blocked, 'block_lifted', { at: at(2), matchState: 'active' }),
+      ).state,
+    ).toBe<ConversationState>('active');
   });
 
   it('does not let a lifted restriction reopen a blocked conversation', () => {

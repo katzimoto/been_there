@@ -185,9 +185,16 @@ describe('reporting after an unmatch', () => {
     const moderationCase = openCaseFromReport(h, report);
 
     expect(moderationCase.priority).toBe('urgent');
-    const chain = h.audit.forCase(moderationCase.caseId);
-    expect(chain.map((entry) => entry.action)).toContain('case.opened');
-    expect(chain.map((entry) => entry.action)).toContain('evidence.captured');
+    const opened = h.audit.byEntity('case', moderationCase.caseId).at(0);
+    expect(opened?.action).toBe('case.opened');
+    expect(opened?.evidenceIds).toEqual(report.capturedEvidence.map((item) => item.evidenceId));
+
+    for (const item of report.capturedEvidence) {
+      const captured = h.audit.byEntity('evidence', item.evidenceId).at(0);
+      expect(captured?.action).toBe('evidence.captured');
+      expect(captured?.sequence).toBeLessThan(opened?.sequence ?? 0);
+      expect(captured?.actorId).toBe('system');
+    }
   });
 });
 

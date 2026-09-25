@@ -176,8 +176,9 @@ export function resolveMatch(attempt: MatchAttempt): Result<MatchResolution, Dom
   if (actor === counterpart) {
     return domainError('validation_failed', 'dating.interaction', 'a user cannot match themselves');
   }
-  if (!ledger.likes.some((entry) => entry.likeId === like.likeId)) {
-    return domainError('validation_failed', 'dating.interaction', 'the triggering like is not in the ledger');
+  const triggeringLike = ledger.likes.find((entry) => entry.likeId === like.likeId);
+  if (triggeringLike === undefined || triggeringLike.from !== actor || triggeringLike.to !== counterpart) {
+    return domainError('validation_failed', 'dating.interaction', 'the triggering like is not the actor’s like of the counterpart');
   }
   if (activeBlockBetween(actor, counterpart, blocks) !== null) {
     return ok({ outcome: 'match_refused', reason: 'blocked' });

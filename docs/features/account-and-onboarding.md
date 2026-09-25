@@ -121,6 +121,13 @@ a stepper is trivially lied to and produces a wrong age band). The age is comput
 account's declared region calendar. The client may not submit an age, and a
 submitted `ageYears` is rejected.
 
+The privacy spec ([#17 §4](./privacy-and-user-settings.md)) records the age gate
+as attestation-based. A bare attestation — "I am 18 or over", a checkbox — is
+kept as a separate recorded fact, but it is **not** the gate: anyone can attest
+to anything, and a gate that accepts a promise is not a gate. The date of birth
+is what the gate computes from; the attestation records that the user was told
+the rule and agreed to it.
+
 ### 4.2 What the user is told
 
 > **"Been There is 18+."**
@@ -319,7 +326,7 @@ notification spam.
 |---|---|
 | No notification to the requester | The requester receives nothing that distinguishes an existing account from a typo. There is no "a recovery was requested for your account" message, ever, sent to anyone but the verified channel after a *successful* recovery. |
 | No notification flood to the victim | Failed attempts do **not** notify the victim. Notifying per attempt hands the attacker a notification oracle and turns recovery into a harassment tool aimed at the victim. |
-| Silent escalating friction | Attempt 1–2 normal. 3–5: recovery is paused for that account for 24 hours and the *only* remedy becomes the other verified factor. The victim is told once: "we paused sign-in recovery on your account after repeated attempts — your account is fine and nothing was changed." That message is safe to send: it discloses nothing the attacker does not already know, and it is only reachable by the account's real owner because it is delivered to the verified channel. |
+| Silent escalating friction | Attempts 1 and 2 proceed normally. The 3rd attempt inside a 24-hour window pauses recovery for that account, and the only remaining remedy is the other verified factor. The owner is told once: "we paused sign-in recovery on your account after repeated attempts — your account is fine and nothing was changed." That message is safe to send: it discloses nothing the attacker does not already know, and it is only reachable by the account's real owner because it is delivered to the verified channel. |
 | Signal to safety, not enforcement | A burst of recovery attempts against one account publishes `auth.recovery_abuse_suspected`. Trust & Safety decides whether a case is opened. No account state changes; a locked recovery is a Platform access control, not a moderation verdict, and it is not shown to the account as a restriction. |
 | Phone-upgrade | If email recovery is the channel being abused, the account's recovery is switched to the phone factor, and the victim is told how to change channels in the same notice. |
 

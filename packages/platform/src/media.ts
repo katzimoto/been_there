@@ -253,7 +253,7 @@ export function verifyMediaAccess(
       assetId: asset.assetId,
     });
   }
-  if (request.expiresAt.getTime() <= Date.now()) {
+  if (request.now.getTime() >= request.expiresAt.getTime()) {
     return domainError('permission_denied', 'platform', 'media grant expired', {
       assetId: asset.assetId,
     });

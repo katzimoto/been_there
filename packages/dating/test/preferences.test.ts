@@ -90,7 +90,7 @@ describe('areMutuallyCompatible', () => {
 
   it('excludes on age only when both expressed a range and one is outside it', () => {
     const wantsYoung = side({ preferences: { ...UNSET_PREFERENCES, ageRange: { min: 20, max: 30 } } });
-    const older = side({ age: 45 });
+    const older = side({ age: 45, preferences: { ...UNSET_PREFERENCES, ageRange: { min: 40, max: 60 } } });
     expect(areMutuallyCompatible(wantsYoung, older, null)).toEqual({
       compatible: false,
       excludedBy: ['age'],
@@ -139,6 +139,15 @@ describe('areMutuallyCompatible', () => {
     const wantsNonBinary = side({ preferences: { ...UNSET_PREFERENCES, interestedIn: ['non_binary'] } });
     const candidate = side({ genderIdentities: ['non_binary'] });
     expect(areMutuallyCompatible(wantsNonBinary, candidate, null)).toEqual({ compatible: true });
+  });
+
+  it('excludes when the candidate’s own list does not cover the viewer', () => {
+    const wantsMen = side({ genderIdentities: ['woman'], preferences: { ...UNSET_PREFERENCES, interestedIn: ['man'] } });
+    const alsoWantsMen = side({ genderIdentities: ['man'], preferences: { ...UNSET_PREFERENCES, interestedIn: ['man'] } });
+    expect(areMutuallyCompatible(wantsMen, alsoWantsMen, null)).toEqual({
+      compatible: false,
+      excludedBy: ['gender'],
+    });
   });
 
   it('is symmetric, including which dimensions it names', () => {

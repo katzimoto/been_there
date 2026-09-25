@@ -30,9 +30,12 @@ import type { MatchProjection, MatchState } from './read-models.js';
  *                            this conversation. A new match creates a new one.
  *   ended                  — closed for any other reason, including a case.
  *
- * Every state retains the message record and stays referenceable by a report.
- * That is commitment #4 of the overview: unmatching destroys the relationship,
- * not the right to report, and the machine has no delete-transition at all.
+ * Two properties are deliberate. Every state retains the message record and
+ * stays referenceable by a report — the machine has no delete-transition at
+ * all, so commitment #4 of the overview cannot be violated from here. And the
+ * conversation state is never the authority on a *capability*: whether someone
+ * may send is decided by the moderation-owned capability projection in
+ * `canSend`, so a stale or optimistic state can never widen access.
  */
 
 export type ConversationState =
@@ -45,7 +48,6 @@ export type ConversationState =
 export type ConversationEvent =
   | 'block_applied'
   | 'block_lifted'
-  | 'block_lifted_under_restriction'
   | 'freeze_for_restriction'
   | 'unfreeze_on_restriction_lift'
   | 'unmatch'
@@ -54,11 +56,9 @@ export type ConversationEvent =
 export interface ConversationContext {
   /** Current dating state, so an unblock can never resurrect a dead match. */
   readonly matchState?: MatchState;
-  /** Mandatory for every safety-driven move: automation may not pause a chat. */
+  /** Mandatory for every enforcement-driven move: automation may not pause a chat. */
   readonly caseId?: CaseId;
   readonly moderatorId?: ActorId;
-  /** True when a live restriction still removes messaging from a participant. */
-  readonly restrictionActive?: boolean;
 }
 
 export const conversationMachine: StateMachine<
@@ -79,15 +79,8 @@ export const conversationMachine: StateMachine<
       event: 'block_lifted',
       from: ['blocked'],
       to: 'active',
-      guard: (ctx) => ctx?.matchState === 'active' && ctx?.restrictionActive !== true,
-      note: 'Lifting a block restores messaging only while the match is alive and no restriction is live.',
-    },
-    {
-      event: 'block_lifted_under_restriction',
-      from: ['blocked'],
-      to: 'frozen_by_restriction',
-      guard: (ctx) => ctx?.matchState === 'active' && ctx?.restrictionActive === true,
-      note: 'Lifting a block does not override enforcement: the conversation lands frozen, not active.',
+      guard: (ctx) => ctx?.matchState === 'active',
+      note: 'Lifting a block restores messaging only while the match is alive. If a restriction is still live, the capability check in canSend keeps the conversation un-sendable — the state never becomes the authority on that.',
     },
     {
       event: 'freeze_for_restriction',

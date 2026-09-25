@@ -15,12 +15,6 @@ export const PRIORITY_RANK: Readonly<Record<CasePriority, number>> = {
   urgent: 3,
 };
 
-export const QUEUE_LABEL: Readonly<Record<CaseQueue, string>> = {
-  safety: 'Member safety',
-  identity_integrity: 'Identity integrity',
-  appeals: 'Appeals (reserved for v0.2)',
-};
-
 /** Response target per priority. A queue is only real if it has a clock. */
 export const SLA_HOURS_BY_PRIORITY: Readonly<Record<CasePriority, number>> = {
   low: 72,

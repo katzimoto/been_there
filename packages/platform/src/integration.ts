@@ -1,8 +1,11 @@
 import {
   type CorrelationId,
   type DomainError,
+  type Err,
+  type Ok,
   type Result,
   domainError,
+  err,
   ok,
 } from '@been-there/core';
 import { type IntegrationRequestId } from './ids.js';
@@ -187,18 +190,25 @@ export class RetryingIntegration implements IntegrationPort {
   }
 }
 
+/**
+ * Result constructors for a port implementation. They return the `Result`
+ * rather than a bare payload for the same reason `domainError` does in the
+ * shared kernel: a half-built outcome is not a thing a port can return, so the
+ * failure mode is a compile error instead of an `outcome.ok` that is quietly
+ * `undefined`.
+ */
 export function externalSuccess<T>(
   request: ExternalRequest<unknown>,
   value: T,
   providerRequestId: string,
-): ExternalSuccess<T> {
-  return {
+): Ok<ExternalSuccess<T>> {
+  return ok({
     requestId: request.requestId,
     provider: request.provider,
     operation: request.operation,
     providerRequestId,
     value,
-  };
+  });
 }
 
 export function externalError(
@@ -206,15 +216,17 @@ export function externalError(
   failure: ExternalFailure,
   detail: string,
   retryAfterMs?: number,
-): ExternalError {
+): Err<ExternalError> {
   const policy = OPERATION_RETRY_POLICY[request.operation];
-  return {
+  return err({
     failure,
     provider: request.provider,
     operation: request.operation,
     requestId: request.requestId,
+    // Repeating a call is only safe when the operation is idempotent, so a
+    // timeout on a verification is reported as "unknown", not "try again".
     retryable: RETRYABLE_FAILURES.includes(failure) && policy.idempotent,
     detail,
     ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
-  };
+  });
 }

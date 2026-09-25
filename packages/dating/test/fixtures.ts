@@ -13,11 +13,13 @@ import type { LikeRecord, MatchRecord, PassRecord } from '../src/interaction.js'
 import type { DistanceBand } from '../src/location.js';
 import { type DatingPreferences, UNSET_PREFERENCES } from '../src/preferences.js';
 import type { GenderIdentity, ProfileSnapshot, ProfileState } from '../src/profile.js';
-import type {
-  AccountStandingProjection,
-  IdentityStandingProjection,
-  RelationshipProjection,
-  SubjectStandingProjection,
+import {
+  STANDING_PROJECTION_VERSION,
+  type AccountStandingProjection,
+  type IdentityStandingProjection,
+  type RelationshipProjection,
+  type SubjectStandingProjection,
+  relationshipView,
 } from '../src/read-models.js';
 
 export const A: UserId = castId<'UserId'>('user-a');
@@ -57,7 +59,11 @@ export function matchRecord(overrides: Partial<MatchRecord> = {}): MatchRecord {
 }
 
 export function relationship(overrides: Partial<RelationshipProjection> = {}): RelationshipProjection {
-  return { blocks: [], likes: [], passes: [], match: null, ...overrides };
+  return relationshipView(
+    { blocks: overrides.blocks ?? [] },
+    { likes: overrides.likes ?? [], passes: overrides.passes ?? [] },
+    { match: overrides.match ?? null },
+  );
 }
 
 export interface StandingOverrides {
@@ -84,12 +90,12 @@ export function standing(user: UserId, overrides: StandingOverrides = {}): Subje
     location: overrides.location === undefined ? 'lt_5_km' : overrides.location,
   };
   const identity: IdentityStandingProjection = {
-    projectionVersion: 1,
+    projectionVersion: STANDING_PROJECTION_VERSION,
     state: overrides.identityState ?? 'verified',
     generation: overrides.generation ?? 1,
   };
   const account: AccountStandingProjection = {
-    projectionVersion: 1,
+    projectionVersion: STANDING_PROJECTION_VERSION,
     state: overrides.accountState ?? 'active',
     capabilities:
       overrides.capabilities ?? (overrides.accountState === 'suspended' ? ['report', 'block'] : ['browse_discovery', 'like', 'send_message']),

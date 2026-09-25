@@ -42,11 +42,20 @@ export const IDENTITY_EVENTS = {
 
 export type IdentityEventType = (typeof IDENTITY_EVENTS)[keyof typeof IDENTITY_EVENTS];
 
-export interface IdentityEventDefinition {
+/**
+ * Note on `type` over `interface` for the declarations in this file: the
+ * kernel's `EventPublisher.publish` takes the envelope with its default
+ * payload parameter, `DomainEvent<Readonly<Record<string, unknown>>>`. A type
+ * alias of an object type gets an implicit index signature and is assignable
+ * to it; an interface does not. Declaring the catalogue and its payloads as
+ * aliases is therefore what lets a typed identity event be published to the
+ * bus without a cast at the call site.
+ */
+export type IdentityEventDefinition = {
   readonly version: number;
   readonly sensitivity: DataSensitivity;
   readonly description: string;
-}
+};
 
 /**
  * The catalogue as a record rather than a list, because the lookup used when
@@ -101,46 +110,46 @@ export const IDENTITY_EVENT_CATALOGUE: Readonly<
 /* Payloads                                                                    */
 /* -------------------------------------------------------------------------- */
 
-export interface StatusChangedPayload {
+export type StatusChangedPayload = {
   readonly identity: IdentityStatusProjection;
-}
+};
 
-export interface AttemptStartedPayload {
+export type AttemptStartedPayload = {
   readonly verificationId: string;
   readonly reVerification: boolean;
   readonly reasonCode: string;
-}
+};
 
-export interface AttemptCompletedPayload {
+export type AttemptCompletedPayload = {
   readonly verificationId: string;
   readonly attemptState: string;
   readonly decision: 'pass' | 'fail' | 'manual_review';
   /** Band only. The raw score stays inside the identity domain. */
   readonly confidenceBand: string;
-}
+};
 
-export interface ReviewProposedPayload {
+export type ReviewProposedPayload = {
   readonly subjectId: SubjectId;
   readonly detector: string;
   readonly findings: readonly AnomalyFinding[];
-}
+};
 
-export interface AnomalyDetectedPayload {
+export type AnomalyDetectedPayload = {
   readonly subjectId: SubjectId;
   readonly findings: readonly AnomalyFinding[];
-}
+};
 
-export interface ReVerificationRequestedPayload {
+export type ReVerificationRequestedPayload = {
   readonly subjectId: SubjectId;
   readonly reason: ReverificationReason;
   readonly requestedBy: ReverificationRequester['kind'];
-}
+};
 
-export interface EvidenceAccessedPayload {
+export type EvidenceAccessedPayload = {
   readonly entry: EvidenceAccessAuditEntry;
-}
+};
 
-export interface IdentityEventPayloads {
+export type IdentityEventPayloads = {
   [IDENTITY_EVENTS.statusChanged]: StatusChangedPayload;
   [IDENTITY_EVENTS.attemptStarted]: AttemptStartedPayload;
   [IDENTITY_EVENTS.attemptCompleted]: AttemptCompletedPayload;
@@ -148,7 +157,7 @@ export interface IdentityEventPayloads {
   [IDENTITY_EVENTS.anomalyDetected]: AnomalyDetectedPayload;
   [IDENTITY_EVENTS.reVerificationRequested]: ReVerificationRequestedPayload;
   [IDENTITY_EVENTS.evidenceAccessed]: EvidenceAccessedPayload;
-}
+};
 
 export interface PublishIdentityEventInput<T extends IdentityEventType> {
   readonly type: T;

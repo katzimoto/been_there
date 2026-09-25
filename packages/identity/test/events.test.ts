@@ -16,6 +16,7 @@ import {
   type EvidenceAccessedPayload,
   IDENTITY_EVENTS,
   IDENTITY_EVENT_CATALOGUE,
+  type IdentityEventType,
   type ReVerificationRequestedPayload,
   type ReviewProposedPayload,
   type StatusChangedPayload,
@@ -35,19 +36,22 @@ const identity = projectIdentityStatus(
 );
 
 const base = {
-  eventId: castId<'EventId'>('evt-1'),
   actorId: 'system',
   correlationId: CORRELATION,
   occurredAt: T0,
   subjectId: SUBJECT,
 } as const;
 
-function sampleEvents(): readonly DomainEvent<never>[] {
-  const statusChanged: DomainEvent<StatusChangedPayload> = buildIdentityEvent({
+function statusChangedEvent(): DomainEvent<StatusChangedPayload> {
+  return buildIdentityEvent({
     ...base,
+    eventId: castId<'EventId'>('evt-1'),
     type: IDENTITY_EVENTS.statusChanged,
     payload: { identity },
   });
+}
+
+function sampleEnvelopes(): readonly DomainEvent[] {
   const attemptStarted: DomainEvent<AttemptStartedPayload> = buildIdentityEvent({
     ...base,
     eventId: castId<'EventId'>('evt-2'),
@@ -101,14 +105,14 @@ function sampleEvents(): readonly DomainEvent<never>[] {
     },
   });
   return [
-    statusChanged,
+    statusChangedEvent(),
     attemptStarted,
     attemptCompleted,
     reviewProposed,
     anomalyDetected,
     reVerification,
     evidenceAccessed,
-  ] as readonly DomainEvent<never>[];
+  ];
 }
 
 describe('event catalogue', () => {
@@ -138,12 +142,15 @@ describe('event catalogue', () => {
   });
 
   it('takes the classification from the catalogue rather than the caller', () => {
-    const event = sampleEvents()[0]!;
-    expect(event.sensitivity).toBe(IDENTITY_EVENT_CATALOGUE[event.type].sensitivity);
+    for (const event of sampleEnvelopes()) {
+      expect(event.sensitivity).toBe(
+        IDENTITY_EVENT_CATALOGUE[event.type as IdentityEventType].sensitivity,
+      );
+    }
   });
 
   it('publishes the public payload as the public projection and nothing else', () => {
-    const event = sampleEvents()[0]! as DomainEvent<StatusChangedPayload>;
+    const event = statusChangedEvent();
     expect(Object.keys(event.payload)).toEqual(['identity']);
     expect(Object.keys(event.payload.identity).sort()).toEqual(Object.keys(identity).sort());
   });
@@ -155,15 +162,21 @@ describe('who receives which event', () => {
     const seenByProduct: string[] = [];
     const seenBySafety: string[] = [];
     const seenByAudit: string[] = [];
-    bus.subscribe({ upTo: 'public' }, (event) => seenByProduct.push(event.type));
-    bus.subscribe({ upTo: 'sensitive' }, (event) => seenBySafety.push(event.type));
-    bus.subscribe({ upTo: 'restricted' }, (event) => seenByAudit.push(event.type));
+    bus.subscribe({ upTo: 'public' }, (event) => {
+      seenByProduct.push(event.type);
+    });
+    bus.subscribe({ upTo: 'sensitive' }, (event) => {
+      seenBySafety.push(event.type);
+    });
+    bus.subscribe({ upTo: 'restricted' }, (event) => {
+      seenByAudit.push(event.type);
+    });
 
-    for (const event of sampleEvents()) {
+    for (const event of sampleEnvelopes()) {
       await bus.publish(event);
     }
 
-    // The dating product learns that a user is verified and nothing else about
+    // The dating product learns that a user is verified, and nothing else about
     // how they got there.
     expect(seenByProduct).toEqual([IDENTITY_EVENTS.statusChanged]);
     expect(seenBySafety).toEqual([
@@ -180,21 +193,24 @@ describe('who receives which event', () => {
   it('keeps evidence audit records out of reach of a safety consumer', async () => {
     const bus = new InMemoryEventBus();
     const seen: string[] = [];
-    bus.subscribe({ upTo: 'sensitive' }, (event) => seen.push(event.type));
-    const evidenceAccessed = sampleEvents().find(
+    bus.subscribe({ upTo: 'sensitive' }, (event) => {
+      seen.push(event.type);
+    });
+    const restricted = sampleEnvelopes().find(
       (event) => event.type === IDENTITY_EVENTS.evidenceAccessed,
     );
-    expect(evidenceAccessed).toBeDefined();
-    await bus.publish(evidenceAccessed!);
+    expect(restricted).toBeDefined();
+    await bus.publish(restricted!);
     expect(seen).toEqual([]);
   });
 });
 
 describe('clearance helper', () => {
-  it('refuses a restricted event to a public consumer', () => {
-    const event = sampleEvents()[6]!;
+  it('refuses a restricted event to a product or safety consumer', () => {
+    const event = sampleEnvelopes()[6]!;
+    expect(event.type).toBe(IDENTITY_EVENTS.evidenceAccessed);
     expect(isClearedToConsume({ upTo: 'public' }, event)).toBe(false);
-    expect(isClearedToConsume({ upTo: 'internal' }, event)).toBe(false);
+    expect(isClearedToConsume({ upTo: 'sensitive' }, event)).toBe(false);
     expect(isClearedToConsume({ upTo: 'restricted' }, event)).toBe(true);
   });
 });

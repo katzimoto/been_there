@@ -37,8 +37,7 @@ export type AuditAction =
   | 'evidence.read'
   | 'evidence.read_denied'
   | 'decision.recorded'
-  | 'decision.reversed'
-  | 'account.state_changed';
+  | 'decision.reversed';
 
 export type AuditOutcome = 'allowed' | 'denied';
 

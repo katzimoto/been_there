@@ -52,41 +52,94 @@ this table is `sensitive` or `restricted`: those classes never reach analytics.
 Trust & Safety, and the analytics projection of it (`safety.verification_anomaly`)
 carries only the fact of an anomaly, never the evidence.
 
-### 2.1 Account & onboarding (Platform, Identity)
+### 2.1 Account & onboarding (Platform)
+
+Adopted verbatim from [Account & Onboarding](./account-and-onboarding.md) §11,
+which owns this catalogue. The names here are the same names; this table exists
+so the index is complete, and it is a copy rather than a second source on
+purpose.
 
 | Event | Source | Emitted when | Sensitivity | Role |
 |-------|--------|--------------|-------------|------|
-| `account.created` | Platform | Sign-up commits, after the 18+ attestation | `internal` | Funnel |
-| `account.age_gate.passed` | Platform | The attestation is recorded | `internal` | Funnel |
-| `account.login.succeeded` | Platform | A session is established; carries `newDevice: boolean` | `internal` | Funnel |
-| `account.recovery_requested` | Platform | A recovery flow is initiated | `internal` | Funnel |
-| `profile.completed` | Dating Core | A profile reaches the minimum completeness that allows discovery | `user` | Funnel |
+| `account.app_opened` | Platform | A surface is opened; carries `surface`, `journey_id` | `internal` | Funnel |
+| `account.registration_started` | Platform | Sign-up begins; carries `contact_kind` | `internal` | Funnel |
+| `account.registration_completed` | Platform | The account row commits and a verification message is sent; carries `contact_kind` | `internal` | Funnel |
+| `account.registration_rejected` | Platform | Sign-up is refused; carries a `reason_code` (`under_18`, `invalid_input`, `duplicate`, `rate_limited`, `breached_password`, `domain_not_allowed`) and an `age_band` | `internal` | Funnel |
+| `account.onboarding_step_completed` | Platform | An onboarding step passes; carries `step` and `source` | `internal` | Funnel |
+| `account.onboarding_step_failed` | Platform | An onboarding step fails; carries `step` and `reason_code` | `internal` | Funnel |
+| `account.session_started` | Platform | A session is established; carries `surface` and `auth_method` | `internal` | Funnel |
+| `account.session_failed` | Platform | Authentication fails; carries `reason_code` and `auth_method` | `internal` | Health |
+| `account.recovery_started` | Platform | A recovery flow begins | `internal` | Funnel |
+| `account.recovery_completed` | Platform | Recovery succeeds and sessions are revoked; carries `sessions_revoked_count` | `internal` | Health |
+| `account.recovery_locked` | Platform | Recovery is locked by abuse threshold or rate limit | `internal` | Health |
+| `account.session_revoked` | Platform | A session is ended; carries `scope` (`this_device`, `all_devices`, `recovery`, `limit`, `enforcement`) | `internal` | Health |
+| `account.capability_denied` | Platform | A capability is refused; carries `capability` and a `reason_code`, **never a case id** | `internal` | Health |
+| `account.deletion_requested` | Platform | A deletion request commits; idempotency key in §4, row 3 | `internal` | Health |
+| `account.deletion_cancelled` | Platform | The user restores inside the 30-day window | `internal` | Health |
+| `account.deletion_completed` | Platform | Deletion completes, after the undo window | `internal` | Funnel |
+| `profile.published` | Dating Core | A profile goes live; the onboarding funnel's terminal step | `user` | Funnel |
 | `profile.deleted` | Dating Core | A profile is removed | `user` | Funnel |
 | `preferences.updated` | Dating Core | A preference record is written; carries `changedAxes` — axis names only, never values | `user` | Control |
 | `settings.updated` | Platform | A non-preference settings write commits; carries the changed field **names** only | `user` | Control |
-| `account.deletion_requested` | Platform | A deletion request commits; idempotency key in §4, row 3 | `internal` | Health |
-| `account.deleted` | Platform | Deletion completes, after the recovery window | `internal` | Funnel |
 
-`preferences.updated` and `settings.updated` are separate events because they have
-separate owners and separate read-models. Folding them together would make the
-Dating Core's analytics footprint depend on the Platform's settings vocabulary.
+Three properties of this table are load-bearing for §3, and they come from #9:
+
+- **`age_band` is a five-year band, never an age and never a date.** It is the
+  only form of age that reaches analytics.
+- **`account.capability_denied` carries a reason code and never a case id.** A
+  denial is a fact about capability, not about moderation, and a case id in
+  this event would let the funnel reconstruct the moderation pipeline.
+- **`account.registration_rejected` carries `under_18` as a reason code.** The
+  rejected user is counted in the funnel; nothing about them is stored.
+
+`identity_status.changed` and `account_state.changed` are deliberately **absent
+from this table**. They are domain events owned by Identity and Moderation, and
+they are `public` on the bus for product projections. The metrics sink never
+receives `identity_status.changed`: the verification funnel counts submissions
+from `verification.*` in §2.2 and joins the two series in analysis. Subscribing
+analytics to an identity stream to "simplify" the funnel is the mistake this
+note exists to prevent.
+
+`preferences.updated` and `settings.updated` are separate events because they
+have separate owners and separate read-models. Folding them together would make
+the Dating Core's analytics footprint depend on the Platform's settings
+vocabulary.
 
 ### 2.2 Verification (Identity)
 
+Names adopted from
+[Identity & Verification](../architecture/identity-and-verification.md).
+That document owns the emissions; the analytics-relevant subset is indexed here.
+
 | Event | Source | Emitted when | Sensitivity | Role |
 |-------|--------|--------------|-------------|------|
-| `verification.submitted` | Identity | A selfie/liveness submission is accepted for processing | `internal` | Funnel |
-| `verification.completed` | Identity | The identity machine leaves `pending`; carries `to: 'verified' \| 'verification_failed' \| 'review_required' \| 'expired'` | `internal` | Funnel |
-| `verification.failed` | Identity | `to === 'verification_failed'`; derived from `verification.completed`, not emitted separately by a second code path | `internal` | Safety |
-| `verification.review_required` | Identity | `to === 'review_required'` | `internal` | Funnel |
-| `verification.expired` | Identity | `to === 'expired'` | `internal` | Funnel |
-| `verification.anomaly` | Identity | Identity evidence is internally inconsistent (impersonation, reuse, liveness failure) | `sensitive` (bus) / `internal` (analytics projection) | Safety |
-| `verification.appealed` | Identity | A user contests a verification outcome | `internal` | Safety |
+| `verification.attempt.started` | Identity | A verification attempt begins; carries the attempt id, a re-verification flag, and a reason code | `internal` | Funnel |
+| `verification.attempt.completed` | Identity | An attempt resolves; carries the attempt id, attempt state, a decision **label**, and a **band** — never a score | `internal` | Funnel |
+| `verification.review.proposed` | Identity | Evidence supports a human review; carries subject, detector, findings | `sensitive` (bus) / `internal` (analytics projection) | Safety |
+| `verification.anomaly` | Identity | Identity evidence is internally inconsistent (impersonation, reuse, liveness failure); carries findings as codes and counts | `sensitive` (bus) / `internal` (analytics projection) | Safety |
+| `verification.re_verification.requested` | Identity | A re-verification is requested by Trust & Safety or Moderation; carries a reason code and the requesting domain | `internal` | Safety |
+| `verification.evidence.accessed` | Identity | Identity evidence is read; carries the audit entry, granted or denied | `restricted` | Health |
 
-The `verification.failed` / `review_required` / `expired` rows are *derived views*
-of one event, not three independent emissions. Two code paths emitting the same
-fact is exactly the double-counting that makes a funnel metric wrong, so the
-taxonomy requires them to be projections of `verification.completed`.
+Three rules the metric definitions in §3 depend on:
+
+- **The identity state is a dimension, not a separate event.**
+  `verified` / `verification_failed` / `review_required` / `expired` are the
+  decision label and state on `verification.attempt.completed`. Deriving
+  `verification.failed` as a projection rather than a second emission is what
+  keeps a funnel from double-counting: two code paths emitting one fact is
+  precisely how a completion rate goes wrong.
+- **A band, never a score.** `verification.attempt.completed` carries the
+  decision band and not the likeness score. A score in the warehouse is a score
+  in a breach, and it is also a per-user value that would identify anyone
+  holding the model.
+- **The product stream is not the metrics stream.** `identity.status_changed`
+  (`public`, carrying the projection and nothing else) is what Dating Core and
+  Discovery subscribe to. It is **not** in this taxonomy and must not be added to
+  it: the metrics sink counts from `verification.attempt.*` and joins to the
+  account funnel in analysis. Subscribing analytics to the identity status
+  stream to "simplify" the funnel is the mistake this note exists to prevent —
+  it would put identity state and its timings into a pipeline that has no need
+  for them.
 
 ### 2.3 Discovery, likes, matches (Dating Core)
 
@@ -189,16 +242,16 @@ The rates that are easy to get wrong are marked **[denominator trap]**.
 
 ### 3.1 Verification completion rate
 
-- **Formula:** `users reaching 'verified' ÷ users who submitted a verification`
-- **Numerator:** distinct `userId` with `verification.completed` where `to === 'verified'`, within the window.
-- **Denominator:** distinct `userId` with `verification.submitted` in the same window, **plus** any still-`pending` submission from the previous 3 days, so that in-flight verifications are not counted as failures.
-- **[denominator trap]** The naive denominator — "failed ÷ submitted" — silently converts every slow verification into a failure and will report a completion rate that swings with provider latency rather than with user behaviour. A cohort view (submitted in week *W*, outcome resolved by *W+7d*) is the version to use for anything that goes on a slide.
-- **Pitfalls:** a `review_required` outcome counts as *not yet verified*, not as failed; a user who retries is one denominator entry and can be many numerator entries, so dedupe by user; excluding users who abandoned before submitting measures nothing.
+- **Formula:** `users whose verification reached 'verified' ÷ users who started a verification attempt`
+- **Numerator:** distinct `userId` with `verification.attempt.completed` whose decision label is `verified`, within the window.
+- **Denominator:** distinct `userId` with `verification.attempt.started` in the same window, **plus** any attempt still open from the previous 3 days, so in-flight verifications are not counted as failures.
+- **[denominator trap]** The naive denominator — "failed ÷ started" — silently converts every slow verification into a failure and will report a completion rate that swings with provider latency rather than with user behaviour. A cohort view (attempt started in week *W*, outcome resolved by *W+7d*) is the version to use for anything that goes on a slide.
+- **Pitfalls:** a `review_required` outcome counts as *not yet verified*, not as failed; a user who retries is one denominator entry and can be many numerator entries, so dedupe by user; excluding users who never began an attempt measures nothing. The window is counted from `verification.attempt.*`, never from `identity.status_changed` — see §2.2.
 
 ### 3.2 Verification false-reject rate
 
-- **Formula:** `users with to === 'verification_failed' who later reached 'verified' within 30 days ÷ users with to === 'verification_failed'`
-- **Denominator:** distinct users with a `verification_failed` outcome in the window.
+- **Formula:** `users whose attempt was labelled 'verification_failed' and who later reached 'verified' within 30 days ÷ users whose attempt was labelled 'verification_failed'`
+- **Denominator:** distinct users with a `verification_failed` decision label in the window.
 - **Rationale for the 30-day lag:** a false reject that the user retries and passes is only observable as a false reject once the retry lands. Measuring at 0 days measures nothing.
 - **Pitfalls:** this is a *lower bound* on the false-reject rate — a user who gives up and never returns is invisible to it. Pair it with a support-ticket rate on verification and with the appeal rate (§3.12). Reject-and-appeal is the observable path: appeals are the sampling frame for manual review, and the reviewed sample is where the true rate is estimated.
 
@@ -206,7 +259,7 @@ The rates that are easy to get wrong are marked **[denominator trap]**.
 
 - **Formula:** `confirmed-fraudulent users who reached 'verified' ÷ users who reached 'verified'`
 - **Numerator:** users with a `confirmed_fraudulent` moderator finding, i.e. a `case.resolved` with outcome `banned` or `suspended` on fraud grounds, at any time **after** the verification event, attributed back to the verification cohort.
-- **Denominator:** distinct users with `verification.completed` where `to === 'verified'` in the cohort window.
+- **Denominator:** distinct users with `verification.attempt.completed` labelled `verified` in the cohort window.
 - **[denominator trap]** The denominator is *all verified users*, not the moderated subset. Using "fraudulent profiles among reviewed cases" measures the review queue's composition, not the product's failure rate.
 - **Pitfalls:** outcome-based, so it has a long tail and a small numerator — report it as a rate with a confidence interval and a minimum-count gate, never as a bare percentage. A sudden drop is as meaningful as a rise: it usually means moderation stopped, not that fraud stopped. It is also the metric most vulnerable to a loophole, so it is paired with the primary metric in §3.6.
 
@@ -234,7 +287,7 @@ The rates that are easy to get wrong are marked **[denominator trap]**.
 
 ### 3.7 Moderator cases per 1,000 users
 
-- **Formula:** `distinct case.opened ÷ distinct account.created × 1000`
+- **Formula:** `distinct case.opened ÷ distinct account.registration_completed × 1000`
 - **Denominator:** users created in the same window, all states, including `banned`. The alternative denominator (active users only) makes the rate fall every time enforcement works, which is the wrong direction.
 - **Pitfalls:** a case opened on a report and a case opened on a risk escalation are different work; `case.opened` carries an `origin` and the two rates are reported side by side. `case.opened` also counts cases later closed as `cleared`, which is intended — moderator time is spent either way.
 
@@ -263,7 +316,7 @@ The rates that are easy to get wrong are marked **[denominator trap]**.
 - **Formula (7d):** `users with a qualifying session in [signup + 7d, signup + 7d + 1d) ÷ users created in the cohort window × 100`
 - **Formula (30d):** `users with a qualifying session in [signup + 30d, signup + 30d + 1d) ÷ cohort users × 100`
 - **Qualifying session:** any of `discovery.entered`, `conversation.created`, or `message.recorded` — an app open that leads to no interaction does not count, because a retention number that a push-notification tap can move is a notification metric.
-- **[denominator trap]** Cohorts are by `account.created`, and the denominator is the **full cohort**, with no survival filtering. Users who deleted their account remain in the denominator. This makes deletion suppress retention, which is correct.
+- **[denominator trap]** Cohorts are by `account.registration_completed`, and the denominator is the **full cohort**, with no survival filtering. Users who deleted their account remain in the denominator. This makes deletion suppress retention, which is correct.
 - **Pitfalls:** the 30-day window is unmeasurable for the most recent 30 days of cohorts and must be plotted with a lag marker, or every chart will show a cliff that is a reporting artefact; a deleted-then-recreated account is one new user, so a user who churns and returns is double-counted as a re-acquisition and must be tagged.
 
 ### 3.12 Support metrics
@@ -310,7 +363,7 @@ The service is a modular monolith, so the SLOs are per user-visible action, not 
 | Block applied | 100% / p95 ≤ 300 ms | **0** | A safety action that failed is a safety failure. No budget: the write is a single indexed insert and any failure is a page, not a degradation |
 | Report submitted | 99.9% / p95 ≤ 1 s | 43 min | Slower because it attaches evidence |
 | Notification dispatched (critical kinds) | 99.9% within 30 s | 43 min | Slower end-to-end path; an undelivered enforcement notice is an incident |
-| Verification pipeline completion | 99.5% within 5 min of `verification.submitted` | 3.6 h | Provider-bound, hence 99.5% not 99.9% |
+| Verification pipeline completion | 99.5% within 5 min of `verification.attempt.started` | 3.6 h | Provider-bound, hence 99.5% not 99.9% |
 | Moderation case resolution | median ≤ 24 h, p90 ≤ 72 h | n/a (a target, not a budget) | §3.8 |
 | Event bus delivery | 99.99%, p95 lag ≤ 60 s | 4.3 min | Everything else is measured from these events |
 | Analytics ingest loss | ≤ 0.1% of published events | n/a | Loss is measured against a per-hour published-count counter, not sampled |
@@ -358,7 +411,7 @@ thirty minutes of nothing.
 
 | Dashboard | Contents | Audience |
 |-----------|----------|----------|
-| **Onboarding funnel** | `account.created` → `account.age_gate.passed` → `verification.submitted` → `verification.completed` (`to = verified`) → `profile.completed` → first `discovery.entered`, with step-to-step conversion, median time between steps, and the 7-day-baseline overlay | Product |
+| **Onboarding funnel** | `account.app_opened` → `account.registration_started` → `account.registration_completed` → `account.onboarding_step_completed` (`step = age_gate`) → `verification.attempt.started` → `verification.attempt.completed` (state `passed`) → `profile.published` → first `discovery.entered`, with step-to-step conversion, `account.registration_rejected` broken out by `reason_code`, median time between steps, and the 7-day-baseline overlay | Product |
 | **Dating funnel** | `discovery.entered` → `discovery.page_served` → `like.recorded` → `match.created` → `message.recorded` → `message.read`, plus match→first-message rate and both-sided-reply rate, split by signup cohort | Product |
 | **Safety** | §3.3–§3.6 primary metrics with cohort sizes and intervals, the block-to-report ratio, the risk-state distribution, `safety.high_risk_before_first_report` with its cohort size, and the appeal rate | Safety, product |
 | **Moderation ops** | Open case count by `origin` and priority, median/p90/p99 resolution time, outcome mix, the `account_state.changed` volume, and moderator throughput per case type | Moderation |
@@ -411,8 +464,8 @@ accident even if it wanted to.
 
 | Event class | Sampling | Why |
 |-------------|----------|-----|
-| Safety events (`report.submitted`, `block.changed`, `case.opened`, `case.resolved`, `account_state.changed`, `account.restriction.*`, `risk.*`, `conversation.flagged_pattern`, `message.withheld_by_system`, `verification.failed`, `moderation.appealed`) | **100%** | Rare, high-consequence, and the sample size is already small. Sampling safety data makes every safety metric in §3 wrong, and it is the class most likely to be needed in a dispute |
-| Funnel step events (`account.created`, `verification.submitted`, `verification.completed`, `profile.completed`, `discovery.entered`, `like.recorded`, `match.created`, `conversation.created`, `message.recorded`) | **100%** | The denominators of §3 live here. A sampled funnel step makes every downstream rate a biased estimate |
+| Safety events (`report.submitted`, `block.changed`, `case.opened`, `case.resolved`, `account_state.changed`, `account.restriction.*`, `risk.*`, `conversation.flagged_pattern`, `message.withheld_by_system`, `verification.review.proposed`, `verification.anomaly`, `verification.re_verification.requested`, `moderation.appealed`) | **100%** | Rare, high-consequence, and the sample size is already small. Sampling safety data makes every safety metric in §3 wrong, and it is the class most likely to be needed in a dispute |
+| Funnel step events (`account.app_opened`, `account.registration_started`, `account.registration_completed`, `account.onboarding_step_completed`, `account.registration_rejected`, `verification.attempt.started`, `verification.attempt.completed`, `profile.published`, `discovery.entered`, `like.recorded`, `match.created`, `conversation.created`, `message.recorded`) | **100%** | The denominators of §3 live here. A sampled funnel step makes every downstream rate a biased estimate |
 | `discovery.page_served` | **10%, deterministic hash of `userId` + `sessionId`** | The one genuinely high-volume event: ten cards per request. A deterministic hash keeps the sample unbiased across users and time, so a 10% sample scales to the full population rather than skewing toward whoever arrives first. Any rate computed from it uses the hash as a weighting factor, and the dashboard says "sampled" on the tile |
 | `message.read`, `preferences.updated`, `settings.updated`, `moderation.appealed`, `discovery.exhausted` | **100%** | Low volume, and several are leading safety indicators |
 | `notification.*` | 100% aggregate, `notification.dispatched`/`failed` sampled at 25% by the same hash | Volume scales with messages |
@@ -505,7 +558,7 @@ missing metric, and a missing metric cannot be reconstructed after launch.
   2× the projected load if §3.6 shows proactive detection working. Proactive
   detection generating cases is a success that costs money, and the trigger to
   hire is not written down.
-- Whether `verification_anomaly` should contribute a numerator to §3.3
+- Whether `verification.anomaly` should contribute a numerator to §3.3
   (fraudulent profiles passing verification). It would catch a class of fraud that
   currently only surfaces at moderation, but an anomaly is a signal and not a
   finding, so counting it as a pass-through failure would inflate the metric with
@@ -515,3 +568,21 @@ missing metric, and a missing metric cannot be reconstructed after launch.
   disengagement rather than a harm claim, so the two are counted separately.
   Changing that changes a headline number, so it needs a decision before launch
   rather than after the first quarterly review.
+- **Event-name reconciliation across specs, for the integrator.** The
+  architecture and feature specs currently use two different names for the
+  identity status stream — `identity.status_changed` in
+  [Identity & Verification](../architecture/identity-and-verification.md) and
+  `identity_status.changed` in six feature documents written against the
+  overview's safety-spine diagram. This index follows the architecture doc,
+  since the domain that owns the emission is the one whose spelling binds. The
+  feature docs are not wrong in intent, only in spelling, and a single rename
+  across them is a mechanical fix — but it should be one deliberate change, not
+  six drifting ones. Until it happens, a reader searching for the identity
+  stream will find both names, and the analytics rule in §2.2 ("never subscribe
+  the metrics sink to the identity status stream") reads as though it applies to
+  a differently-named event than the one the code will use.
+- Whether `account.registration_rejected` broken out by `reason_code` counts an
+  `under_18` rejection as onboarding drop-off. It is a funnel exit with a
+  legitimate reason and no user, so counting it as a drop depresses the
+  completion rate for a reason that is neither a product defect nor user
+  behaviour. Currently excluded from step conversion and reported separately.

@@ -56,9 +56,10 @@ export const caseMachine: StateMachine<CaseState, CaseEvent, CaseContext> =
     transitions: [
       {
         event: 'assign',
-        from: ['open', 'assigned'],
+        from: ['open', 'assigned', 'escalated'],
         to: 'assigned',
         guard: (ctx) => ctx?.moderatorId !== undefined,
+        note: 'An escalated case can be picked up, but only by a lead — see `canWorkCase`.',
       },
       {
         event: 'start_review',
@@ -370,6 +371,14 @@ function finishCase(ctx: ModerationContext, draft: CaseDraft): Result<CaseOpened
  * not self-service.
  */
 export function canWorkCase(moderationCase: Case, actor: ModeratorActor): Result<true, DomainError> {
+  if (actor.automated) {
+    return domainError(
+      'permission_denied',
+      'moderation.case',
+      'automation may not work a case: only a human moderator acts on one',
+      { caseId: moderationCase.caseId, actorId: actor.actorId },
+    );
+  }
   if (moderationCase.state === 'escalated' && !actor.isLead) {
     return domainError(
       'permission_denied',
@@ -602,8 +611,16 @@ export function mergeReports(
     moderationCase.origin.source === 'user_report' ? [...moderationCase.origin.reasons] : [];
 
   for (const report of reports) {
-    if (report.state === 'merged' && report.mergedCaseId === moderationCase.caseId) {
-      continue;
+    if (report.state === 'merged') {
+      if (report.mergedCaseId === moderationCase.caseId) {
+        continue;
+      }
+      return domainError(
+        'conflict',
+        'moderation.case',
+        `report '${report.reportId}' already belongs to case '${report.mergedCaseId ?? 'unknown'}'`,
+        { caseId: moderationCase.caseId, reportId: report.reportId },
+      );
     }
     const next = reportMachine.next(report.state, 'merge', {
       caseId: moderationCase.caseId,
@@ -624,7 +641,9 @@ export function mergeReports(
       mergedCaseId: moderationCase.caseId,
       updatedAt,
     });
-    mergedReportIds.push(report.reportId);
+    if (!moderationCase.reportIds.includes(report.reportId)) {
+      mergedReportIds.push(report.reportId);
+    }
     for (const item of report.capturedEvidence) {
       if (!evidenceIds.includes(item.evidenceId)) {
         evidenceIds.push(item.evidenceId);

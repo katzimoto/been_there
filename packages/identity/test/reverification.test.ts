@@ -164,7 +164,7 @@ describe('anti-abuse limits on re-verification', () => {
       (_, index) =>
         historyEntry({
           verificationId: castId<'VerificationId'>(`vrf-${index}`),
-          requestedAt: daysLater(-40 + index * 12),
+          requestedAt: daysLater(-(index * 9) - 1),
         }),
     );
     const error = errorOf(ask('case_linked', 'moderation', 'verified', history));
@@ -205,8 +205,8 @@ describe('what a re-verification plan may contain', () => {
     const plan = succeeded(ask('anomaly_findings', 'moderation', 'verified'));
     expect(Object.keys(plan).sort()).toEqual([
       'nextIdentityState',
-      'reason',
       'reVerification',
+      'reason',
       'requestedBy',
       'subjectId',
       'viaEvent',

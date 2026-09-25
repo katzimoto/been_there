@@ -212,6 +212,17 @@ export interface CapabilityGrant {
   readonly granted: readonly string[];
 }
 
+/**
+ * Capabilities a restriction may never take away.
+ *
+ * Reporting is the intake valve for abuse reports, and blocking is how a user
+ * protects themselves. A restriction that removed either would be a moderator
+ * mistake with a product-wide consequence: abuse reports stop arriving, or a
+ * victim cannot protect themselves, and neither shows up in any metric the
+ * platform can see. So the removals are filtered rather than trusted.
+ */
+export const UNRESTRICTABLE_CAPABILITIES: readonly string[] = ['report', 'block'];
+
 export function capabilityGrantFor(
   account: {
     readonly userId: UserId;
@@ -220,7 +231,7 @@ export function capabilityGrantFor(
   },
   restrictions: readonly ActiveRestriction[],
 ): CapabilityGrant {
-  const removed = restrictions.flatMap((restriction) => restriction.removedCapabilities);
+  const removed = effectiveRemovals(restrictions);
   return {
     userId: account.userId,
     accountId: account.accountId,
@@ -245,11 +256,19 @@ export function isCapabilityGranted(grant: CapabilityGrant, attempt: CapabilityA
   if (!CAPABILITY_VOCABULARY.has(attempt.capability)) {
     return false;
   }
-  const extraRemovals = attempt.context?.removedCapabilities ?? [];
-  const removed = grant.restrictions.flatMap((restriction) => restriction.removedCapabilities);
+  const extraRemovals = (attempt.context?.removedCapabilities ?? []).filter(
+    (capability) => !UNRESTRICTABLE_CAPABILITIES.includes(capability),
+  );
+  const removed = effectiveRemovals(grant.restrictions);
   return capabilitiesFor(grant.state, {
     removedCapabilities: [...removed, ...extraRemovals],
   }).includes(attempt.capability);
+}
+
+function effectiveRemovals(restrictions: readonly ActiveRestriction[]): readonly string[] {
+  return restrictions
+    .flatMap((restriction) => restriction.removedCapabilities)
+    .filter((capability) => !UNRESTRICTABLE_CAPABILITIES.includes(capability));
 }
 
 /**

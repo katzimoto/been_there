@@ -2,11 +2,12 @@ import type { IdentityState, UserId } from '@been-there/core';
 import { activeBlockBetween } from './blocks.js';
 import { type DistanceBand, isWithinDistanceLimit } from './location.js';
 import { areMutuallyCompatible, type CompatibilitySide } from './preferences.js';
-import type {
-  CandidateCardProjection,
-  DatingReadModel,
-  RelationshipProjection,
-  SubjectStandingProjection,
+import {
+  DATING_READ_MODEL_VERSION,
+  type CandidateCardProjection,
+  type DatingReadModel,
+  type RelationshipProjection,
+  type SubjectStandingProjection,
 } from './read-models.js';
 
 /**
@@ -50,6 +51,7 @@ export type EligibilityReason =
   | 'already_liked'
   | 'already_matched'
   | 'age_out_of_range'
+  | 'gender_out_of_scope'
   | 'beyond_distance_limit'
   | 'not_mutually_compatible';
 
@@ -69,7 +71,6 @@ export interface EligibilityRule {
   readonly reason: EligibilityReason;
   readonly disqualifies: (snapshot: DiscoverySnapshot) => boolean;
 }
-
 function compatibilitySide(subject: SubjectStandingProjection): CompatibilitySide {
   return {
     age: subject.profile.age,
@@ -156,6 +157,18 @@ export const ELIGIBILITY_RULES: readonly EligibilityRule[] = [
     disqualifies: (s) => !isWithinDistanceLimit(s.distance ?? 'unknown', s.viewer.preferences.maxDistanceKm),
   },
   {
+    reason: 'gender_out_of_scope',
+    // note: the viewer’s own interest list is a filter on their own page, exactly
+    // like the age range. The mutual test below adds the candidate’s own wishes.
+    disqualifies: (s) => {
+      const interestedIn = s.viewer.preferences.interestedIn;
+      if (interestedIn === null) {
+        return false;
+      }
+      return !s.candidate.profile.genderIdentities.some((identity) => interestedIn.includes(identity));
+    },
+  },
+  {
     reason: 'not_mutually_compatible',
     disqualifies: (s) =>
       !areMutuallyCompatible(compatibilitySide(s.viewer), compatibilitySide(s.candidate), s.distance)
@@ -195,6 +208,10 @@ export function selectEligibleCards(
   model: DatingReadModel,
   candidateIds: readonly UserId[],
 ): CandidateCardProjection[] {
+  if (model.version !== DATING_READ_MODEL_VERSION) {
+    // A consumer that cannot read the shape must refuse it, not guess at it.
+    return [];
+  }
   const viewer = model.standingFor(viewerId);
   if (viewer === null) {
     return [];

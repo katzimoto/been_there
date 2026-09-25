@@ -89,38 +89,26 @@ describe('resolveMatch', () => {
     });
   });
 
-  it('produces exactly one match from two reciprocal likes, in either arrival order', () => {
-    const aFirst = resolution({
-      actor: A,
-      counterpart: B,
-      like: mutual.likes[1]!,
-      ledger: mutual,
-      blocks: [],
-      passes: [],
-    });
-    const bFirst = resolution({
-      actor: B,
-      counterpart: A,
-      like: mutual.likes[0]!,
-      ledger: mutual,
-      blocks: [],
-      passes: [],
-    });
-    expect(aFirst.outcome).toBe('match_created');
-    expect(aFirst).toEqual(bFirst);
-    if (aFirst.outcome !== 'match_created' || bFirst.outcome !== 'match_created') {
+  it('produces exactly one match from two reciprocal likes, whichever side commits second', () => {
+    // Two racers: each has just inserted their own like into a ledger that now
+    // contains both, and each resolves the pair independently.
+    const aSecond = resolution({ actor: A, counterpart: B, like: like(A, B, 'like-a-b'), ledger: mutual, blocks: [], passes: [] });
+    const bSecond = resolution({ actor: B, counterpart: A, like: like(B, A, 'like-b-a'), ledger: mutual, blocks: [], passes: [] });
+    expect(aSecond.outcome).toBe('match_created');
+    expect(aSecond).toEqual(bSecond);
+    if (aSecond.outcome !== 'match_created' || bSecond.outcome !== 'match_created') {
       throw new Error('expected a match');
     }
-    expect(aFirst.match.matchId).toBe(deriveMatchId(A, B));
-    expect([...aFirst.match.likeIds].sort()).toEqual([likeId('like-a-b'), likeId('like-b-a')]);
-    expect(aFirst.match.participants).toEqual([A, B]);
-    expect(aFirst.match.status).toBe('active');
+    expect(aSecond.match.matchId).toBe(deriveMatchId(A, B));
+    expect([...aSecond.match.likeIds].sort()).toEqual([likeId('like-a-b'), likeId('like-b-a')]);
+    expect(aSecond.match.participants).toEqual([A, B]);
+    expect(aSecond.match.status).toBe('active');
   });
 
-  it('derives the same match when the two likes are recorded in the opposite order', () => {
+  it('derives the same match when the two likes were recorded in the opposite order', () => {
     const bFirst = succeeded(recordLike(EMPTY_LEDGER, like(B, A, 'like-b-a')));
     const ledger = succeeded(recordLike(bFirst, like(A, B, 'like-a-b')));
-    const result = resolution({ actor: A, counterpart: B, like: ledger.likes[1]!, ledger, blocks: [], passes: [] });
+    const result = resolution({ actor: A, counterpart: B, like: like(A, B, 'like-a-b'), ledger, blocks: [], passes: [] });
     if (result.outcome !== 'match_created') {
       throw new Error('expected a match');
     }
@@ -128,18 +116,18 @@ describe('resolveMatch', () => {
   });
 
   it('refuses a match when either party has blocked the other', () => {
-    expect(resolution({ actor: A, counterpart: B, like: mutual.likes[1]!, ledger: mutual, blocks: [block(B, A)], passes: [] })).toEqual({
+    expect(resolution({ actor: A, counterpart: B, like: like(A, B, 'like-a-b'), ledger: mutual, blocks: [block(B, A)], passes: [] })).toEqual({
       outcome: 'match_refused',
       reason: 'blocked',
     });
   });
 
   it('refuses a match across an active pass in either direction', () => {
-    expect(resolution({ actor: A, counterpart: B, like: mutual.likes[1]!, ledger: mutual, blocks: [], passes: [pass(A, B)] })).toEqual({
+    expect(resolution({ actor: A, counterpart: B, like: like(A, B, 'like-a-b'), ledger: mutual, blocks: [], passes: [pass(A, B)] })).toEqual({
       outcome: 'match_refused',
       reason: 'passed',
     });
-    expect(resolution({ actor: A, counterpart: B, like: mutual.likes[1]!, ledger: mutual, blocks: [], passes: [pass(B, A)] })).toEqual({
+    expect(resolution({ actor: A, counterpart: B, like: like(A, B, 'like-a-b'), ledger: mutual, blocks: [], passes: [pass(B, A)] })).toEqual({
       outcome: 'match_refused',
       reason: 'passed',
     });

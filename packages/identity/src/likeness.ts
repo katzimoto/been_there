@@ -140,6 +140,16 @@ export function decideVerificationOutcome(input: DecisionInput): VerificationDec
     }
     return acc;
   }, null);
+  /**
+   * The worst finding that a human must actually see. An `informational`
+   * finding is recorded and stops here: it must not change an outcome, which
+   * is the whole difference between the two lowest severities.
+   */
+  const actionableAnomaly =
+    worstAnomaly !== null &&
+    ANOMALY_SEVERITY_RANK[worstAnomaly.severity] >= ANOMALY_SEVERITY_RANK.review
+      ? worstAnomaly
+      : null;
 
   if (!confidenceResult.ok) {
     return {
@@ -152,11 +162,11 @@ export function decideVerificationOutcome(input: DecisionInput): VerificationDec
 
   const confidence = confidenceResult.value;
 
-  if (worstAnomaly !== null && worstAnomaly.severity === 'blocking') {
+  if (actionableAnomaly?.severity === 'blocking') {
     return {
       decision: 'manual_review',
       confidence,
-      rationale: [`anomaly requires human review: ${worstAnomaly.code}`],
+      rationale: [`anomaly requires human review: ${actionableAnomaly.code}`],
       missingChecks: missing,
     };
   }
@@ -207,11 +217,11 @@ export function decideVerificationOutcome(input: DecisionInput): VerificationDec
     };
   }
 
-  if (worstAnomaly !== null) {
+  if (actionableAnomaly !== null) {
     return {
       decision: 'manual_review',
       confidence,
-      rationale: [`anomaly requires human review: ${worstAnomaly.code}`],
+      rationale: [`anomaly requires human review: ${actionableAnomaly.code}`],
       missingChecks: missing,
     };
   }

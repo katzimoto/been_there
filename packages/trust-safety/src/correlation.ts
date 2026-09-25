@@ -86,9 +86,10 @@ function corroboratingDetectors(recent: readonly Signal[], subjectId: SubjectId,
  * score and nothing else — it can never supply the second independent detector
  * that `critical` requires.
  */
-function countRepetitions(recent: readonly Signal[], incoming: Signal): number {
+function countRepetitions(recent: readonly Signal[], repeatWindowStart: number, incoming: Signal): number {
   return recent.filter(
     (entry) =>
+      entry.occurredAt.getTime() >= repeatWindowStart &&
       entry.detector === incoming.detector &&
       entry.subjectId === incoming.subjectId &&
       sameBehaviour(entry.behaviour, incoming.behaviour),
@@ -137,7 +138,11 @@ export function corroborate(ledger: SignalLedger, incoming: Signal): Corroborati
   return {
     detectors,
     independentDetectors: detectors.length,
-    repetitions: countRepetitions(recent, incoming),
+    repetitions: countRepetitions(
+      recent,
+      addHours(incoming.occurredAt, -REPEAT_WINDOW_HOURS).getTime(),
+      incoming,
+    ),
     massReport: detectMassReport(recent, incoming),
   };
 }

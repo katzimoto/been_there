@@ -62,12 +62,25 @@ export interface MatchProjection {
   readonly match: MatchRecord | null;
 }
 
-/** The pairwise view the gate consumes, assembled from the three above. */
+/** The pairwise view the gate consumes, derived from the three projections above. */
 export interface RelationshipProjection {
   readonly blocks: readonly BlockRecord[];
   readonly likes: readonly LikeRecord[];
   readonly passes: readonly PassRecord[];
   readonly match: MatchRecord | null;
+}
+
+/**
+ * Assembles that view from the three projections, so the gate can never see a
+ * relationship assembled by two different code paths that disagree about the
+ * same pair.
+ */
+export function relationshipView(
+  blocks: BlockListProjection,
+  ledger: InteractionLedgerProjection,
+  match: MatchProjection,
+): RelationshipProjection {
+  return { blocks: blocks.blocks, likes: ledger.likes, passes: ledger.passes, match: match.match };
 }
 
 /**

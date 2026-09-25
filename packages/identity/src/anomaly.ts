@@ -124,7 +124,6 @@ export interface AnomalySignals {
   /** Age the provider estimated from the evidence, coarse. */
   readonly evidenceAgeYears: number | null;
   readonly sharedDeviceAccountCount: number;
-  readonly attemptsFromDistinctDevices: number;
   readonly lastTwoAttemptsKmApart: number | null;
   readonly lastTwoAttemptsHoursApart: number;
   readonly selfieMatchesAgainstOtherSubjects: number;

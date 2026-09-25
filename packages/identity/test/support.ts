@@ -28,7 +28,7 @@ export function daysLater(days: number, from: Date = T0): Date {
   return hoursLater(days * 24, from);
 }
 
-export const SUBJECT = castId<'SubjectId'>('user-1');
+export const SUBJECT: SubjectId = castId<'SubjectId'>('user-1');
 
 export function check(
   name: VerificationCheck,
@@ -75,7 +75,6 @@ export function quietSignals(overrides: Partial<AnomalySignals> = {}): AnomalySi
     declaredAgeYears: 30,
     evidenceAgeYears: 31,
     sharedDeviceAccountCount: 1,
-    attemptsFromDistinctDevices: 1,
     lastTwoAttemptsKmApart: null,
     lastTwoAttemptsHoursApart: 24,
     selfieMatchesAgainstOtherSubjects: 0,

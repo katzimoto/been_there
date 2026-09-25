@@ -127,7 +127,7 @@ describe('audited evidence access', () => {
   it('grants only the unexpired artefacts, once, for a short window', () => {
     const log = new RecordingLog();
     const grant = succeeded(grantEvidenceAccess(accessRequest(), stored, log));
-    expect(grant.storageRefs.sort()).toEqual(['ref:government_id_image', 'ref:selfie_image']);
+    expect([...grant.storageRefs].sort()).toEqual(['ref:government_id_image', 'ref:selfie_image']);
     expect(grant.maxUses).toBe(1);
     expect(grant.expiresAt.getTime() - T0.getTime()).toBe(
       EVIDENCE_ACCESS_RULES.grantTtlMinutes * 60_000,

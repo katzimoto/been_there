@@ -156,7 +156,9 @@ function genderBreaks(viewer: CompatibilitySide, candidate: CompatibilitySide): 
   if (viewerInterestedIn === null || candidateInterestedIn === null) {
     return false;
   }
-  return !candidate.genderIdentities.some((identity) => viewerInterestedIn.includes(identity));
+  const viewerListCoversCandidate = candidate.genderIdentities.some((identity) => viewerInterestedIn.includes(identity));
+  const candidateListCoversViewer = viewer.genderIdentities.some((identity) => candidateInterestedIn.includes(identity));
+  return !viewerListCoversCandidate || !candidateListCoversViewer;
 }
 
 /**
