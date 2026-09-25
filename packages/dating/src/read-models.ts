@@ -33,7 +33,7 @@ export const BROWSE_DISCOVERY_CAPABILITY = 'browse_discovery';
 export const LIKE_CAPABILITY = 'like';
 export const MESSAGE_CAPABILITY = 'send_message';
 
-/** Built from `identity_status.changed` (public). No evidence, ever. */
+/** Built from `identity.status_changed` (public). No evidence, ever. */
 export interface IdentityStandingProjection {
   readonly projectionVersion: number;
   readonly state: IdentityState;

@@ -30,7 +30,7 @@ have, and with the ability to report surviving every way a relationship ends.
 | Whether a candidate was eligible | #11. This feature re-evaluates the same rule set at action time; it does not re-derive it |
 | Block edges and the block action | User Safety Controls (#14). A block only ever *removes* things here |
 | Reports, cases, evidence, retention | Moderation & Enforcement (#7). This feature never deletes evidence |
-| `AccountState`, capabilities, and identity state | Moderation & Enforcement (#7) and Identity & Verification (#3); consumed via `account_state.changed` and `identity_status.changed` |
+| `AccountState`, capabilities, and identity state | Moderation & Enforcement (#7) and Identity & Verification (#3); consumed via `account_state.changed` and `identity.status_changed` |
 | Conversation and message state | Communication (#5). Unmatch *requests* a conversation transition; it does not perform one |
 | Whether an unmatch "should" feel good | Product copy, owned here, must stay neutral — see §8.4 |
 
@@ -39,7 +39,7 @@ have, and with the ability to report surviving every way a relationship ends.
 | State | Owner | How this feature learns about it |
 |-------|-------|----------------------------------|
 | Like, pass, and match records, including match standing | Dating Core, this feature | local |
-| `IdentityState` | Identity & Verification | `identity_status.changed` → `IdentityStandingProjection` |
+| `IdentityState` | Identity & Verification | `identity.status_changed` → `IdentityStandingProjection` |
 | `AccountState` + capabilities | Moderation & Enforcement | `account_state.changed` → `AccountStandingProjection` |
 | Block edges | User Safety Controls | `BlockListProjection` |
 | Conversation state | Communication | `ConversationProjection`; unmatch publishes a request |
@@ -406,7 +406,7 @@ the honest one.
 
 ## 9. Like and match funnel events
 
-Named per the overview's catalogue convention (`identity_status.changed`,
+Named per the overview's catalogue convention (`identity.status_changed`,
 `account_state.changed`, `risk.changed`). Sensitivity per the five-class model.
 This is the like/match half of the funnel measured in #18; the discovery half
 is in [`./preferences-and-discovery.md`](./preferences-and-discovery.md) §8.

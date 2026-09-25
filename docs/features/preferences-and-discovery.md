@@ -38,7 +38,7 @@ Concretely, when this issue is done:
 
 | Never owns | Owner instead |
 |-----------|---------------|
-| Identity state, verification evidence, `IdentityRecord` fields | Identity & Verification (#3). This feature may only read `isDiscoverableIdentity` over a projection, or the `identity_status.changed` event |
+| Identity state, verification evidence, `IdentityRecord` fields | Identity & Verification (#3). This feature may only read `isDiscoverableIdentity` over a projection, or the `identity.status_changed` event |
 | `AccountState` and capability decisions | Moderation & Enforcement (#7). This feature reacts to `account_state.changed` |
 | Writing a `banned`/`suspended`/`limited` state | Never. Product domains have no enforcement write path at all |
 | Blocks as an action | User Safety Controls (#14). This feature only reads the block edges |
@@ -51,7 +51,7 @@ Concretely, when this issue is done:
 
 | State | Owner | How this feature learns about it |
 |-------|-------|----------------------------------|
-| `IdentityState` | Identity & Verification | `identity_status.changed` → `IdentityStandingProjection` |
+| `IdentityState` | Identity & Verification | `identity.status_changed` → `IdentityStandingProjection` |
 | `AccountState` + removed capabilities | Moderation & Enforcement | `account_state.changed` → `AccountStandingProjection` |
 | Block edges (both directions) | User Safety Controls | block events → `BlockListProjection` |
 | Profile content and publish state | Profile (#10) | `profile.completed` / `profile.state_changed` / `profile.deleted` (`draft\|incomplete\|complete\|paused\|hidden\|deleted`) consumed as a projection. The state set is Dating Core's own `ProfileState`: there is no `live` state, and `profile.deleted` is `user` sensitivity because a deletion is not a fact about discoverability |
@@ -212,7 +212,7 @@ type ExclusionReason =
 
 Eligibility is evaluated against the current projections at page-assembly time.
 There is no positive cache of "this candidate is eligible". Invalidation is by
-event: `identity_status.changed`, `account_state.changed`, a block edge, a like,
+event: `identity.status_changed`, `account_state.changed`, a block edge, a like,
 a pass, or a match all invalidate the affected rows. A page already served to a
 client is not rewritten; a profile that loses eligibility after it was served
 simply stops appearing on subsequent pages, and any action taken against it is
@@ -356,7 +356,7 @@ be hit repeatedly, and the fix is the honest empty state, not a filter bypass.
 
 ## 8. Discovery funnel events
 
-Named per the overview's catalogue convention (`identity_status.changed`,
+Named per the overview's catalogue convention (`identity.status_changed`,
 `account_state.changed`, `risk.changed`). Sensitivity is per the overview's
 five-class model. These are the discovery half of the funnel measured in #18.
 

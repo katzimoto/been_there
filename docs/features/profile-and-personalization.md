@@ -25,8 +25,8 @@ worth a like?" without messaging first.
 | Profile record, profile state, completeness boolean, photo set and order, prompt answers | **Dating Core** | writes through its command interface | — |
 | Photo bytes, transcoding, storage, delivery | Platform (media) | media service | Storing a file path or a CDN key in a profile read-model |
 | Photo content screening (nudity, text, face count, dedupe) | Moderation & Enforcement, via the screening pipeline | `profile.photo_rejected`, or a moderator case when the result is borderline | Declaring a photo "fine" from a product code path |
-| Likeness of a profile photo to the verified selfie | Identity & Verification | `identity_status.changed` plus the per-photo likeness outcome Identity owns | Reading the selfie, or a likeness score |
-| `IdentityState` | Identity & Verification | `identity_status.changed` → `DiscoveryStandingProjection` | Any local copy, any "trust the client" check |
+| Likeness of a profile photo to the verified selfie | Identity & Verification | `identity.status_changed` plus the per-photo likeness outcome Identity owns | Reading the selfie, or a likeness score |
+| `IdentityState` | Identity & Verification | `identity.status_changed` → `DiscoveryStandingProjection` | Any local copy, any "trust the client" check |
 | `AccountState` and capabilities | Moderation & Enforcement | `AccountStandingProjection` fed by `account_state.changed` | Any write, or any rendering of *why* a capability was removed |
 | Date of birth, age band derivation | Platform ([#9](./account-and-onboarding.md)) | `ageBand` on the card projection | A birth date, an exact age, or an age field |
 | Coarse location bucket | Platform | `location.resolved` + bucket band | A coordinate, an address, or a free-text location |
@@ -652,7 +652,7 @@ count bucket, never a value.
 | `profile.photo_rejected` | analytics | `reason_code` (content screen) | content gate refused a photo |
 | `profile.photo_set_updated` | analytics | `photo_count_bucket` | order/count changed, including automatic primary promotion |
 | `identity.duplicate_photo_signal` | **audit** (`sensitive`) | `match_kind: 'deleted_subject' \| 'blocked_party'` | dedupe hit against a deleted, blocked, or banned subject — Trust & Safety only, never analytics |
-| `identity_status.changed` | **audit** (Identity owns it) | — | drives the likeness/re-verification flow, not a metric |
+| `identity.status_changed` | **audit** (Identity owns it) | — | drives the likeness/re-verification flow, not a metric |
 | `account_state.changed` | **audit** (Moderation owns it) | — | a standing change may force `live` → `hidden`; the product reacts to the capability set, never to the reason |
 
 A photo-level outcome that is borderline is not a `profile.photo_rejected` with a

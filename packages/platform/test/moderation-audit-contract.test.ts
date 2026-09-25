@@ -57,8 +57,40 @@ function unionMembers(source: URL, typeName: string): readonly string[] {
     });
 }
 
+/**
+ * Extracts the members of a `const X = ['a', 'b'] as const` catalogue.
+ *
+ * Moderation's event vocabulary moved from a type-only union to a runtime array
+ * so that a cross-domain check could enumerate what it publishes — a type alias
+ * is erased at runtime, so a declared event nobody emits was indistinguishable
+ * from one that is. This parser refuses to guess in the same way `unionMembers`
+ * does, so if the shape moves again this test is re-read rather than silently
+ * covering fewer events.
+ */
+function catalogueMembers(source: URL, constName: string): readonly string[] {
+  const file = readFileSync(source, 'utf8');
+  const declaration = new RegExp(`export const ${constName} = \\[([\\s\\S]*?)\\] as const;`).exec(
+    file,
+  );
+  const body = declaration?.[1];
+  if (body === undefined) {
+    throw new Error(`${constName} is not a runtime catalogue in ${source.pathname}; update this test`);
+  }
+  return body
+    .split('\n')
+    .map((line) => line.trim().replace(/,$/, ''))
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      if (!/^'[^']+'$/.test(line)) {
+        throw new Error(`${constName} is no longer a list of string literals in ${source.pathname}`);
+      }
+      return line.slice(1, -1);
+    });
+}
+
+
 const MODERATION_ACTIONS = unionMembers(MODERATION_AUDIT_SOURCE, 'AuditAction');
-const MODERATION_EVENTS = unionMembers(MODERATION_EVENT_SOURCE, 'ModerationEventType');
+const MODERATION_EVENTS = catalogueMembers(MODERATION_EVENT_SOURCE, 'MODERATION_EVENT_TYPES');
 
 const NOW = new Date('2026-03-01T12:00:00.000Z');
 

@@ -277,18 +277,18 @@ export const AUDIT_REQUIRED_PREFIXES: readonly string[] = [
  * it were closed.
  */
 export const AUDIT_REQUIRED_TYPES: readonly string[] = [
-  // The legacy spelling of the identity spine event (overview §4). Identity
-  // publishes `identity.status_changed`, which the `identity.` prefix already
-  // covers; this row exists only so the other spelling stays audit-required
-  // while the documents and the producer are reconciled. It is the row to delete
-  // when the rename lands, not before.
-  'identity_status.changed',
-  // A safety fact with no moderation case behind it, and no domain prefix: the
-  // identity stream's own anomaly signal.
+  // A safety fact with no domain prefix of its own.
   'verification.anomaly',
   // Trust & Safety's one outward risk statement.
   'risk.changed',
 ];
+
+// The identity spine event is `identity.status_changed`, covered by the
+// `identity.` prefix above. It used to also appear in this list under the
+// spelling `identity_status.changed`, as a bridge while the documents and the
+// producer disagreed. Both are now `identity.status_changed`, so the row is
+// gone: two spellings of one event is a way for a consumer to subscribe to
+// something nobody publishes.
 
 /**
  * True when a published event is also an audit fact, whatever its sensitivity.

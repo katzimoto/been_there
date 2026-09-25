@@ -738,7 +738,7 @@ missing metric, and a missing metric cannot be reconstructed after launch.
   architecture and feature specs currently use two different names for the
   identity status stream — `identity.status_changed` in
   [Identity & Verification](../architecture/identity-and-verification.md) and
-  `identity_status.changed` in six feature documents written against the
+  `identity.status_changed` in six feature documents written against the
   overview's safety-spine diagram. This index follows the architecture doc,
   since the domain that owns the emission is the one whose spelling binds. The
   feature docs are not wrong in intent, only in spelling, and a single rename

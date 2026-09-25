@@ -68,7 +68,7 @@ The most important relationship in the system. Read it as *"information flows
 down, authority flows up"*.
 
 ```
-Identity ──(identity_status.changed: public)──▶ Dating Core ──eligibility──▶ Discovery
+Identity ──(identity.status_changed: public)──▶ Dating Core ──eligibility──▶ Discovery
     │                                                                │
     │ (verification.anomaly: sensitive)                                │ (interaction signals)
     ▼                                                                ▼
@@ -137,7 +137,7 @@ private.
 
 | Forbidden | Why | Instead |
 |---|---|---|
-| Dating Core reading `IdentityRecord.latestVerificationId` | Leaks identity internals into product logic | Read `identity_status.changed` / `isDiscoverableIdentity` |
+| Dating Core reading `IdentityRecord.latestVerificationId` | Leaks identity internals into product logic | Read `identity.status_changed` / `isDiscoverableIdentity` |
 | Any domain writing `AccountState` | Enforcement authority must be single-sourced | Moderation publishes `account_state.changed` |
 | Communication deciding a message is abusive | Moderation logic in the transport | Publish a signal to Trust & Safety |
 | Trust & Safety calling Moderation directly to "flag" a user | Bypasses the case record | Raise a signal; Moderation decides whether to open a case |

@@ -31,21 +31,31 @@ import type { DecisionId } from './ids.js';
     case about an identifiable person, which is the first fact a `restricted`
     clearance exists to withhold. Two events, two clearances, one decision.
  */
-export type ModerationEventType =
-  | 'moderation.report_submitted'
-  | 'moderation.report_status_changed'
-  | 'moderation.case_opened'
-  | 'moderation.case_assigned'
-  | 'moderation.case_escalated'
-  | 'moderation.case_reports_merged'
-  | 'moderation.case_resolved'
-  | 'moderation.evidence_captured'
-  | 'moderation.evidence_read'
-  | 'moderation.decision_recorded'
-  | 'moderation.decision_reversed'
-  | 'moderation.restriction_applied'
-  | 'moderation.restriction_lifted'
-  | 'account_state.changed';
+/**
+ * A runtime array, not only a type union, so a cross-domain check can
+ * enumerate what this domain publishes. The drift that made this necessary was
+ * invisible precisely because nothing could compare the published names against
+ * the consumed ones: a type alias is erased at runtime, so a declared event
+ * that nobody emits looks identical to one that is.
+ */
+export const MODERATION_EVENT_TYPES = [
+  'moderation.report_submitted',
+  'moderation.report_status_changed',
+  'moderation.case_opened',
+  'moderation.case_assigned',
+  'moderation.case_escalated',
+  'moderation.case_reports_merged',
+  'moderation.case_resolved',
+  'moderation.evidence_captured',
+  'moderation.evidence_read',
+  'moderation.decision_recorded',
+  'moderation.decision_reversed',
+  'moderation.restriction_applied',
+  'moderation.restriction_lifted',
+  'account_state.changed',
+] as const;
+
+export type ModerationEventType = (typeof MODERATION_EVENT_TYPES)[number];
 
 export const OUTWARD_ENFORCEMENT_EVENT: ModerationEventType = 'account_state.changed';
 

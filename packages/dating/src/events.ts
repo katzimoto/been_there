@@ -92,7 +92,7 @@ export interface BlockChangedPayload {
   readonly active: boolean;
 }
 
-/** `identity_status.changed`, owned by Identity. Declared, never published here. */
+/** `identity.status_changed`, owned by Identity. Declared, never published here. */
 export interface IdentityStatusChangedPayload {
   readonly userId: UserId;
   readonly state: string;
@@ -121,7 +121,7 @@ export type DatingEventType =
   | 'block.created'
   | 'block.released';
 
-export type ConsumedEventType = 'identity_status.changed' | 'account_state.changed';
+export type ConsumedEventType = 'identity.status_changed' | 'account_state.changed';
 
 export const DATING_EVENT_CATALOGUE: Readonly<Record<DatingEventType, EventDefinition>> = {
   'profile.completed': {
@@ -205,8 +205,8 @@ export const DATING_EVENT_CATALOGUE: Readonly<Record<DatingEventType, EventDefin
  * themselves are published by their owners.
  */
 export const CONSUMED_EVENT_CATALOGUE: Readonly<Record<ConsumedEventType, EventDefinition>> = {
-  'identity_status.changed': {
-    type: 'identity_status.changed',
+  'identity.status_changed': {
+    type: 'identity.status_changed',
     version: DATING_EVENT_VERSION,
     sensitivity: 'public',
     description: 'Source of the identity standing projection. Carries a state and a generation, never evidence.',

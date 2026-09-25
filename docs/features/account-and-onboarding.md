@@ -25,11 +25,11 @@ them.
 
 | Piece of state | Owning domain | How this feature reads it | Never owned here |
 |---|---|---|---|
-| `IdentityState` (`unverified … expired`) | Identity & Verification | `identity_status.changed` → versioned projection | Any local copy of verification state or evidence |
+| `IdentityState` (`unverified … expired`) | Identity & Verification | `identity.status_changed` → versioned projection | Any local copy of verification state or evidence |
 | `AccountState` (`active limited suspended banned`) + capability set | Moderation & Enforcement | `account_state.changed` → versioned projection | Any write to account state; any inference of *why* a state exists |
 | Credential, session, contact-verification, rate-limit | Platform (authn) | Platform command interface | Storing a password or a recovery token outside Platform |
 | Profile content, completeness, profile state | Dating Core | `profile.published` / owner profile projection | Profile fields (see [Profile & Personalization](./profile-and-personalization.md)) |
-| Discovery preferences and eligibility | Dating Core | `DiscoveryStandingProjection` (fed by `identity_status.changed`) and `AccountStandingProjection` (fed by `account_state.changed`) | Candidate ordering, filters, or the eligibility rule itself |
+| Discovery preferences and eligibility | Dating Core | `DiscoveryStandingProjection` (fed by `identity.status_changed`) and `AccountStandingProjection` (fed by `account_state.changed`) | Candidate ordering, filters, or the eligibility rule itself |
 | Risk state | Trust & Safety | never read by product surfaces | Risk, detectors, scores |
 | Reports, cases, evidence, retention | Moderation & Enforcement | moderator-only surfaces | Deleting evidence on user request |
 
@@ -521,7 +521,7 @@ fact into a metrics sink.
 | `auth.session_revoked` | `scope`, `revoked_count`, `reason` | #18, Trust & Safety |
 | `auth.recovery_abuse_suspected` | `attempt_count`, `window_hours`, `distinct_sources` | **Trust & Safety** |
 | `identity.duplicate_account_signal` | `matched_contact_kind`, `prior_account_standing` (coarse) — `sensitive` | Trust & Safety |
-| `identity_status.changed` | *(Identity owns it)* | the **product** projection only |
+| `identity.status_changed` | *(Identity owns it)* | the **product** projection only |
 | `account_state.changed` | *(Moderation owns it)* | the **product** projection only |
 
 The two deliberately-audit-only signals, and why:
@@ -535,7 +535,7 @@ The two deliberately-audit-only signals, and why:
 
 ### 11.3 How the verification portion of the funnel is measured
 
-The product subscribes to `identity_status.changed` at `public` clearance to
+The product subscribes to `identity.status_changed` at `public` clearance to
 advance its own readiness projection — a client must be able to ask "is the
 current user verified?" without a cross-domain call. The **metrics sink never
 receives that stream**. The funnel counts registrations from

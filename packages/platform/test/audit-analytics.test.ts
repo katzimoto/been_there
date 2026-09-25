@@ -107,7 +107,7 @@ describe('audit is complete and append-only', () => {
 
 describe('which events are audit facts', () => {
   it('requires an audit record for safety, identity, case, and auth events', () => {
-    expect(isAuditRequired('identity_status.changed')).toBe(true);
+    expect(isAuditRequired('identity.status_changed')).toBe(true);
     expect(isAuditRequired('identity.verification_changed')).toBe(true);
     expect(isAuditRequired('case.opened')).toBe(true);
     expect(isAuditRequired('account_state.changed')).toBe(true);
@@ -123,7 +123,7 @@ describe('routing between the two sinks', () => {
     // fact, not a metrics input: a sliceable "who failed verification" query
     // is the thing the overview forbids.
     const route = routeEvent(
-      domainEvent({ type: 'identity_status.changed', sensitivity: 'public' }),
+      domainEvent({ type: 'identity.status_changed', sensitivity: 'public' }),
     );
 
     expect(route).toEqual({ audit: true, analytics: false, rejection: 'audited_only' });
