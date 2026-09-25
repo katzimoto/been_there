@@ -1,7 +1,7 @@
 import type { ConversationId, DataSensitivity, MatchId, ProfileId, UserId } from '@been-there/core';
 import type { BlockRecord } from './blocks.js';
-import type { BlockId, LikeId, PassId } from './ids.js';
-import type { MatchStatus } from './interaction.js';
+import type { BlockId, IdempotencyKey, LikeId, PassId } from './ids.js';
+import type { MatchEndCause } from './interaction.js';
 import type { ProfileState } from './profile.js';
 
 /**
@@ -32,10 +32,17 @@ export interface ProfileStateChangedPayload {
 
 export interface PreferencesUpdatedPayload {
   readonly userId: UserId;
-  /** Full preference values — `user` class, owner only. */
+  /**
+   * Full preference values, `user` class, owner only. The two gender axes are
+   * published separately because they are separately meaningful: an analytics
+   * consumer that cannot tell "wants to see" from "open to being matched with"
+   * cannot read a pool-size funnel at all.
+   */
   readonly ageRange: { readonly min: number; readonly max: number } | null;
   readonly maxDistanceKm: number | null;
-  readonly interestedIn: readonly string[] | null;
+  readonly seekingGenders: readonly string[] | null;
+  readonly openTo: readonly string[] | null;
+  readonly locationPrecision: string | null;
 }
 
 export interface LikeRecordedPayload {
@@ -59,11 +66,23 @@ export interface MatchCreatedPayload {
 
 export interface MatchEndedPayload {
   readonly matchId: MatchId;
-  readonly reason: Exclude<MatchStatus, 'active'>;
+  readonly reason: MatchEndCause;
   readonly actorId: UserId | 'system';
   readonly endedAt: string;
   /** Retained, not deleted: the right to report outlives the match. */
   readonly conversationRetained: true;
+}
+
+/**
+ * Published only for an actor-initiated end, so a match closed by a block or a
+ * deletion stays distinguishable from one a person chose. The idempotency key
+ * travels with it because the command does: it is the token that makes a
+ * retried unmatch a no-op rather than a second attempt.
+ */
+export interface UnmatchPerformedPayload {
+  readonly matchId: MatchId;
+  readonly actorId: UserId;
+  readonly idempotencyKey: IdempotencyKey;
 }
 
 export interface BlockChangedPayload {
@@ -90,6 +109,7 @@ export interface AccountStateChangedPayload {
 
 export type DatingEventType =
   | 'profile.completed'
+  | 'profile.state_changed'
   | 'profile.deleted'
   | 'preferences.updated'
   | 'like.recorded'
@@ -109,6 +129,13 @@ export const DATING_EVENT_CATALOGUE: Readonly<Record<DatingEventType, EventDefin
     version: DATING_EVENT_VERSION,
     sensitivity: 'public',
     description: 'A profile reached `complete` and may now be discovered.',
+  },
+  'profile.state_changed': {
+    type: 'profile.state_changed',
+    version: DATING_EVENT_VERSION,
+    sensitivity: 'public',
+    description:
+      'A profile left or entered a visible state (`draft`, `incomplete`, `complete`, `paused`, `hidden`, `deleted`). The same fact `profile.completed` announces for the one transition that matters, published for every transition so a consumer invalidating cached eligibility never has to infer a state it was not told about.',
   },
   'profile.deleted': {
     type: 'profile.deleted',

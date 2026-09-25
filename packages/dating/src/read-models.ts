@@ -1,7 +1,8 @@
 import type { AccountState, IdentityState, PhotoId, UserId } from '@been-there/core';
 import type { BlockRecord } from './blocks.js';
-import type { LikeRecord, MatchRecord, PassRecord } from './interaction.js';
+import type { LikeRecord, MatchRecord, MatchStanding } from './interaction.js';
 import type { DistanceBand } from './location.js';
+import type { PassRecord } from './passes.js';
 import type { DatingPreferences } from './preferences.js';
 import type { GenderIdentity, ProfileSnapshot } from './profile.js';
 
@@ -18,6 +19,18 @@ import type { GenderIdentity, ProfileSnapshot } from './profile.js';
 
 export const DATING_READ_MODEL_VERSION = 1;
 export const STANDING_PROJECTION_VERSION = 1;
+
+/**
+ * The vocabulary every standing is read through. These four names are the whole
+ * of what this domain knows about another domain's state: an identity state, a
+ * capability set and a product-visibility bit. It never learns a *reason* — not
+ * that somebody was reported, reviewed or restricted — because a projection
+ * that carried one would turn a dating client into a moderation surface.
+ */
+export const DISCOVERABLE_IDENTITY_STATE: IdentityState = 'verified';
+export const BROWSE_DISCOVERY_CAPABILITY = 'browse_discovery';
+export const LIKE_CAPABILITY = 'like';
+export const MESSAGE_CAPABILITY = 'send_message';
 
 /** Built from `identity_status.changed` (public). No evidence, ever. */
 export interface IdentityStandingProjection {
@@ -109,4 +122,63 @@ export interface DatingReadModel {
   standingFor(userId: UserId): SubjectStandingProjection | null;
   cardFor(viewerId: UserId, candidateId: UserId): CandidateCardProjection | null;
   relationshipFor(a: UserId, b: UserId): RelationshipProjection;
+}
+
+/**
+ * The standing each party sees of one match, recomputed from the two current
+ * standing projections.
+ *
+ * This is the rule that makes commitment 1 and the moderation model legible
+ * without a lost row: a counterpart whose verification lapsed degrades *their*
+ * party's view only, and the other party is untouched. A single status on the
+ * record could not express that, and an implementation that filtered a match
+ * list by the target's current standing would make a moderated removal look
+ * identical to a mutual unmatch.
+ *
+ * Every branch reads a capability or a visibility bit, never a reason, so a
+ * `restricted_by_target` line can name the capability that is missing without
+ * ever naming the case that removed it. An end outranks a degradation: once a
+ * match is closed, a standing change does not reopen it.
+ */
+export function deriveMatchStandings(
+  match: MatchRecord,
+  standingOf: (user: UserId) => SubjectStandingProjection | null,
+): readonly [MatchStanding, MatchStanding] {
+  if (match.standings.some((standing) => CLOSED_STANDINGS[standing])) {
+    return match.standings;
+  }
+  const [first, second] = match.participants;
+  const firstStanding = standingOf(first);
+  const secondStanding = standingOf(second);
+  if (firstStanding === null || secondStanding === null) {
+    // A participant with no standing projection is a gap in the read model
+    // rather than an expected domain outcome, so it is not a DomainError.
+    throw new RangeError('deriveMatchStandings: standingOf must resolve both participants');
+  }
+  return [standingOfTarget(secondStanding), standingOfTarget(firstStanding)];
+}
+
+const CLOSED_STANDINGS: Readonly<Record<MatchStanding, boolean>> = {
+  active: false,
+  dormant_target_unverified: false,
+  restricted_by_target: false,
+  closed_by_target: true,
+  closed_by_actor: true,
+};
+
+/** The standing a party sees, given the other party's standing alone. */
+function standingOfTarget(counterpart: SubjectStandingProjection): MatchStanding {
+  if (
+    !counterpart.account.visibleInProduct ||
+    !counterpart.account.capabilities.includes(BROWSE_DISCOVERY_CAPABILITY)
+  ) {
+    return 'closed_by_target';
+  }
+  if (counterpart.identity.state !== DISCOVERABLE_IDENTITY_STATE) {
+    return 'dormant_target_unverified';
+  }
+  if (!counterpart.account.capabilities.includes(MESSAGE_CAPABILITY)) {
+    return 'restricted_by_target';
+  }
+  return 'active';
 }

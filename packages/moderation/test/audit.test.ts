@@ -148,7 +148,7 @@ describe('the audit log', () => {
     const opened = openCaseFromReport(h, report);
     const reviewed = caseInReview(h, opened);
     const record = report.capturedEvidence[0]!;
-    readEvidence(h.ctx, MODERATOR, record, opened.caseId);
+    readEvidence(h.ctx, MODERATOR, record, opened.caseId, CORRELATION);
     const outcome = succeeded(
       decide(h.ctx, {
         moderationCase: reviewed,

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { type DomainEvent, InMemoryEventBus } from '@been-there/core';
 import { type EvidenceKind, captureEvidence, openCase, readEvidence } from '../src/index.js';
 import {
   CORRELATION,
@@ -36,7 +37,7 @@ describe('evidence capture', () => {
     h.clock.advanceHours(6);
 
     expect(record.capturedAt.toISOString()).toBe('2026-01-05T09:00:00.000Z');
-    expect(readEvidence(h.ctx, MODERATOR, record).visibility).toBe('full');
+    expect(readEvidence(h.ctx, MODERATOR, record, null, CORRELATION).visibility).toBe('full');
     expect(record.capturedAt.toISOString()).toBe('2026-01-05T09:00:00.000Z');
   });
 
@@ -81,7 +82,7 @@ describe('evidence capture', () => {
 describe('the redaction gate', () => {
   it('lets a plain reviewer read the behaviour under review', () => {
     const h = harness();
-    const view = readEvidence(h.ctx, MODERATOR, capture(h, 'message_snapshot'));
+    const view = readEvidence(h.ctx, MODERATOR, capture(h, 'message_snapshot'), null, CORRELATION);
 
     expect(view.visibility).toBe('full');
     if (view.visibility === 'full') {
@@ -93,7 +94,7 @@ describe('the redaction gate', () => {
   it('denies a plain reviewer the forensic evidence and records the attempt', () => {
     const h = harness();
     const record = capture(h, 'device_signal');
-    const view = readEvidence(h.ctx, MODERATOR, record, 'case-1' as never);
+    const view = readEvidence(h.ctx, MODERATOR, record, null, CORRELATION);
 
     expect(view.visibility).toBe('denied');
     const row = h.audit.byEntity('evidence', record.evidenceId).at(-1);
@@ -105,7 +106,7 @@ describe('the redaction gate', () => {
   it('lets a lead read the forensic evidence, and logs the read', () => {
     const h = harness();
     const record = capture(h, 'device_signal');
-    const view = readEvidence(h.ctx, LEAD, record, 'case-1' as never);
+    const view = readEvidence(h.ctx, LEAD, record, null, CORRELATION);
 
     expect(view.visibility).toBe('full');
     const row = h.audit.byEntity('evidence', record.evidenceId).at(-1);
@@ -118,7 +119,7 @@ describe('the redaction gate', () => {
     const record = capture(h, 'identity_artefact', 'Identity artefact held by the identity domain.');
 
     for (const actor of [MODERATOR, LEAD]) {
-      const view = readEvidence(h.ctx, actor, record, 'case-1' as never);
+      const view = readEvidence(h.ctx, actor, record, null, CORRELATION);
       expect(view.visibility).toBe('redacted');
       expect(view).not.toHaveProperty('artefactReference');
       expect(view).not.toHaveProperty('digest');
@@ -139,7 +140,60 @@ describe('evidence captured at intake', () => {
 
     expect(record?.access).toBe('identity_privacy_officer');
     expect(record?.sensitivity).toBe('sensitive');
-    const view = readEvidence(h.ctx, MODERATOR, record!, opened.moderationCase.caseId);
+    const view = readEvidence(h.ctx, MODERATOR, record!, opened.moderationCase.caseId, CORRELATION);
     expect(view.visibility).toBe('redacted');
+  });
+});
+
+describe('the read event', () => {
+  it('publishes a granted read with the visibility, and none of the content', () => {
+    // The audit row existed for every read while the bus carried nothing, so a
+    // clearance-graded consumer could not tell that restricted evidence had been
+    // touched at all.
+    const h = harness();
+    const record = capture(h, 'message_snapshot');
+    readEvidence(h.ctx, MODERATOR, record, null, CORRELATION);
+
+    const event = h.published.at(-1);
+    expect(event?.type).toBe('moderation.evidence_read');
+    expect(event?.sensitivity).toBe('restricted');
+    expect(event?.actorId).toBe(MODERATOR.actorId);
+    expect(event?.payload).toEqual({
+      evidenceId: record.evidenceId,
+      kind: 'message_snapshot',
+      visibility: 'full',
+    });
+    expect(JSON.stringify(event?.payload)).not.toContain('blob://');
+    expect(JSON.stringify(event?.payload)).not.toContain('A short summary.');
+  });
+
+  it('publishes a denied read too, because that is the interesting one', () => {
+    const h = harness();
+    const record = capture(h, 'identity_artefact', 'Held by the identity domain.');
+    readEvidence(h.ctx, MODERATOR, record, null, CORRELATION);
+
+    const event = h.published.at(-1);
+    expect(event?.type).toBe('moderation.evidence_read');
+    expect(event?.payload).toMatchObject({ visibility: 'redacted' });
+    expect(JSON.stringify(event?.payload)).not.toContain('Held by the identity domain.');
+  });
+
+  it('tells a clearance-graded subscriber that a read happened, and nothing more', async () => {
+    const h = harness();
+    const record = capture(h, 'message_snapshot');
+    const bus = new InMemoryEventBus();
+    const seen: DomainEvent[] = [];
+    bus.subscribe({ upTo: 'restricted' }, (event) => {
+      seen.push(event);
+    });
+    readEvidence(h.ctx, MODERATOR, record, null, CORRELATION);
+    for (const event of h.published) {
+      await bus.publish(event);
+    }
+
+    expect(seen.map((event) => event.type)).toEqual([
+      'moderation.evidence_captured',
+      'moderation.evidence_read',
+    ]);
   });
 });

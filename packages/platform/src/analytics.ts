@@ -22,6 +22,14 @@ export const ANALYTICS_SINK_CLEARANCE: Clearance = { upTo: 'internal' };
 export interface AnalyticsEventSpec {
   readonly sensitivity: DataSensitivity;
   readonly dimensions: readonly string[];
+  /**
+   * The sampling rate, chosen here and not by the caller. A rate passed in at
+   * the call site is a per-site decision that drifts the moment two services
+   * disagree, and a rate that drifts silently changes a metric's denominator;
+   * putting it in the catalogue makes changing one a diff in the table where the
+   * event is described, which is the only place a reviewer is looking.
+   */
+  readonly sampleRate: number;
   readonly description: string;
 }
 
@@ -29,137 +37,269 @@ export const ANALYTICS_EVENTS = {
   'account.registration_started': {
     sensitivity: 'public',
     dimensions: ['surface'],
+    sampleRate: 1,
     description: 'Onboarding entry, counted. No identity, no funnel position.',
   },
   'account.registration_completed': {
     sensitivity: 'public',
     dimensions: ['surface'],
+    sampleRate: 1,
     description: 'A verified account exists. Counted, never attributed.',
   },
   'account.onboarding_step_completed': {
     sensitivity: 'public',
     dimensions: ['step', 'source'],
+    sampleRate: 1,
     description: 'Progress through onboarding. Steps are a closed vocabulary.',
   },
   'account.recovery_started': {
     sensitivity: 'internal',
     dimensions: ['method'],
+    sampleRate: 1,
     description: 'A recovery was attempted. The completion twin is audit-only.',
   },
   'account.session_started': {
     sensitivity: 'internal',
     dimensions: ['surface', 'auth_method'],
+    sampleRate: 1,
     description: 'An authenticated session began. Session churn is a security metric.',
   },
   'account.capability_denied': {
     sensitivity: 'internal',
     dimensions: ['capability', 'reason_code'],
+    sampleRate: 1,
     description: 'A product capability was refused. Must never carry a case id.',
+  },
+  'account.recovery_completed': {
+    sensitivity: 'internal',
+    dimensions: ['method', 'sessions_revoked_count'],
+    sampleRate: 1,
+    description:
+      'Recovery succeeded and every other session was revoked. The blast radius as a count, never a session id.',
+  },
+  'settings.updated': {
+    sensitivity: 'internal',
+    dimensions: ['changed_field', 'changed_field_count_bucket'],
+    sampleRate: 1,
+    description: 'A non-preference settings write committed. Field names and a count, never the values written.',
+  },
+  'notification.failed': {
+    sensitivity: 'internal',
+    dimensions: ['channel', 'category', 'retry_count_bucket'],
+    sampleRate: 0.25,
+    description:
+      'Every channel for a notice exhausted its retries. An undelivered critical notice is an incident, not a metric.',
+  },
+  'discovery.entered': {
+    sensitivity: 'public',
+    dimensions: ['surface'],
+    sampleRate: 1,
+    description: 'The viewer passed the discovery gate and opened the feed. The first dating-funnel step.',
+  },
+  'discovery.page_served': {
+    sensitivity: 'internal',
+    dimensions: ['pool_bucket', 'page_size_bucket'],
+    sampleRate: 0.1,
+    description:
+      'A page of candidates was returned, full or short. The one genuinely high-volume event, and the only one sampled.',
+  },
+  'discovery.exhausted': {
+    sensitivity: 'internal',
+    dimensions: ['gate_class'],
+    sampleRate: 1,
+    description: 'The eligible pool is exhausted for this viewer. A sudden rise means identity expiry, not a lack of users.',
+  },
+  'discovery.viewer_ineligible': {
+    sensitivity: 'internal',
+    dimensions: ['gate_class'],
+    sampleRate: 1,
+    description: 'The discovery gate refused the viewer. The gate class only, never the underlying state.',
+  },
+  'conversation.created': {
+    sensitivity: 'internal',
+    dimensions: [],
+    sampleRate: 1,
+    description: 'A conversation opened, which is at match time. The denominator of every messaging rate.',
+  },
+  'message.recorded': {
+    sensitivity: 'internal',
+    dimensions: ['message_length_bucket'],
+    sampleRate: 1,
+    description: 'A message was accepted for delivery. A count and a length bucket, never a body, an excerpt, or a link.',
+  },
+  'message.delivered': {
+    sensitivity: 'internal',
+    dimensions: ['latency_bucket'],
+    sampleRate: 1,
+    description: "A recipient's client acknowledged the message.",
+  },
+  'message.read': {
+    sensitivity: 'internal',
+    dimensions: [],
+    sampleRate: 1,
+    description: "A conversation's read watermark advanced past a message.",
+  },
+  'message.withheld_by_system': {
+    sensitivity: 'internal',
+    dimensions: ['rule'],
+    sampleRate: 1,
+    description: 'An outbound message was refused by a system rule. The rule name and no body.',
+  },
+  'conversation.flagged_pattern': {
+    sensitivity: 'internal',
+    dimensions: ['pattern'],
+    sampleRate: 1,
+    description: 'A structural pattern fired. The pattern name only, never content and never a confidence value.',
+  },
+  'risk.assessed': {
+    sensitivity: 'internal',
+    dimensions: ['state', 'detector_count_bucket'],
+    sampleRate: 1,
+    description: 'A risk evaluation completed for the window. The state and a detector count, never a raw score.',
+  },
+  'slo.error_budget_exhausted': {
+    sensitivity: 'internal',
+    dimensions: ['slo_name', 'window'],
+    sampleRate: 1,
+    description: 'A service burned its error budget for the window.',
+  },
+  'alert.fired': {
+    sensitivity: 'internal',
+    dimensions: ['alert_name', 'severity'],
+    sampleRate: 1,
+    description: 'An alert transitioned to firing. The counter every runbook starts from.',
+  },
+  'provider.verification_call': {
+    sensitivity: 'internal',
+    dimensions: ['provider', 'outcome', 'latency_bucket'],
+    sampleRate: 1,
+    description: 'A verification provider call completed. The outcome and a latency bucket, never the payload.',
   },
   'profile.photo_uploaded': {
     sensitivity: 'internal',
     dimensions: ['reason_code', 'bytes_bucket'],
+    sampleRate: 1,
     description: 'A photo entered the media pipeline. Bytes are bucketed, never sized exactly.',
   },
   'profile.photo_rejected': {
     sensitivity: 'internal',
     dimensions: ['reason_code'],
+    sampleRate: 1,
     description: 'Scanning or policy refused a photo.',
   },
   'notification.delivered': {
     sensitivity: 'internal',
     dimensions: ['channel', 'category', 'critical'],
+    sampleRate: 0.25,
     description: 'A notification left the platform. Counts, not recipients.',
   },
   'notification.suppressed': {
     sensitivity: 'internal',
     dimensions: ['channel', 'category', 'suppression_reason'],
+    sampleRate: 1,
     description: 'A notification was deliberately not sent, and why.',
   },
   'location.resolved': {
     sensitivity: 'internal',
     dimensions: ['band'],
+    sampleRate: 1,
     description: 'A coarse distance was produced. The band only; never a coordinate.',
   },
   'media.signed_url_issued': {
     sensitivity: 'internal',
     dimensions: ['purpose'],
+    sampleRate: 1,
     description: 'A time-boxed media grant was created.',
   },
   'media.access_denied': {
     sensitivity: 'internal',
     dimensions: ['purpose'],
+    sampleRate: 1,
     description: 'A media read was refused. Enumeration attempts cluster here.',
   },
   'integration.call_failed': {
     sensitivity: 'internal',
     dimensions: ['provider', 'operation', 'failure'],
+    sampleRate: 1,
     description: 'A vendor call failed at the seam, with the uniform failure kind.',
   },
   'account.app_opened': {
     sensitivity: 'internal',
     dimensions: ['surface', 'journey_id'],
+    sampleRate: 1,
     description:
       'App opened. `journey_id` is a per-install random key, never derived from a user id and never joined to an audit event.',
   },
   'account.registration_rejected': {
     sensitivity: 'internal',
     dimensions: ['reason_code', 'age_band'],
+    sampleRate: 1,
     description: 'Onboarding could not complete. Reason codes only; no entered values.',
   },
   'account.onboarding_step_failed': {
     sensitivity: 'internal',
     dimensions: ['step', 'reason_code'],
+    sampleRate: 1,
     description: 'Failure twin of onboarding_step_completed.',
   },
   'account.session_failed': {
     sensitivity: 'internal',
     dimensions: ['reason_code', 'auth_method'],
+    sampleRate: 1,
     description: 'Failure twin of session_started. Counts failed logins, not who.',
   },
   'account.session_revoked': {
     sensitivity: 'internal',
     dimensions: ['scope'],
+    sampleRate: 1,
     description: 'Sessions were killed, by logout, password change, recovery, or enforcement.',
   },
   'account.recovery_locked': {
     sensitivity: 'internal',
     dimensions: ['reason_code', 'window_hours'],
+    sampleRate: 1,
     description: 'Recovery was locked after repeated failures. Counted; the detail is audit-only.',
   },
   'account.deletion_requested': {
     sensitivity: 'internal',
     dimensions: ['retention_bucket'],
+    sampleRate: 1,
     description: 'Erasure was requested. Retention buckets only; no identifiers of the subject.',
   },
   'account.deletion_cancelled': {
     sensitivity: 'internal',
     dimensions: ['retention_bucket'],
+    sampleRate: 1,
     description: 'Erasure was withdrawn inside the grace window.',
   },
   'account.deletion_completed': {
     sensitivity: 'internal',
     dimensions: ['retention_bucket'],
+    sampleRate: 1,
     description: 'Erasure finished. Counts only.',
   },
   'profile.published': {
     sensitivity: 'public',
     dimensions: ['surface'],
+    sampleRate: 1,
     description: 'A profile became visible in discovery. Counted, never attributed.',
   },
   'profile.state_changed': {
     sensitivity: 'internal',
     dimensions: ['from', 'to'],
+    sampleRate: 1,
     description: 'A profile lifecycle state moved. Enumerated states only.',
   },
   'profile.updated': {
     sensitivity: 'internal',
     dimensions: ['changed_field_count_bucket', 'changed_field'],
+    sampleRate: 1,
     description: 'A profile was edited. Field names and a count bucket, never the values written.',
   },
   'profile.photo_set_updated': {
     sensitivity: 'internal',
     dimensions: ['photo_count_bucket'],
+    sampleRate: 1,
     description: 'The photo set changed. A count, not the media.',
   },
 } as const satisfies Readonly<Record<string, AnalyticsEventSpec>>;
@@ -179,6 +319,12 @@ export function isKnownAnalyticsEvent(name: string): name is AnalyticsEventName 
  * Property names that may never appear in an analytics event, whatever the
  * event. Content and identity are the two things a metrics sink must not hold,
  * and this list is the enforcement rather than a review checklist.
+ *
+ * `conversationId` is here for the same reason `userId` is: a conversation is a
+ * pseudonym for two identified people, and a metrics sink that can be sliced by
+ * one is a "who was talking to whom" list. The per-conversation aggregates the
+ * messaging metrics need come from the activity rollup Communication already
+ * publishes, which is built for exactly that.
  */
 export const ANALYTICS_FORBIDDEN_PROPERTIES: readonly string[] = [
   'userId',
@@ -187,6 +333,7 @@ export const ANALYTICS_FORBIDDEN_PROPERTIES: readonly string[] = [
   'sessionId',
   'caseId',
   'reportId',
+  'conversationId',
   'email',
   'phone',
   'displayName',
@@ -219,8 +366,6 @@ export interface RecordAnalyticsRequest {
   readonly occurredAt: Date;
   readonly correlationId: CorrelationId;
   readonly properties: Readonly<Record<string, AnalyticsProperty>>;
-  /** 0..1. Audit has no equivalent: it is complete or it is not. */
-  readonly sampleRate: number;
 }
 
 /**
@@ -235,11 +380,6 @@ export function recordAnalyticsEvent(request: RecordAnalyticsRequest): Result<An
     });
   }
   const spec: AnalyticsEventSpec = ANALYTICS_EVENTS[request.name];
-  if (request.sampleRate < 0 || request.sampleRate > 1) {
-    return domainError('validation_failed', 'platform', 'sampleRate must be within [0, 1]', {
-      sampleRate: request.sampleRate,
-    });
-  }
 
   const forbidden = Object.keys(request.properties).filter((key) =>
     ANALYTICS_FORBIDDEN_PROPERTIES.includes(key),
@@ -272,7 +412,7 @@ export function recordAnalyticsEvent(request: RecordAnalyticsRequest): Result<An
     occurredAt: request.occurredAt,
     correlationId: request.correlationId,
     properties: request.properties,
-    sampled: isSampled(request.correlationId, request.sampleRate),
+    sampled: isSampled(request.correlationId, spec.sampleRate),
   });
 }
 
@@ -297,13 +437,21 @@ export function isSampled(correlationId: CorrelationId, sampleRate: number): boo
   return unit < sampleRate;
 }
 
-/** Event types that carry user-authored content: neither sink may hold them. */
-export const CONTENT_BEARING_TYPES: readonly string[] = [
-  'message.sent',
-  'message.edited',
-  'message.content_rendered',
-  'profile.bio_updated',
-];
+/**
+ * Event types that carry user-authored content: neither sink may hold them.
+ *
+ * The names are the ones the packages actually publish. A list of names nobody
+ * emits is a guard that protects nothing while reading as coverage, and the
+ * failure is silent — an event nobody flagged goes to whichever sink its
+ * sensitivity happens to allow. This list used to hold four names, not one of
+ * which any package emits, so the guard protected nothing at all.
+ *
+ * One entry is the correct number rather than a thin one. `message_sent` is the
+ * only published event about what a user wrote; everything else that could carry
+ * user content is `sensitive` or `restricted` and is already refused by the
+ * clearance check below, which is the second half of the same rule.
+ */
+export const CONTENT_BEARING_TYPES: readonly string[] = ['communication.message_sent'];
 
 export type AnalyticsRejection = 'content' | 'audited_only' | 'unroutable';
 

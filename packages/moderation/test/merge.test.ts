@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { type ReportId, castId } from '@been-there/core';
-import { type Report, mergeReports } from '../src/index.js';
+import { type Case, type Report, mergeReports } from '../src/index.js';
 import {
   CORRELATION,
   LEAD,
@@ -172,5 +172,33 @@ describe('merging reports about one behaviour', () => {
     expect(
       rejected(mergeReports(h.ctx, otherCase, [mergedIntoThisCase], LEAD, CORRELATION)).code,
     ).toBe('conflict');
+  });
+});
+
+describe('what a merge publishes', () => {
+  it('publishes the merge event and not a resolution', () => {
+    // A merge used to publish `moderation.case_resolved`, so a bus consumer read
+    // "this case is over" the moment reports were folded into it, and the
+    // declared `moderation.case_reports_merged` was emitted from nowhere.
+    const h = harness();
+    const opened = openCaseFromReport(h, succeeded(makeReport(h)));
+    const [first, second] = threeReports(h);
+
+    succeeded(mergeReports(h.ctx, opened, [first!, second!], MODERATOR, CORRELATION));
+
+    expect(h.typesPublished().at(-1)).toBe('moderation.case_reports_merged');
+    expect(h.typesPublished()).not.toContain('moderation.case_resolved');
+    const event = h.published.at(-1);
+    expect(event?.sensitivity).toBe('restricted');
+    expect(event?.payload).toMatchObject({ caseId: opened.caseId, reportTotal: 3 });
+  });
+
+  it('leaves the case open for a decision after a merge', () => {
+    const h = harness();
+    const opened = openCaseFromReport(h, succeeded(makeReport(h)));
+    const [first] = threeReports(h);
+    const merged = succeeded(mergeReports(h.ctx, opened, [first!], MODERATOR, CORRELATION));
+
+    expect(merged.moderationCase.state).toBe<Case['state']>('open');
   });
 });

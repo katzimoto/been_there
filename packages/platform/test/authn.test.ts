@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { castId, type UserId } from '@been-there/core';
 import {
+  MAX_CONCURRENT_SESSIONS,
+  SESSION_IDLE_TIMEOUT_SECONDS,
+  SESSION_TTL_SECONDS,
   beginRecovery,
+  enforceSessionLimit,
   completeRecovery,
   issueSession,
   recordFailedRecoveryAttempt,
+  recordSessionActivity,
   recoveryAuditFields,
   refreshSession,
   revokeSession,
@@ -130,6 +135,91 @@ describe('refresh is rotation', () => {
 
     expect(revoked.status).toBe('superseded');
     expect(revoked.revokedReason).toBeUndefined();
+  });
+});
+
+describe('the idle clock, which is the half-life of the refresh window', () => {
+  it('refuses a session nobody has touched for a fortnight, window open or not', () => {
+    const session = sessionFor(ALICE, 'sess-1', SESSION_TTL_SECONDS, 30 * 24 * 3600);
+    const idleSince = new Date(NOW.getTime() + SESSION_IDLE_TIMEOUT_SECONDS * 1000);
+
+    // One millisecond before, the session still authenticates: the boundary is
+    // inclusive of the timeout, and a test that only checked "much later" would
+    // pass whatever the constant was.
+    expect(
+      succeeded(validateSession(session, new Date(idleSince.getTime() - 1))).sessionId,
+    ).toBe(session.sessionId);
+    expect(rejected(validateSession(session, idleSince)).details).toEqual({ reason: 'idle' });
+  });
+
+  it('slides the idle clock on activity without sliding the refresh window', () => {
+    const session = sessionFor(ALICE, 'sess-1', SESSION_TTL_SECONDS, 30 * 24 * 3600);
+    const afterAWhile = new Date(NOW.getTime() + 20 * 24 * 3600 * 1000);
+
+    const touched = succeeded(recordSessionActivity(session, afterAWhile));
+
+    expect(touched.lastActiveAt).toEqual(afterAWhile);
+    // The window is absolute, so a fortnight of use does not buy another month.
+    expect(touched.refreshableUntil.getTime()).toBe(session.refreshableUntil.getTime());
+    expect(
+      succeeded(validateSession(touched, new Date(afterAWhile.getTime() + 13 * 24 * 3600 * 1000))).sessionId,
+    ).toBe(touched.sessionId);
+  });
+
+  it('will not let activity resurrect a session that already went idle', () => {
+    const session = sessionFor(ALICE, 'sess-1', SESSION_TTL_SECONDS, 30 * 24 * 3600);
+    const longAfter = new Date(NOW.getTime() + 20 * 24 * 3600 * 1000);
+
+    expect(rejected(recordSessionActivity(session, longAfter)).details).toEqual({ reason: 'idle' });
+  });
+
+  it('counts a rotation as activity', () => {
+    const session = sessionFor(ALICE, 'sess-1', SESSION_TTL_SECONDS, 30 * 24 * 3600);
+    const later = new Date(NOW.getTime() + 20 * 24 * 3600 * 1000);
+
+    const rotated = succeeded(refreshSession(session, later, { sessionId: sessionId('sess-2') }));
+
+    expect(rotated.current.lastActiveAt).toEqual(later);
+    expect(rejected(validateSession(rotated.current, new Date(later.getTime() + SESSION_IDLE_TIMEOUT_SECONDS * 1000))).details).toEqual({ reason: 'idle' });
+  });
+});
+
+describe('the concurrent-session cap', () => {
+  function elevenSessions(): readonly Session[] {
+    return Array.from({ length: MAX_CONCURRENT_SESSIONS + 1 }, (_, index) =>
+      sessionFor(ALICE, `sess-${index}`, SESSION_TTL_SECONDS, 30 * 24 * 3600),
+    );
+  }
+
+  it('keeps ten and evicts the eleventh', () => {
+    const { kept, evicted } = enforceSessionLimit(elevenSessions());
+
+    expect(kept).toHaveLength(MAX_CONCURRENT_SESSIONS);
+    expect(evicted).toHaveLength(1);
+    expect(evicted[0]?.status).toBe('revoked');
+    expect(evicted[0]?.revokedReason).toBe('session_limit');
+  });
+
+  it('evicts the least recently active session, not the newest', () => {
+    const sessions = Array.from({ length: MAX_CONCURRENT_SESSIONS + 1 }, (_, index) =>
+      succeeded(
+        recordSessionActivity(
+          sessionFor(ALICE, `sess-${index}`, SESSION_TTL_SECONDS, 30 * 24 * 3600),
+          new Date(NOW.getTime() + index * 1000),
+        ),
+      ),
+    );
+
+    const { evicted } = enforceSessionLimit(sessions);
+
+    expect(evicted.map((session) => session.sessionId)).toEqual([sessions[0]?.sessionId]);
+  });
+
+  it('leaves an account under the cap alone, and never counts a dead session', () => {
+    const three = elevenSessions().slice(0, 3);
+
+    expect(enforceSessionLimit(three)).toEqual({ kept: three, evicted: [] });
+    expect(enforceSessionLimit([...three, revokeSession(three[0] as Session, 'user_logout')]).evicted).toEqual([]);
   });
 });
 

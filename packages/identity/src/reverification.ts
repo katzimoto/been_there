@@ -92,9 +92,69 @@ export const REVERIFICATION_POLICY: ReverificationPolicy = {
    * would be a self-inflicted visibility loss with no verification benefit, and
    * it is the shape a "make this account invisible" abuse would take from
    * inside.
+   *
+   * `verification_failed` is deliberately absent even though the subject can
+   * act from that state, because a failed attempt is not re-*verified*, it is
+   * *retried*: `submit_verification` is legal from `verification_failed` and
+   * lands in the same `pending` state this command would have produced. Naming
+   * it here would have invited a call the machine then refuses with
+   * `invalid_transition`, after the open-attempt, cap and cooldown checks had
+   * all already run. This list is a subset of the machine's
+   * `reverify_requested.from`, never a superset.
    */
-  subjectMayRequestOnlyWhen: ['expired', 'verification_failed'],
+  subjectMayRequestOnlyWhen: ['expired'],
 };
+
+/**
+ * Which limit stopped a demand. Recorded rather than inferred from the message
+ * text, because the recipient of a signal is a human deciding whether the system
+ * was pulling one person out of discovery too often, and "we hit the cap" and
+ * "it has not been 24 hours yet" are different conversations.
+ */
+export type ReverificationLimit = 'per_subject_per_30_days' | 'cooldown';
+
+/**
+ * A demand an automated caller was not allowed to make. Identity cannot open a
+ * moderation case — it has no case vocabulary and the dependency runs the other
+ * way — so the honest way to make the fact visible to a human is to hand the
+ * caller a record and require the caller to have somewhere to put it. A
+ * `ReverificationRefusalLog` alone was not enough: every refusal looks the same
+ * to a log, and a subject tapping a button twice is not a safety signal while
+ * * Trust & Safety hitting the cap three times in a month is exactly the pattern
+ * §8.3 R2 exists to catch.
+ */
+export interface ReverificationLimitSignal {
+  readonly at: Date;
+  /** The account the demand would have been applied to. */
+  readonly subjectId: SubjectId;
+  /** The automated caller that made it. Never a subject. */
+  readonly actorId: ActorId;
+  readonly requesterKind: 'trust_safety' | 'moderation';
+  readonly reason: ReverificationReason;
+  readonly limit: ReverificationLimit;
+  /** When the block lifts, so the caller can resume rather than give up. */
+  readonly blockedUntil: Date;
+  /** Re-verifications already in the rolling window, and the cap. */
+  readonly requested: number;
+  readonly cap: number;
+}
+
+/** The rolling window the cap is counted over. Named once, used three times. */
+const WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+export interface ReverificationSignalLog {
+  append(signal: ReverificationLimitSignal): void;
+}
+
+/**
+ * Both sinks, as one argument. A separate positional parameter would have let a
+ * caller pass the refusal log and quietly leave escalation unwired, which is the
+ * failure this type exists to make impossible.
+ */
+export interface ReverificationSinks {
+  readonly refusals: ReverificationRefusalLog;
+  readonly signals: ReverificationSignalLog;
+}
 
 export interface ReverificationHistoryEntry {
   readonly verificationId: VerificationId;
@@ -158,29 +218,36 @@ export interface ReverificationPlan {
  *
  * Check order is part of the contract. Authority is checked first — the
  * reason→requester table, then whether a `subject` demand is for the subject
- * themselves — before the subject's eligibility, before the open attempt,
- * before the 30-day cap, before the cooldown, and before the state machine. An
- * unauthorised caller must not be able to learn whether a subject has a
- * verification in flight, how many they have had, or what state they are in.
- * Only a caller with authority over the subject gets that information back.
+ * themselves — before the subject's eligibility, before an open human review,
+ * before the open attempt, before the 30-day cap, before the cooldown, and
+ * before the state machine. An unauthorised caller must not be able to learn
+ * whether a subject has a verification in flight, how many they have had, or
+ * what state they are in. Only a caller with authority over the subject gets
+ * that information back.
  *
- * Every refusal is appended to `refusals` before it is returned, for the same
- * reason the evidence module writes its denials: the denial is the record a
- * reviewer will ask for after an incident. A cross-subject demand in particular
- * is a harassment attempt, and a harassment attempt that leaves no trace is a
- * harassment attempt that can be repeated forever.
+ * Every refusal is appended to `sinks.refusals` before it is returned, for the
+ * same reason the evidence module writes its denials: the denial is the record
+ * a reviewer will ask for after an incident. A cross-subject demand in
+ * particular is a harassment attempt, and a harassment attempt that leaves no
+ * trace is a harassment attempt that can be repeated forever.
+ *
+ * A cap or cooldown refusal by an *automated* caller also writes a signal. A
+ * subject who taps a button twice has found a rate limit, which the refusal row
+ * records; Trust & Safety hitting the cap on the same person three times in a
+ * month has found something else — that the system keeps pulling one person out
+ * of discovery — and nobody downstream can see that from a `rate_limited` error.
  */
 export function requestReVerification(
   command: RequestReVerificationCommand,
   context: ReverificationContext,
-  refusals: ReverificationRefusalLog,
+  sinks: ReverificationSinks,
 ): Result<ReverificationPlan, DomainError> {
   const refuse = (
     code: DomainError['code'],
     message: string,
     details?: DomainError['details'],
   ): Result<ReverificationPlan, DomainError> => {
-    refusals.append({
+    sinks.refusals.append({
       at: command.now,
       actorId: command.requester.actorId,
       intendedSubjectId: command.subjectId,
@@ -189,6 +256,33 @@ export function requestReVerification(
       code,
     });
     return domainError(code, 'identity', message, details);
+  };
+
+  // Only an automated caller can be the subject of a signal; a `subject` demand
+  // that trips a limit is a person being told to wait, not a system pulling them
+  // out of discovery on somebody else's initiative.
+  const raise = (
+    limit: ReverificationLimit,
+    blockedUntil: Date,
+    requested: number,
+  ): void => {
+    if (command.requester.kind === 'subject' || command.requester.kind === 'dating_core') {
+      return;
+    }
+    sinks.signals.append({
+      at: command.now,
+      subjectId: command.subjectId,
+      actorId: command.requester.actorId,
+      requesterKind: command.requester.kind,
+      reason: command.reason,
+      limit,
+      blockedUntil,
+      requested,
+      cap:
+        limit === 'per_subject_per_30_days'
+          ? REVERIFICATION_POLICY.maxPerSubjectPer30Days
+          : REVERIFICATION_POLICY.cooldownHours,
+    });
   };
 
   const permitted = REVERIFICATION_AUTHORITIES[command.reason];
@@ -231,6 +325,18 @@ export function requestReVerification(
     );
   }
 
+  if (context.identityState === 'review_required') {
+    // A human is already looking at this account. `reverify_requested` is
+    // legal from `review_required`, so without this an automated caller could
+    // walk an escalated case straight back into `pending` and out of the queue
+    // it was put in — automation undoing a human's involvement, which is the
+    // shape commitment 2 exists to forbid. The kernel's edge is the backstop;
+    // this is the refusal that explains itself.
+    return refuse('conflict', 'a human review is already open on this account', {
+      state: 'review_required',
+    });
+  }
+
   const open = context.history.find((entry) => isOpenAttempt(entry.attemptState));
   if (open !== undefined) {
     return refuse('conflict', 'a verification attempt is already in flight', {
@@ -238,28 +344,35 @@ export function requestReVerification(
     });
   }
 
-  const reVerifications = context.history.filter(
-    (entry) =>
-      entry.reVerification &&
-      entry.requestedAt.getTime() > command.now.getTime() - 30 * 24 * 60 * 60 * 1000,
-  );
-  if (reVerifications.length >= REVERIFICATION_POLICY.maxPerSubjectPer30Days) {
+  const requestedAts = context.history
+    .filter(
+      (entry) =>
+        entry.reVerification &&
+        entry.requestedAt.getTime() > command.now.getTime() - WINDOW_MS,
+    )
+    .map((entry) => entry.requestedAt.getTime());
+  const requested = requestedAts.length;
+  if (requested >= REVERIFICATION_POLICY.maxPerSubjectPer30Days) {
+    raise(
+      'per_subject_per_30_days',
+      new Date(Math.min(...requestedAts) + WINDOW_MS),
+      requested,
+    );
     return refuse('rate_limited', 're-verification limit reached for this subject', {
-      requested: reVerifications.length,
+      requested,
       limit: REVERIFICATION_POLICY.maxPerSubjectPer30Days,
     });
   }
 
-  const lastRequestedAt = reVerifications.reduce<Date | null>(
-    (latest, entry) =>
-      latest === null || entry.requestedAt.getTime() > latest.getTime()
-        ? entry.requestedAt
-        : latest,
-    null,
-  );
+  const lastRequestedAt = requestedAts.length > 0 ? Math.max(...requestedAts) : null;
   if (lastRequestedAt !== null) {
-    const hoursSince = (command.now.getTime() - lastRequestedAt.getTime()) / (60 * 60 * 1000);
+    const hoursSince = (command.now.getTime() - lastRequestedAt) / (60 * 60 * 1000);
     if (hoursSince < REVERIFICATION_POLICY.cooldownHours) {
+      raise(
+        'cooldown',
+        new Date(lastRequestedAt + REVERIFICATION_POLICY.cooldownHours * 60 * 60 * 1000),
+        requested,
+      );
       return refuse('rate_limited', 're-verification cooldown has not elapsed', {
         hoursSince: Math.floor(hoursSince),
         cooldownHours: REVERIFICATION_POLICY.cooldownHours,

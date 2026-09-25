@@ -1,9 +1,14 @@
-import type { IdentityState, UserId } from '@been-there/core';
+import type { UserId } from '@been-there/core';
 import { activeBlockBetween } from './blocks.js';
+import { currentLikeBetween } from './interaction.js';
 import { type DistanceBand, isWithinDistanceLimit } from './location.js';
+import { isPassInEffect } from './passes.js';
 import { areMutuallyCompatible, type CompatibilitySide } from './preferences.js';
 import {
+  BROWSE_DISCOVERY_CAPABILITY,
   DATING_READ_MODEL_VERSION,
+  DISCOVERABLE_IDENTITY_STATE,
+  LIKE_CAPABILITY,
   type CandidateCardProjection,
   type DatingReadModel,
   type RelationshipProjection,
@@ -21,22 +26,23 @@ import {
  *
  * Order rationale: safety and legality first (is the viewer allowed to browse
  * at all, is the candidate a verified person, is the candidate visible to the
- * product), then the relationship layer (block, then self, then anything the
- * viewer already decided), then preference filters. Preference rules come last
- * because they are the only ones that can change without anyone being unsafe:
- * a preference change is a product decision, a standing change is not.
+ * product, can the candidate act on what they are shown), then the
+ * relationship layer (block, then self, then anything the viewer already
+ * decided), then preference filters. Preference rules come last because they are
+ * the only ones that can change without anyone being unsafe: a preference change
+ * is a product decision, a standing change is not.
+ *
+ * The gate is a function of the clock as well as of the snapshot, because a pass
+ * is a window rather than a tombstone. A snapshot without a time cannot answer
+ * "is this pass still in effect", which is why `now` is a required field rather
+ * than a call to the system clock: a page that quietly reads the wall clock is a
+ * page whose behaviour cannot be reproduced from a test.
  *
  * The reason codes are `internal`. They are diagnostic, never rendered, and a
  * user is told "no new people right now" rather than which rule fired — the
  * reason set must not become a side channel for inferring another user's
  * identity state, account standing or block.
  */
-
-/** The only identity state that makes a user discoverable. */
-export const DISCOVERABLE_IDENTITY_STATE: IdentityState = 'verified';
-
-/** Capability the viewer needs to be served a discovery page at all. */
-export const DISCOVERY_CAPABILITY = 'browse_discovery';
 
 export type EligibilityReason =
   | 'viewer_identity_not_verified'
@@ -45,6 +51,7 @@ export type EligibilityReason =
   | 'candidate_identity_not_verified'
   | 'candidate_profile_not_complete'
   | 'candidate_account_not_visible'
+  | 'candidate_cannot_reciprocate'
   | 'blocked'
   | 'self_view'
   | 'already_passed'
@@ -65,12 +72,15 @@ export interface DiscoverySnapshot {
   readonly relationship: RelationshipProjection;
   /** Coarse separation, resolved by the platform bucketing rule. */
   readonly distance: DistanceBand | null;
+  /** The clock the pass window is read against. */
+  readonly now: Date;
 }
 
 export interface EligibilityRule {
   readonly reason: EligibilityReason;
   readonly disqualifies: (snapshot: DiscoverySnapshot) => boolean;
 }
+
 function compatibilitySide(subject: SubjectStandingProjection): CompatibilitySide {
   return {
     age: subject.profile.age,
@@ -91,7 +101,7 @@ export const ELIGIBILITY_RULES: readonly EligibilityRule[] = [
   },
   {
     reason: 'viewer_lacks_discovery_capability',
-    disqualifies: (s) => !s.viewer.account.capabilities.includes(DISCOVERY_CAPABILITY),
+    disqualifies: (s) => !s.viewer.account.capabilities.includes(BROWSE_DISCOVERY_CAPABILITY),
   },
   {
     reason: 'viewer_profile_not_complete',
@@ -111,7 +121,15 @@ export const ELIGIBILITY_RULES: readonly EligibilityRule[] = [
     reason: 'candidate_account_not_visible',
     disqualifies: (s) =>
       !s.candidate.account.visibleInProduct ||
-      !s.candidate.account.capabilities.includes(DISCOVERY_CAPABILITY),
+      !s.candidate.account.capabilities.includes(BROWSE_DISCOVERY_CAPABILITY),
+  },
+  {
+    reason: 'candidate_cannot_reciprocate',
+    // note: a separate rule from visibility, because the two are separate facts
+    // and a card they cannot act on is a page slot spent for nothing. It is kept
+    // ahead of every relational rule so a viewer is never offered a decision the
+    // candidate is not allowed to make.
+    disqualifies: (s) => !s.candidate.account.capabilities.includes('like'),
   },
   {
     reason: 'blocked',
@@ -123,21 +141,20 @@ export const ELIGIBILITY_RULES: readonly EligibilityRule[] = [
     reason: 'already_passed',
     disqualifies: (s) =>
       s.relationship.passes.some(
-        (pass) => pass.from === s.viewer.userId && pass.to === s.candidate.userId,
+        (pass) =>
+          isPassInEffect(pass, s.now) && pass.from === s.viewer.userId && pass.to === s.candidate.userId,
       ),
   },
   {
     reason: 'already_liked',
     disqualifies: (s) =>
-      s.relationship.likes.some(
-        (like) => like.from === s.viewer.userId && like.to === s.candidate.userId,
-      ),
+      currentLikeBetween({ likes: s.relationship.likes }, s.viewer.userId, s.candidate.userId) !== null,
   },
   {
     reason: 'already_matched',
     // note: an unmatched or block-ended match does not block rediscovery; only a live
     // match does, because the two people are already in each other's inbox.
-    disqualifies: (s) => s.relationship.match?.status === 'active',
+    disqualifies: (s) => s.relationship.match?.ended === null,
   },
   {
     reason: 'age_out_of_range',
@@ -153,20 +170,21 @@ export const ELIGIBILITY_RULES: readonly EligibilityRule[] = [
     },
   },
   {
-    reason: 'beyond_distance_limit',
-    disqualifies: (s) => !isWithinDistanceLimit(s.distance ?? 'unknown', s.viewer.preferences.maxDistanceKm),
-  },
-  {
     reason: 'gender_out_of_scope',
-    // note: the viewer’s own interest list is a filter on their own page, exactly
-    // like the age range. The mutual test below adds the candidate’s own wishes.
+    // note: the viewer's own `seekingGenders` list is a filter on their own page,
+    // exactly like the age range. The mutual test below adds the candidate's own
+    // `openTo`, which is a different question and the only one that can end a match.
     disqualifies: (s) => {
-      const interestedIn = s.viewer.preferences.interestedIn;
-      if (interestedIn === null) {
+      const seeking = s.viewer.preferences.seekingGenders;
+      if (seeking === null) {
         return false;
       }
-      return !s.candidate.profile.genderIdentities.some((identity) => interestedIn.includes(identity));
+      return !s.candidate.profile.genderIdentities.some((identity) => seeking.includes(identity));
     },
+  },
+  {
+    reason: 'beyond_distance_limit',
+    disqualifies: (s) => !isWithinDistanceLimit(s.distance ?? 'unknown', s.viewer.preferences.maxDistanceKm),
   },
   {
     reason: 'not_mutually_compatible',
@@ -207,6 +225,7 @@ export function selectEligibleCards(
   viewerId: UserId,
   model: DatingReadModel,
   candidateIds: readonly UserId[],
+  at: Date,
 ): CandidateCardProjection[] {
   if (model.version !== DATING_READ_MODEL_VERSION) {
     // A consumer that cannot read the shape must refuse it, not guess at it.
@@ -231,6 +250,7 @@ export function selectEligibleCards(
       candidate,
       relationship: model.relationshipFor(viewerId, candidateId),
       distance: card.distance,
+      now: at,
     });
     if (decision.eligible) {
       cards.push(card);

@@ -1,0 +1,53 @@
+# Local dependencies for the modular monolith.
+#
+# One service, deliberately. ADR 0001 commits to a single deployable unit with
+# one transactional store, so there is no per-domain database to stand up: the
+# domain packages will share schema namespaces inside this single instance and
+# a like that becomes a match is a local transaction, not a distributed one.
+#
+# There is no broker here either. ADR 0003 wants a transactional outbox plus a
+# broker in production, but the outbox is a table in this database and the
+# worker that drains it is a process inside the application. Neither exists yet
+# — there is no publisher, no subscriber and no schema. A queue container that
+# nothing reads would be a second thing for a newcomer to start, forget about,
+# and misconfigure, so it is not here. `make migrate` says so out loud instead.
+#
+# Host port 55432, not 5432, so a developer with their own Postgres running
+# keeps it. The credentials are local-only placeholders, identical to the ones in
+# .env.example, and grant access to nothing outside this machine.
+#
+# Every variable below is required and unset means "stop", because a Compose
+# default that quietly invents credentials is how a developer's laptop ends up
+# pointing somewhere it should not. `make up` supplies the local defaults, so the
+# explicit failure only reaches someone who ran `docker compose` by hand.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      # `$$` defers to the container's own environment, so the healthcheck below
+      # tests the same credentials the server was initialised with.
+      POSTGRES_USER: "${POSTGRES_USER:?POSTGRES_USER is unset - run 'cp .env.example .env' or use 'make up'}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is unset - run 'cp .env.example .env' or use 'make up'}"
+      POSTGRES_DB: "${POSTGRES_DB:?POSTGRES_DB is unset - run 'cp .env.example .env' or use 'make up'}"
+      # Pin the data directory inside the mounted volume. Postgres 18 moved the
+      # default to /var/lib/postgresql, and a volume mounted at the old path on a
+      # new image is a silently empty database.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${POSTGRES_PORT:?POSTGRES_PORT is unset - run 'cp .env.example .env' or use 'make up'}:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\" -h 127.0.0.1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+volumes:
+  # A named volume, so `docker compose down` keeps a developer's data and
+  # `make db-reset` is the only thing that destroys it. Never dumped, never
+  # committed: a dump of the local database is a data-leak path, not a fixture.
+  db-data:

@@ -253,6 +253,11 @@ export const AUDIT_REQUIRED_PREFIXES: readonly string[] = [
   // through to the clearance check, and withheld the event from both sinks —
   // the entire moderation safety record, dropped without an error.
   'moderation.',
+  // Communication publishes its safety facts under its own prefix too, and the
+  // content-bearing one of them is caught by the content guard before this
+  // matters: a captured evidence view is `restricted` and belongs in the audit
+  // trail, not in an aggregatable sink.
+  'communication.',
   'case.',
   'account_state.',
   // Everything crossing the authentication boundary is a security fact. This is
@@ -261,15 +266,28 @@ export const AUDIT_REQUIRED_PREFIXES: readonly string[] = [
   'auth.',
 ];
 
+/**
+ * The exceptions to the prefix convention, and there are only two kinds of them:
+ * a fact whose type name carries no domain prefix, and a safety fact from a
+ * domain that publishes a bus event for exactly one purpose.
+ *
+ * Every entry here is a name some package actually publishes. An entry that no
+ * producer can emit is not coverage — it is a name that will never be tested,
+ * and the gap it was written to close stays open while the list reads as though
+ * it were closed.
+ */
 export const AUDIT_REQUIRED_TYPES: readonly string[] = [
-  // The identity spine's own event name (overview §4). It is `public` on the
-  // bus because a client must know whether the current user is verified — which
-  // is exactly why it must not also be a metrics input.
+  // The legacy spelling of the identity spine event (overview §4). Identity
+  // publishes `identity.status_changed`, which the `identity.` prefix already
+  // covers; this row exists only so the other spelling stays audit-required
+  // while the documents and the producer are reconciled. It is the row to delete
+  // when the rename lands, not before.
   'identity_status.changed',
+  // A safety fact with no moderation case behind it, and no domain prefix: the
+  // identity stream's own anomaly signal.
   'verification.anomaly',
-  'message.reported',
+  // Trust & Safety's one outward risk statement.
   'risk.changed',
-  'media.scan_result',
 ];
 
 /**

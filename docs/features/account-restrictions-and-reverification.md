@@ -34,6 +34,7 @@ personalisation; any automated irreversible action.
 |---|---|---|
 | `AccountState` (`active`/`limited`/`suspended`/`banned`) | Moderation & Enforcement | reads only, via `account_state.changed` + capability projection |
 | The capability surface per state | Moderation & Enforcement (`packages/core/src/states/account.ts`) | **read, never restated in code** — see §4 |
+| The capabilities no restriction may remove | Moderation & Enforcement, same file: `UNRESTRICTABLE_CAPABILITIES`, declared next to `CAPABILITIES_BY_ACCOUNT_STATE` | **read, never restated in code** — see §4. One file for both, deliberately: two homes for one capability vocabulary is how a capability gets added to the base table and forgotten in the list that protects it |
 | `IdentityState` and the re-verification decision | Identity & Verification | reads `identity_status.changed`; may *request* re-verification, never enforce |
 | `RiskState` | Trust & Safety | **not read by any product surface.** A product client must not be able to infer a risk state, so no `risk.*` event reaches a product projection |
 | Which capabilities a specific restriction removes | Moderation & Enforcement (the `caseId`-bearing `restrict` event) | read from the capability projection, which is the state plus the removed set |
@@ -54,10 +55,21 @@ renders what capabilities it has; it does not know why, and cannot find out.
 
 ## 4. The capability surface — read from code, not from this document
 
-`packages/core/src/states/account.ts` is the **source of truth**:
-`CAPABILITIES_BY_ACCOUNT_STATE` and `capabilitiesFor(state, context)`. The
-tables below are a transcription for the product's benefit; if they ever
+`packages/core/src/states/account.ts` is the **source of truth**, and it holds
+three things: `CAPABILITIES_BY_ACCOUNT_STATE`, `UNRESTRICTABLE_CAPABILITIES`
+(`report`, `block`, `delete_account`), and `capabilitiesFor(state, context)`.
+The tables below are a transcription for the product's benefit; if they ever
 disagree with the code, the code is right and this document is a bug.
+
+`UNRESTRICTABLE_CAPABILITIES` is the answer to "who decides that this capability
+may never be taken", and it lives beside the base table rather than in the
+moderation package because the moderation package is not the only place that
+needs the answer: `applyDecision` refuses a restriction naming one of them, and
+`capabilitiesFor` will not subtract one. Moderation refuses loudly — a moderator
+who types `report` is told no, because a decision that records fewer removals
+than the one taken is a decision nobody made — and the kernel is the backstop
+behind it. Platform re-exports the same constant rather than keeping its own
+list, so a fourth copy cannot appear.
 
 `capabilitiesFor(state, ctx)` starts from the state's base list and subtracts
 `ctx.removedCapabilities`. Two consequences the product must internalise:
@@ -67,10 +79,11 @@ disagree with the code, the code is right and this document is a bug.
    `removedCapabilities.length > 0`. There is no such thing as a restriction
    that removes nothing: `limited` is always explainable, both to the user and
    to a moderator. This is the overview's "capability-based, not a blanket mute".
-2. **A named removed capability can only ever be a subset of the base set**, so
-   restriction can never *add* a capability and can never remove `report`,
-   `block` or `delete_account` from any state — the account's ability to reach
-   safety controls survives enforcement.
+2. **A named removed capability can only ever be a subset of the base set**,
+   so restriction can never *add* a capability, and it can never remove
+   anything in `UNRESTRICTABLE_CAPABILITIES` — `report`, `block`,
+   `delete_account`. The account's ability to reach safety controls survives
+   every enforcement, and so does its ability to leave.
 
 ### 4.1 Base capability surface
 
@@ -79,7 +92,7 @@ disagree with the code, the code is right and this document is a bug.
 | `active` | `browse_discovery`, `like`, `send_message`, `report`, `block`, `edit_profile` | — |
 | `limited` | `browse_discovery`, `report`, `block`, `edit_profile` | `like`, `send_message` (before any per-case subtraction) |
 | `suspended` | `report`, `block`, `edit_profile` | `browse_discovery`, `like`, `send_message` |
-| `banned` | `report`, `appeal_request`, `delete_account` | `browse_discovery`, `like`, `send_message`, `edit_profile` |
+| `banned` | `report`, `block`, `appeal_request`, `delete_account` | `browse_discovery`, `like`, `send_message`, `edit_profile` |
 
 A `limited` account's effective surface is its base set minus
 `removedCapabilities`, so the most restrictive legal `limited` account has
@@ -164,7 +177,7 @@ named moderator with a `caseId` (`lift_ban`).
 |---|---|---|---|
 | Can message | no | no | no |
 | Can be discovered | usually yes | no | no |
-| Can report / block | yes | yes | yes (report) |
+| Can report / block | yes | yes | yes (report and block) |
 | Data intact | yes | yes | yes, until the user deletes |
 | Reversible by | moderator (`lift_restriction`) | moderator (`reinstate`) | moderator (`lift_ban`) |
 | Framing in copy | "here is what is switched off" | "paused, and here is how it ends" | "closed, and here is what you can still do" |

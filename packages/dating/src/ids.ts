@@ -14,6 +14,12 @@ type Brand<B extends string> = string & { readonly [brand]: B };
 export type LikeId = Brand<'LikeId'>;
 export type PassId = Brand<'PassId'>;
 export type BlockId = Brand<'BlockId'>;
+/**
+ * A client-supplied request key. Not an id of anything in this domain: it is
+ * the token a retried command carries so the retry collapses onto the first
+ * attempt instead of becoming a second fact.
+ */
+export type IdempotencyKey = Brand<'IdempotencyKey'>;
 
 /** The only way a dating-owned id comes into existence. */
 export function castDatingId<T extends string>(value: string): Brand<T> {

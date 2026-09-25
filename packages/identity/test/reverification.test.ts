@@ -8,15 +8,17 @@ import {
   type SubjectId,
   type VerificationId,
   castId,
+  identityMachine,
 } from '@been-there/core';
 import {
   REVERIFICATION_AUTHORITIES,
   REVERIFICATION_POLICY,
   type ReverificationHistoryEntry,
   type ReverificationReason,
+  type ReverificationLimitSignal,
   type ReverificationRefusal,
-  type ReverificationRefusalLog,
   type ReverificationRequester,
+  type ReverificationSinks,
   detectReverificationAbuse,
   proposeReview,
   requestReVerification,
@@ -54,6 +56,11 @@ const ATTACKER = castId<'ActorId'>('user-2');
 
 const ATTACKER_DEMAND: ReverificationRequester = { kind: 'subject', actorId: ATTACKER };
 
+interface CollectingSinks extends ReverificationSinks {
+  readonly refusalRows: ReverificationRefusal[];
+  readonly signalRows: ReverificationLimitSignal[];
+}
+
 const reasons: readonly ReverificationReason[] = [
   'identity_expired',
   'user_requested',
@@ -74,14 +81,21 @@ function historyEntry(
   };
 }
 
-function collectingLog(): ReverificationRefusalLog & {
-  readonly refusals: ReverificationRefusal[];
-} {
+function collectingSinks(): CollectingSinks {
   const refusals: ReverificationRefusal[] = [];
+  const signals: ReverificationLimitSignal[] = [];
   return {
-    refusals,
-    append: (refusal: ReverificationRefusal): void => {
-      refusals.push(refusal);
+    refusalRows: refusals,
+    signalRows: signals,
+    refusals: {
+      append: (refusal: ReverificationRefusal): void => {
+        refusals.push(refusal);
+      },
+    },
+    signals: {
+      append: (signal: ReverificationLimitSignal): void => {
+        signals.push(signal);
+      },
     },
   };
 }
@@ -91,12 +105,12 @@ function ask(
   requester: ReverificationRequester['kind'],
   identityState: IdentityState,
   history: readonly ReverificationHistoryEntry[] = [],
-  refusals: ReverificationRefusalLog = collectingLog(),
+  sinks: CollectingSinks = collectingSinks(),
 ) {
   return requestReVerification(
     { subjectId: SUBJECT, reason, requester: requesters[requester]!, now: T0 },
     { identityState, history },
-    refusals,
+    sinks,
   );
 }
 
@@ -105,12 +119,12 @@ function askAs(
   reason: ReverificationReason,
   identityState: IdentityState,
   history: readonly ReverificationHistoryEntry[] = [],
-  refusals: ReverificationRefusalLog = collectingLog(),
+  sinks: CollectingSinks = collectingSinks(),
 ) {
   return requestReVerification(
     { subjectId: SUBJECT, reason, requester, now: T0 },
     { identityState, history },
-    refusals,
+    sinks,
   );
 }
 
@@ -319,10 +333,10 @@ describe("a user cannot demand another user's re-verification", () => {
   });
 
   it('records the attempt against the account that made it', () => {
-    const log = collectingLog();
+    const log = collectingSinks();
     expect(askAs(ATTACKER_DEMAND, 'user_requested', 'expired', [], log).ok).toBe(false);
 
-    expect(log.refusals).toEqual([
+    expect(log.refusalRows).toEqual([
       {
         at: T0,
         actorId: ATTACKER,
@@ -335,9 +349,9 @@ describe("a user cannot demand another user's re-verification", () => {
   });
 
   it('records a dating-core demand too, so the refusal is not silent', () => {
-    const log = collectingLog();
+    const log = collectingSinks();
     expect(ask('case_linked', 'dating_core', 'verified', [], log).ok).toBe(false);
-    expect(log.refusals).toEqual([
+    expect(log.refusalRows).toEqual([
       {
         at: T0,
         actorId: castId<'ActorId'>('svc-dating'),
@@ -350,13 +364,13 @@ describe("a user cannot demand another user's re-verification", () => {
   });
 
   it('writes nothing when the demand is legitimate', () => {
-    const log = collectingLog();
+    const log = collectingSinks();
     expect(askAs(requesters.subject!, 'identity_expired', 'expired', [], log).ok).toBe(true);
-    expect(log.refusals).toEqual([]);
+    expect(log.refusalRows).toEqual([]);
   });
 
   it('surfaces a repeat offender to a human, and only the offender', () => {
-    const log = collectingLog();
+    const log = collectingSinks();
     for (let day = 0; day < 4; day += 1) {
       // Four demands across a month: the 3-per-30-days cap would not have
       // stopped them, which is the whole point of refusing them at all.
@@ -371,7 +385,7 @@ describe("a user cannot demand another user's re-verification", () => {
         log,
       );
     }
-    const findings = detectReverificationAbuse(log.refusals, T0);
+    const findings = detectReverificationAbuse(log.refusalRows, T0);
     expect(findings).toHaveLength(1);
     expect(findings[0]).toMatchObject({
       code: 'cross_subject_reverification_demand',
@@ -384,9 +398,9 @@ describe("a user cannot demand another user's re-verification", () => {
   });
 
   it('raises no finding for a subject re-verifying themselves', () => {
-    const log = collectingLog();
+    const log = collectingSinks();
     askAs(requesters.subject!, 'user_requested', 'expired', [], log);
-    expect(detectReverificationAbuse(log.refusals, T0)).toEqual([]);
+    expect(detectReverificationAbuse(log.refusalRows, T0)).toEqual([]);
   });
 });
 
@@ -412,5 +426,150 @@ describe('a subject is still limited when re-verifying themselves', () => {
     expect(errorOf(askAs(requesters.subject!, 'user_requested', 'expired', history)).code).toBe(
       'rate_limited',
     );
+  });
+});
+
+describe('a refused automated demand reaches a human', () => {
+  const atCap = Array.from({ length: REVERIFICATION_POLICY.maxPerSubjectPer30Days }, (_, index) =>
+    historyEntry({
+      verificationId: castId<'VerificationId'>(`vrf-cap-${index}`),
+      requestedAt: daysLater(-(index * 9) - 1),
+    }),
+  );
+
+  it('raises a signal when Trust & Safety hits the cap on the same person', () => {
+    // Trust & Safety pulled this person out of discovery three times and the
+    // cap stopped the fourth. The refusal says `rate_limited` and nothing else,
+    // so without a signal the one pattern a moderator needs to see is invisible.
+    const sinks = collectingSinks();
+    const error = errorOf(ask('risk_signal', 'trust_safety', 'expired', atCap, sinks));
+
+    expect(error.code).toBe('rate_limited');
+    expect(sinks.signalRows).toHaveLength(1);
+    const signal = sinks.signalRows[0];
+    expect(signal?.requesterKind).toBe('trust_safety');
+    expect(signal?.reason).toBe('risk_signal');
+    expect(signal?.subjectId).toBe(SUBJECT);
+    expect(signal?.limit).toBe('per_subject_per_30_days');
+    expect(signal?.requested).toBe(REVERIFICATION_POLICY.maxPerSubjectPer30Days);
+    expect(signal?.cap).toBe(REVERIFICATION_POLICY.maxPerSubjectPer30Days);
+    // And the refusal is still on the record; the signal does not replace it.
+    expect(sinks.refusalRows).toHaveLength(1);
+  });
+
+  it('says when the block lifts, so the caller resumes instead of giving up', () => {
+    const sinks = collectingSinks();
+    errorOf(ask('risk_signal', 'trust_safety', 'expired', atCap, sinks));
+
+    // The oldest request in the window is the one that leaves it first.
+    const oldest = Math.min(...atCap.map((entry) => entry.requestedAt.getTime()));
+    expect(sinks.signalRows[0]?.blockedUntil.toISOString()).toBe(
+      new Date(oldest + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    );
+  });
+
+  it('raises a signal for a cooldown as well as for a cap', () => {
+    const sinks = collectingSinks();
+    const error = errorOf(
+      ask('anomaly_findings', 'moderation', 'expired', [historyEntry({ requestedAt: hoursLater(-2) })], sinks),
+    );
+
+    expect(error.code).toBe('rate_limited');
+    expect(sinks.signalRows[0]?.limit).toBe('cooldown');
+    expect(sinks.signalRows[0]?.requesterKind).toBe('moderation');
+    expect(sinks.signalRows[0]?.blockedUntil.toISOString()).toBe(
+      hoursLater(REVERIFICATION_POLICY.cooldownHours - 2).toISOString(),
+    );
+  });
+
+  it('does not raise a signal when the demand came from the subject', () => {
+    // A person tapping "verify again" twice has found a rate limit. The refusal
+    // row is the record; escalating a user's own impatience to a moderator would
+    // be a queue full of nothing.
+    const sinks = collectingSinks();
+    const error = errorOf(
+      askAs(requesters.subject!, 'user_requested', 'expired', atCap, sinks),
+    );
+
+    expect(error.code).toBe('rate_limited');
+    expect(sinks.signalRows).toHaveLength(0);
+    expect(sinks.refusalRows).toHaveLength(1);
+  });
+
+  it('raises no signal for a demand that was allowed', () => {
+    const sinks = collectingSinks();
+    expect(ask('risk_signal', 'trust_safety', 'expired', [], sinks).ok).toBe(true);
+    expect(sinks.signalRows).toHaveLength(0);
+  });
+});
+
+describe('the subject may request list and the machine agree', () => {
+  it('never names a state the identity machine would refuse', () => {
+    // The list is a policy gate that runs before the open-attempt, cap and
+    // cooldown checks, so a state in it that the machine rejects means the
+    // caller pays for three checks and then gets `invalid_transition`.
+    for (const state of REVERIFICATION_POLICY.subjectMayRequestOnlyWhen) {
+      expect(identityMachine.next(state, 'reverify_requested', {}).ok).toBe(true);
+    }
+  });
+
+  it('refuses a subject in verification_failed as ineligible, not as impossible', () => {
+    // A failed attempt is retried, not re-verified: `submit_verification` is
+    // legal from `verification_failed` and lands in the same `pending` state.
+    const error = errorOf(ask('user_requested', 'subject', 'verification_failed'));
+
+    expect(error.code).toBe('not_eligible');
+    expect(error.details?.state).toBe('verification_failed');
+  });
+
+  it('still lets the subject retry the failed attempt through the machine', () => {
+    const retry = identityMachine.next('verification_failed', 'submit_verification', {});
+
+    expect(retry.ok).toBe(true);
+    expect(retry.ok ? retry.value : null).toBe<IdentityState>('pending');
+  });
+});
+
+describe('an open human review is not walked back by an automated request', () => {
+  it('refuses a Trust & Safety demand while a review is open', () => {
+    // `reverify_requested` is legal from `review_required`, so without this the
+    // cap-compliant way to take a person out of a human's queue is to ask for a
+    // re-verification: automation undoing a human's involvement.
+    const sinks = collectingSinks();
+    const error = errorOf(ask('anomaly_findings', 'trust_safety', 'review_required', [], sinks));
+
+    expect(error.code).toBe('conflict');
+    expect(error.message).toContain('human review');
+  });
+
+  it('refuses before the cap is consulted, so the caller learns nothing', () => {
+    const atCap = Array.from({ length: REVERIFICATION_POLICY.maxPerSubjectPer30Days }, (_, index) =>
+      historyEntry({ verificationId: castId<'VerificationId'>(`vrf-r-${index}`) }),
+    );
+    const sinks = collectingSinks();
+    const error = errorOf(ask('risk_signal', 'trust_safety', 'review_required', atCap, sinks));
+
+    expect(error.code).toBe('conflict');
+    expect(sinks.signalRows).toHaveLength(0);
+  });
+
+  it('has the kernel behind it, so a direct machine call is refused too', () => {
+    // The policy guard is the one that explains itself; this is the one that
+    // cannot be bypassed by a caller that skips the command interface.
+    const next = identityMachine.next('review_required', 'reverify_requested', {});
+
+    expect(next.ok).toBe(false);
+  });
+
+  it('leaves a flagged case only through a reviewer, in either direction', () => {
+    const cleared = identityMachine.next('review_required', 'review_cleared', {
+      reviewerId: 'rev-1',
+    });
+    const confirmed = identityMachine.next('review_required', 'review_confirmed_fraud', {
+      reviewerId: 'rev-1',
+    });
+
+    expect(cleared.ok ? cleared.value : null).toBe<IdentityState>('verified');
+    expect(confirmed.ok ? confirmed.value : null).toBe<IdentityState>('verification_failed');
   });
 });
