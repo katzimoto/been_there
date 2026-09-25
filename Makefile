@@ -61,8 +61,14 @@ docs: ## Check that documentation links resolve
 research-check: ## Check the research tool still runs
 	node scripts/research/search.mjs --help > /dev/null
 
-check: typecheck typecheck-tests test docs research-check parity ## Everything CI runs, in CI order
+check: typecheck typecheck-tests test docs research-check stale-artifacts lockfile parity ## Everything CI runs, in CI order
 ci: install check ## The whole CI sequence as one command
+
+lockfile: ## Assert the lockfile covers every workspace package
+	node scripts/dev/check-workspace-lockfile.mjs
+
+stale-artifacts: ## Assert no compiled output sits beside the source it was built from
+	node scripts/dev/check-stale-artifacts.mjs
 
 parity: ## Assert the local targets above run exactly what CI runs
 	node scripts/dev/check-ci-parity.mjs
@@ -110,17 +116,26 @@ seed: ## Load the development dataset into the database. Refuses: no schema exis
 
 # --- The development dataset. ---------------------------------------------
 
-build: ## Build every package into dist, which is how the seed script loads them
+build: ## Build every package, which is what `npm run typecheck` and CI do
 	npm run build
 
-seed-print: build ## Print the development dataset as a summary
+# The dataset loads the packages through their dist, so they must be built —
+# cross-package imports resolve to dist, never to src. Only the six packages
+# the seed actually imports are listed, so a broken project elsewhere in the
+# repo cannot stop you from exercising the dataset.
+SEED_PACKAGES := packages/core packages/identity packages/dating packages/communication packages/moderation packages/platform
+
+seed-build: ## Build the packages the dataset loads (not the whole solution)
+	npx tsc --build $(SEED_PACKAGES)
+
+seed-print: seed-build ## Print the development dataset as a summary
 	node scripts/seed/development-seed.mjs
 
-seed-json: build ## Print the development dataset as JSON
+seed-json: seed-build ## Print the development dataset as JSON
 	node scripts/seed/development-seed.mjs --format json
 
-seed-verify: build ## Assert the dataset's invariants; non-zero exit on violation
+seed-verify: seed-build ## Assert the dataset's invariants; non-zero exit on violation
 	node scripts/seed/development-seed.mjs --check
 
-audit-log: build ## Read the seeded audit log as a role. AUDIT_AS=senior_moderator|moderator|support|system
+audit-log: seed-build ## Read the seeded audit log as a role. AUDIT_AS=senior_moderator|moderator|support|system
 	node scripts/seed/development-seed.mjs --audit --as "$(AUDIT_AS)"

@@ -1,18 +1,34 @@
 import { describe, expect, it } from 'vitest';
 import type { IdentityState } from '@been-there/core';
 import {
+  BROWSE_DISCOVERY_CAPABILITY,
   DATING_READ_MODEL_VERSION,
   DISCOVERABLE_IDENTITY_STATE,
+  type CandidateCardProjection,
+  type DatingReadModel,
   type DiscoverySnapshot,
   type EligibilityReason,
   ELIGIBILITY_RULES,
   type EligibilityRule,
+  PASS_SUPPRESSION_DAYS,
   STANDING_PROJECTION_VERSION,
+  type SubjectStandingProjection,
   evaluateEligibility,
   selectEligibleCards,
 } from '../src/index.js';
-import type { CandidateCardProjection, DatingReadModel } from '../src/index.js';
-import { A, B, C, block, like, matchRecord, pass, relationship, standing } from './fixtures.js';
+import {
+  A,
+  AT,
+  B,
+  C,
+  DAYS,
+  block,
+  like,
+  matchRecord,
+  pass,
+  relationship,
+  standing,
+} from './fixtures.js';
 
 function reasonOf(snapshot: DiscoverySnapshot, rules?: readonly EligibilityRule[]): EligibilityReason {
   const decision = evaluateEligibility(snapshot, rules);
@@ -27,8 +43,9 @@ function snapshotWith(
   viewer = standing(A),
   candidate = standing(B),
   relationshipView = relationship(),
+  now: Date = AT,
 ): DiscoverySnapshot {
-  return { viewer, candidate, relationship: relationshipView, distance: 'lt_5_km' };
+  return { viewer, candidate, relationship: relationshipView, distance: 'lt_5_km', now };
 }
 
 describe('discovery eligibility', () => {
@@ -102,6 +119,27 @@ describe('discovery eligibility', () => {
     ).toBe<EligibilityReason>('candidate_account_not_visible');
   });
 
+  it('refuses a candidate who can appear but cannot reciprocate', () => {
+    // A card the candidate is not allowed to act on is a page slot spent for
+    // nothing, so it is denied rather than served.
+    const cannotLike = standing(B, { capabilities: [BROWSE_DISCOVERY_CAPABILITY] });
+    expect(reasonOf(snapshotWith(standing(A), cannotLike))).toBe<EligibilityReason>(
+      'candidate_cannot_reciprocate',
+    );
+  });
+
+  it('denies an account-standing failure before a block, as R3 and R4 are ordered', () => {
+    // R3 (cannot appear, or cannot reciprocate) precedes R4 (block) in the
+    // specification, so a blocked candidate who also cannot reciprocate is
+    // reported as such. Both deny and neither reason is ever rendered, so the
+    // order cannot leak; it is pinned here so the choice is visible.
+    const view = relationship({ blocks: [block(B, A)] });
+    const cannotLike = standing(B, { capabilities: [BROWSE_DISCOVERY_CAPABILITY] });
+    expect(reasonOf(snapshotWith(standing(A), cannotLike, view))).toBe<EligibilityReason>(
+      'candidate_cannot_reciprocate',
+    );
+  });
+
   it('refuses both directions of a block', () => {
     expect(reasonOf(snapshotWith(standing(A), standing(B), relationship({ blocks: [block(A, B)] })))).toBe(
       'blocked',
@@ -121,12 +159,12 @@ describe('discovery eligibility', () => {
     expect(reasonOf(snapshotWith(viewer, standing(A)))).toBe<EligibilityReason>('self_view');
   });
 
-  it('refuses a candidate the viewer already decided on', () => {
-    expect(reasonOf(snapshotWith(standing(A), standing(B), relationship({ passes: [pass(A, B)] })))).toBe(
-      'already_passed',
-    );
+  it('refuses a candidate the viewer has already decided on', () => {
     expect(reasonOf(snapshotWith(standing(A), standing(B), relationship({ likes: [like(A, B)] })))).toBe(
       'already_liked',
+    );
+    expect(reasonOf(snapshotWith(standing(A), standing(B), relationship({ passes: [pass(A, B)] })))).toBe(
+      'already_passed',
     );
   });
 
@@ -135,11 +173,35 @@ describe('discovery eligibility', () => {
     expect(evaluateEligibility(snapshotWith(standing(A), standing(B), view))).toEqual({ eligible: true });
   });
 
+  it('lets a pass lapse, and refuses a superseded one', () => {
+    // A pass is a 30-day window, not a tombstone: the day after it ends the
+    // candidate is eligible again, and a like that overrode the pass never
+    // suppressed them in the first place.
+    const view = relationship({ passes: [pass(A, B, 'pass-a-b', AT)] });
+    const onDay29 = { ...snapshotWith(standing(A), standing(B), view), now: DAYS(PASS_SUPPRESSION_DAYS - 1) };
+    const onDay30 = { ...snapshotWith(standing(A), standing(B), view), now: DAYS(PASS_SUPPRESSION_DAYS) };
+    const onDay31 = { ...snapshotWith(standing(A), standing(B), view), now: DAYS(PASS_SUPPRESSION_DAYS + 1) };
+    expect(reasonOf(onDay29)).toBe<EligibilityReason>('already_passed');
+    expect(evaluateEligibility(onDay30)).toEqual({ eligible: true });
+    expect(evaluateEligibility(onDay31)).toEqual({ eligible: true });
+    const superseded = relationship({ passes: [pass(A, B, 'pass-a-b', AT, 'superseded')] });
+    expect(evaluateEligibility(snapshotWith(standing(A), standing(B), superseded))).toEqual({ eligible: true });
+  });
+
+  it('re-shows a pair whose like was withdrawn', () => {
+    const withdrawn = { ...like(A, B), state: 'withdrawn' as const };
+    const view = relationship({ likes: [withdrawn] });
+    expect(evaluateEligibility(snapshotWith(standing(A), standing(B), view))).toEqual({ eligible: true });
+  });
+
   it('refuses an already matched candidate but re-shows an unmatched one', () => {
     expect(reasonOf(snapshotWith(standing(A), standing(B), relationship({ match: matchRecord() })))).toBe(
       'already_matched',
     );
-    const ended = matchRecord({ status: 'unmatched', endedAt: new Date('2026-01-01T00:00:00Z') });
+    const ended = matchRecord({
+      standings: ['closed_by_actor', 'closed_by_actor'],
+      ended: { cause: 'unmatched', actorId: A, at: AT, idempotencyKey: null },
+    });
     expect(evaluateEligibility(snapshotWith(standing(A), standing(B), relationship({ match: ended })))).toEqual({
       eligible: true,
     });
@@ -166,15 +228,41 @@ describe('discovery eligibility', () => {
   });
 
   it('applies the viewer’s own interest list to their own page', () => {
-    const viewer = standing(A, { preferences: { interestedIn: ['man'] } });
+    const viewer = standing(A, { preferences: { seekingGenders: ['man'] } });
     const candidate = standing(B, { genderIdentities: ['woman', 'non_binary'] });
     expect(reasonOf(snapshotWith(viewer, candidate))).toBe<EligibilityReason>('gender_out_of_scope');
   });
 
+  it('keeps the page filter and the pair test on separate axes', () => {
+    // The two axes answer different questions. A viewer who seeks only men but
+    // is open to being matched with anyone must not have their openness
+    // narrowed to their own page filter, which is what one conflated field did.
+    const viewer = standing(A, {
+      genderIdentities: ['woman'],
+      preferences: { seekingGenders: ['man'], openTo: ['man', 'woman'] },
+    });
+    const sought = standing(B, { genderIdentities: ['man'], preferences: { openTo: ['woman'] } });
+    expect(evaluateEligibility(snapshotWith(viewer, sought))).toEqual({ eligible: true });
+    // Someone outside the seeking list is off this page even when the pair itself
+    // is compatible.
+    const unsought = standing(C, { genderIdentities: ['non_binary'], preferences: { openTo: ['woman'] } });
+    expect(reasonOf(snapshotWith(viewer, unsought))).toBe<EligibilityReason>('gender_out_of_scope');
+  });
+
   it('refuses a pair that fails the mutual test in the candidate’s own direction', () => {
-    const viewer = standing(A, { genderIdentities: ['woman'], preferences: { interestedIn: ['man'] } });
-    const candidate = standing(B, { genderIdentities: ['man'], preferences: { interestedIn: ['man'] } });
+    const viewer = standing(A, { genderIdentities: ['woman'], preferences: { openTo: ['man'] } });
+    const candidate = standing(B, { genderIdentities: ['man'], preferences: { openTo: ['man'] } });
     expect(reasonOf(snapshotWith(viewer, candidate))).toBe<EligibilityReason>('not_mutually_compatible');
+  });
+
+  it('reports gender before distance when a candidate fails both', () => {
+    // The order is normative in both specifications: age, then gender, then
+    // distance, then the mutual test. A candidate who is out of the viewer's
+    // scope *and* too far has one answer, not whichever check ran first.
+    const viewer = standing(A, { preferences: { seekingGenders: ['man'], maxDistanceKm: 25 } });
+    const candidate = standing(B, { genderIdentities: ['woman'], location: '50_100_km' });
+    const snapshot = { ...snapshotWith(viewer, candidate), distance: '50_100_km' as const };
+    expect(reasonOf(snapshot)).toBe<EligibilityReason>('gender_out_of_scope');
   });
 
   it('reports the first failing rule in priority order', () => {
@@ -206,7 +294,7 @@ describe('selectEligibleCards', () => {
   });
 
   function model(overrides: Partial<DatingReadModel>): DatingReadModel {
-    const standings: Record<string, ReturnType<typeof standing>> = {
+    const standings: Record<string, SubjectStandingProjection> = {
       [A]: standing(A),
       [B]: standing(B),
       [C]: standing(C, { identityState: 'pending' }),
@@ -222,12 +310,12 @@ describe('selectEligibleCards', () => {
   }
 
   it('serves only cards whose candidate passes the gate, in store order', () => {
-    const served = selectEligibleCards(A, model({}), [A, B, C]);
+    const served = selectEligibleCards(A, model({}), [A, B, C], AT);
     expect(served.map((entry) => entry.userId)).toEqual([B]);
   });
 
   it('serves nothing when the viewer has no standing projection', () => {
-    const served = selectEligibleCards(C, model({ standingFor: () => null }), [B]);
+    const served = selectEligibleCards(C, model({ standingFor: () => null }), [B], AT);
     expect(served).toEqual([]);
   });
 
@@ -237,12 +325,19 @@ describe('selectEligibleCards', () => {
       A,
       model({ standingFor: (user) => (user === A ? unverified : standing(B)) }),
       [B],
+      AT,
     );
     expect(served).toEqual([]);
   });
 
   it('serves nothing from a read model whose version it cannot read', () => {
-    const served = selectEligibleCards(A, model({ version: DATING_READ_MODEL_VERSION + 1 }), [B]);
+    const served = selectEligibleCards(A, model({ version: DATING_READ_MODEL_VERSION + 1 }), [B], AT);
     expect(served).toEqual([]);
+  });
+
+  it('is read against the clock it is given, not the wall clock', () => {
+    const passed = model({ relationshipFor: () => relationship({ passes: [pass(A, B)] }) });
+    expect(selectEligibleCards(A, passed, [B], AT)).toEqual([]);
+    expect(selectEligibleCards(A, passed, [B], DAYS(PASS_SUPPRESSION_DAYS)).map((entry) => entry.userId)).toEqual([B]);
   });
 });

@@ -20,6 +20,19 @@ const ALICE = castId<'UserId'>('u-alice') as UserId;
 const BOB = castId<'UserId'>('u-bob') as UserId;
 const NOW = new Date('2026-03-01T12:00:00.000Z');
 
+/**
+ * The projection cannot carry a coordinate, and this is the compile-time half of
+ * that claim rather than a review comment: `NotAKey` resolves to `true` only
+ * while the key is absent, so adding a coordinate field to `CoarseLocation` is a
+ * type error in this file before it is anything else.
+ */
+type NotAKey<T, K extends string> = K extends keyof T ? never : true;
+
+const noLatitude: NotAKey<CoarseLocation, 'latitude'> = true;
+const noLongitude: NotAKey<CoarseLocation, 'longitude'> = true;
+const noCoordinate: NotAKey<CoarseLocation, 'coordinate'> = true;
+const noBandBounds: NotAKey<CoarseLocation, 'minKm'> = true;
+
 function anchorFor(ownerId: UserId, precise: Coordinate = BERLIN) {
   return storeAnchor({
     anchorId: castId<'LocationAnchorId'>('anchor-1') as LocationAnchorId,

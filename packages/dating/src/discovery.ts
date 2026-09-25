@@ -1,6 +1,6 @@
 import type { UserId } from '@been-there/core';
 import { activeBlockBetween } from './blocks.js';
-import { currentLikeBetween } from './interaction.js';
+import { currentLikeBetween } from './likes.js';
 import { type DistanceBand, isWithinDistanceLimit } from './location.js';
 import { isPassInEffect } from './passes.js';
 import { areMutuallyCompatible, type CompatibilitySide } from './preferences.js';

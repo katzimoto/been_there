@@ -9,7 +9,6 @@ import {
   completeRecovery,
   issueSession,
   recordFailedRecoveryAttempt,
-  recordSessionActivity,
   recoveryAuditFields,
   refreshSession,
   revokeSession,
@@ -139,48 +138,68 @@ describe('refresh is rotation', () => {
 });
 
 describe('the idle clock, which is the half-life of the refresh window', () => {
-  it('refuses a session nobody has touched for a fortnight, window open or not', () => {
-    const session = sessionFor(ALICE, 'sess-1', SESSION_TTL_SECONDS, 30 * 24 * 3600);
+  const DAY = 24 * 3600 * 1000;
+
+  function longLivedSession(): Session {
+    return sessionFor(ALICE, 'sess-1', SESSION_TTL_SECONDS, 30 * 24 * 3600);
+  }
+
+  it('refreshes a session that has been quiet for less than a fortnight', () => {
+    const session = longLivedSession();
+    const thirteenDays = new Date(NOW.getTime() + 13 * DAY);
+
+    const rotated = succeeded(refreshSession(session, thirteenDays, { sessionId: sessionId('sess-2') }));
+
+    expect(rotated.current.status).toBe('active');
+    expect(rotated.current.lastActiveAt).toEqual(thirteenDays);
+  });
+
+  it('refuses to revive a session that has been quiet for a fortnight, window open or not', () => {
+    const session = longLivedSession();
     const idleSince = new Date(NOW.getTime() + SESSION_IDLE_TIMEOUT_SECONDS * 1000);
 
-    // One millisecond before, the session still authenticates: the boundary is
-    // inclusive of the timeout, and a test that only checked "much later" would
-    // pass whatever the constant was.
+    // One millisecond earlier it still refreshes, so the boundary is the
+    // constant and not "a long time afterwards".
     expect(
-      succeeded(validateSession(session, new Date(idleSince.getTime() - 1))).sessionId,
-    ).toBe(session.sessionId);
-    expect(rejected(validateSession(session, idleSince)).details).toEqual({ reason: 'idle' });
+      succeeded(refreshSession(session, new Date(idleSince.getTime() - 1), { sessionId: sessionId('sess-2') }))
+        .current.status,
+    ).toBe('active');
+    // The refresh window itself is still open for another fortnight, which is
+    // exactly the case the idle clock exists to close.
+    expect(session.refreshableUntil.getTime()).toBeGreaterThan(idleSince.getTime());
+    expect(rejected(refreshSession(session, idleSince, { sessionId: sessionId('sess-2') })).details).toEqual({
+      reason: 'idle',
+    });
   });
 
-  it('slides the idle clock on activity without sliding the refresh window', () => {
-    const session = sessionFor(ALICE, 'sess-1', SESSION_TTL_SECONDS, 30 * 24 * 3600);
-    const afterAWhile = new Date(NOW.getTime() + 20 * 24 * 3600 * 1000);
+  it('slides the idle clock on a rotation without sliding the refresh window', () => {
+    const session = longLivedSession();
+    // Two rotations thirteen days apart: each is inside the idle timeout only
+    // because the previous one reset the clock, and together they cross the
+    // 30-day window a rolling policy would have extended.
+    const firstDay = new Date(NOW.getTime() + 13 * DAY);
+    const secondDay = new Date(NOW.getTime() + 26 * DAY);
 
-    const touched = succeeded(recordSessionActivity(session, afterAWhile));
+    const first = succeeded(refreshSession(session, firstDay, { sessionId: sessionId('sess-2') }));
+    const second = succeeded(refreshSession(first.current, secondDay, { sessionId: sessionId('sess-3') }));
 
-    expect(touched.lastActiveAt).toEqual(afterAWhile);
-    // The window is absolute, so a fortnight of use does not buy another month.
-    expect(touched.refreshableUntil.getTime()).toBe(session.refreshableUntil.getTime());
+    expect(second.current.lastActiveAt).toEqual(secondDay);
+    expect(second.current.refreshableUntil.getTime()).toBe(session.refreshableUntil.getTime());
+    // Four more days of use, and the window closes anyway.
     expect(
-      succeeded(validateSession(touched, new Date(afterAWhile.getTime() + 13 * 24 * 3600 * 1000))).sessionId,
-    ).toBe(touched.sessionId);
+      rejected(
+        refreshSession(second.current, new Date(secondDay.getTime() + 5 * DAY), { sessionId: sessionId('sess-4') }),
+      ).details,
+    ).toEqual({ reason: 'refresh_window_closed' });
   });
 
-  it('will not let activity resurrect a session that already went idle', () => {
-    const session = sessionFor(ALICE, 'sess-1', SESSION_TTL_SECONDS, 30 * 24 * 3600);
-    const longAfter = new Date(NOW.getTime() + 20 * 24 * 3600 * 1000);
+  it('tells idle apart from expiry, because one is routine and the other is a signal', () => {
+    const session = longLivedSession();
+    const afterWindow = new Date(session.refreshableUntil.getTime() + 1);
 
-    expect(rejected(recordSessionActivity(session, longAfter)).details).toEqual({ reason: 'idle' });
-  });
-
-  it('counts a rotation as activity', () => {
-    const session = sessionFor(ALICE, 'sess-1', SESSION_TTL_SECONDS, 30 * 24 * 3600);
-    const later = new Date(NOW.getTime() + 20 * 24 * 3600 * 1000);
-
-    const rotated = succeeded(refreshSession(session, later, { sessionId: sessionId('sess-2') }));
-
-    expect(rotated.current.lastActiveAt).toEqual(later);
-    expect(rejected(validateSession(rotated.current, new Date(later.getTime() + SESSION_IDLE_TIMEOUT_SECONDS * 1000))).details).toEqual({ reason: 'idle' });
+    expect(rejected(refreshSession(session, afterWindow, { sessionId: sessionId('sess-2') })).details).toEqual({
+      reason: 'refresh_window_closed',
+    });
   });
 });
 
@@ -203,11 +222,12 @@ describe('the concurrent-session cap', () => {
   it('evicts the least recently active session, not the newest', () => {
     const sessions = Array.from({ length: MAX_CONCURRENT_SESSIONS + 1 }, (_, index) =>
       succeeded(
-        recordSessionActivity(
+        refreshSession(
           sessionFor(ALICE, `sess-${index}`, SESSION_TTL_SECONDS, 30 * 24 * 3600),
           new Date(NOW.getTime() + index * 1000),
+          { sessionId: sessionId(`rotated-${index}`) },
         ),
-      ),
+      ).current,
     );
 
     const { evicted } = enforceSessionLimit(sessions);

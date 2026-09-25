@@ -35,8 +35,11 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # `set -e` is load-bearing: without it the loop's exit status is the last
+      # `echo`, so a failing package is masked by a later one that compiles.
       - name: Typecheck tests
         run: |
+          set -euo pipefail
           for pkg in packages/*/test/tsconfig.json; do
             echo "::group::$pkg"
             npx tsc -p "$pkg"
@@ -51,3 +54,11 @@ jobs:
 
       - name: Check research tool
         run: node scripts/research/search.mjs --help > /dev/null
+
+      # Compiled output beside its source makes the loader prefer the .js, so
+      # the suite silently runs stale code. This has happened here once already.
+      - name: Check for stale artefacts
+        run: node scripts/dev/check-stale-artifacts.mjs
+
+      - name: Check the lockfile covers every workspace package
+        run: node scripts/dev/check-workspace-lockfile.mjs

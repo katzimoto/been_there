@@ -48,6 +48,8 @@ const MAPPING = [
   { step: 'Test', target: 'test' },
   { step: 'Check documentation links', target: 'docs' },
   { step: 'Check research tool', target: 'research-check' },
+  { step: 'Check for stale artefacts', target: 'stale-artifacts' },
+  { step: 'Check the lockfile covers every workspace package', target: 'lockfile' },
 ];
 
 /** The target that must run every mapped target, in CI order. */
@@ -57,7 +59,10 @@ const AGGREGATE = 'check';
 const AGGREGATE_WITH_INSTALL = 'ci';
 
 const SCAFFOLDING = /^(for|while|until|do|done|then|elif|else|fi|esac|in|\{|\}|;)$|^(for|while|until)\s/;
-const SET_COMMAND = /^set\s+[-+][a-zA-Z]+$/;
+// Any `set` invocation: shell configuration such as `set -e` or
+// `set -euo pipefail` is never a verification, and its exact flags are the
+// local side's business, not the comparison's.
+const SET_COMMAND = /^set(\s|$)/;
 const OUTPUT_COMMAND = /^(echo|printf)\b/;
 const EXIT_COMMAND = /^(exit|return)\s+\d*$/;
 

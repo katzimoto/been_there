@@ -55,6 +55,7 @@ import {
   asConversation,
   asCorrelation,
   asReport,
+  capabilitiesFor,
   asSubject,
   asUser,
   asVerification,
@@ -397,25 +398,49 @@ export function loadDevelopmentDataset() {
   }
 
   // --- Evidence, and who may read it. --------------------------------------
+  //
+  // The case holds two artefacts: a message snapshot any reviewer may read,
+  // and the raw liveness capture, which nobody but the identity privacy
+  // officer may see. The dataset performs both reads for real, so the audit
+  // trail contains a granted read and a redacted one, and `make audit-log`
+  // can show what each role is allowed to see rather than assert it.
 
   const evidence = submission.evidence;
-  for (const artefact of evidence) {
-    onCase('evidence.read', MODERATOR.actorId, [
-      classify('evidenceId', 'internal', artefact.evidenceId),
-      classify('kind', 'internal', artefact.kind),
-    ]);
-  }
   const identityArtefact = evidence.find((entry) => entry.kind === 'identity_artefact');
-  const denied = readEvidence(moderation, MODERATOR, identityArtefact, caseId);
-  if (denied.visibility !== 'denied') {
+  const messageSnapshot = evidence.find((entry) => entry.kind === 'message_snapshot');
+  const asModerator = readEvidence(moderation, MODERATOR, identityArtefact, caseId, reportCorrelation);
+  const asOfficer = readEvidence(moderation, PRIVACY_OFFICER, identityArtefact, caseId, reportCorrelation);
+  const reviewerView = readEvidence(moderation, MODERATOR, messageSnapshot, caseId, reportCorrelation);
+  if (asModerator.visibility !== 'redacted' || asModerator.artefactReference !== undefined) {
     throw new Error(
-      `a plain moderator must be denied raw identity evidence, but readEvidence returned ${denied.visibility}`,
+      `a plain moderator must see a redacted identity artefact, but readEvidence returned ${asModerator.visibility}`,
     );
   }
-  onCase('evidence.read_denied', MODERATOR.actorId, [
+  if (asOfficer.visibility !== 'full' || reviewerView.visibility !== 'full') {
+    throw new Error(
+      `the privacy officer must see the full artefact and a reviewer the full message, but got ` +
+        `${asOfficer.visibility} and ${reviewerView.visibility}`,
+    );
+  }
+  onCase('evidence.read', PRIVACY_OFFICER.actorId, [
     classify('evidenceId', 'internal', identityArtefact.evidenceId),
-    classify('clearance', 'internal', 'reviewer'),
+    classify('kind', 'internal', identityArtefact.kind),
+    classify('visibility', 'internal', asOfficer.visibility),
   ]);
+  onCase('evidence.read', MODERATOR.actorId, [
+    classify('evidenceId', 'internal', messageSnapshot.evidenceId),
+    classify('kind', 'internal', messageSnapshot.kind),
+    classify('visibility', 'internal', reviewerView.visibility),
+  ]);
+  onCase('evidence.read', MODERATOR.actorId, [
+    classify('evidenceId', 'internal', identityArtefact.evidenceId),
+    classify('kind', 'internal', identityArtefact.kind),
+    classify('visibility', 'internal', asModerator.visibility),
+  ]);
+  const evidenceViews = {
+    identityArtefact: { asModerator, asOfficer },
+    messageSnapshot: { asModerator: reviewerView },
+  };
 
   return {
     epoch: SEED_EPOCH,
@@ -428,6 +453,7 @@ export function loadDevelopmentDataset() {
     report: submission.report,
     cases: [inReview, ellisCase],
     evidence,
+    evidenceViews,
     moderationAuditEntries: moderation.audit.entries,
     platformAuditLog: auditLog,
     caseId,

@@ -7,9 +7,20 @@ dist/
 coverage/
 
 # Compiled output must never sit next to the TypeScript it is built from.
+packages/*/test/**/*.js
+packages/*/test/**/*.d.ts
+packages/*/test/**/*.js.map
+packages/*/test/**/*.d.ts.map
+
 # vitest resolves `../src/index.js` to a real .js file before it reaches the .ts,
-# so a committed artefact silently makes the test suite run stale code.
+# so a committed artefact silently makes the test suite run stale code. The same
+# applies to a config file: `vitest.config.js` is preferred over
+# `vitest.config.ts` by the loader.
 packages/*/src/**/*.js
 packages/*/src/**/*.d.ts
 packages/*/src/**/*.js.map
 packages/*/src/**/*.d.ts.map
+/vitest.config.js
+/vitest.config.d.ts
+/vitest.config.js.map
+/vitest.config.d.ts.map

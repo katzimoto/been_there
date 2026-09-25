@@ -98,6 +98,7 @@ from `submitted` — the table has no such edge, and that is the point.
 | `non_consensual_intimacy` | urgent | no | yes |
 | `minor_safety` | urgent | no | yes |
 | `hate_or_discrimination` | high | no | yes |
+| `unsafe_contact` | high | no | yes |
 | `sexual_content` | normal | no | yes |
 | `harassment` | normal | no | no |
 | `scam_or_solicitation` | normal | no | no |
@@ -105,6 +106,24 @@ from `submitted` — the table has no such edge, and that is the point.
 | `fake_or_misleading_profile` | low | no | no |
 | `spam` | low | no | no |
 | `other` | normal | **yes** | no |
+
+`ReportReason` is the **only** reason vocabulary: the wire format carries these
+twelve names, the client renders a label beside each, and a report that arrives
+with a name outside this union is not a report. There is no second, user-facing
+code list — the intake menu in
+[`user-safety-controls.md` §5.1](../features/user-safety-controls.md) is an
+ordering and a set of labels over this table, and it offers every reason here.
+That is a decision, not a convenience: a menu that omits a reason does not
+remove it, it forces the member into `other` or into a near-miss reason that
+triages somewhere else, and a report about unsolicited sexual content landing
+in a `normal`-priority queue is worse than no menu at all.
+
+`unsafe_contact` is the one this package gained to close that gap. "Pressured me
+to move off Been There, or used my personal details" is a report about the
+*channel* rather than the content, and folding it into `scam_or_solicitation`
+triaged it at `normal` with no person-safety flag. It is `high` rather than
+`urgent` because nothing in it is a threat, an image of a minor, or
+non-consensual — the three the platform treats as immediately urgent.
 
 ### Reporting survives the relationship
 
@@ -208,6 +227,11 @@ lost:
 - re-merging what the store already holds is a no-op; a report already merged
   into another case is a `conflict`, so one behaviour cannot be counted twice.
 
+The merge publishes `moderation.case_reports_merged` (**restricted**), carrying
+the case id, the reports this call folded in, and the new total. It is not a
+resolution and it does not resolve anything: the case stays open for a decision,
+and only `decide` moves it.
+
 ## 5. Evidence, retention and redaction
 
 `packages/moderation/src/evidence.ts`.
@@ -248,8 +272,13 @@ policy:
 | `denied` | A moderator-level clearance below the evidence's access level |
 
 Every call appends an audit row — `evidence.read` or `evidence.read_denied`,
-with the actor, the clearance used and the level required. A denied read is
-itself the interesting row, and is retained.
+with the actor, the clearance used and the level required — **and** publishes
+`moderation.evidence_read` at `restricted`, carrying `{ evidenceId, kind,
+visibility }` and nothing else. A denied read is published too, and is the more
+interesting of the two. The payload never carries the summary, the digest or the
+artefact reference: the event says that restricted evidence was touched, by
+whom, and with what outcome, which is the fact a clearance-graded consumer needs
+and nothing more.
 
 **Retention.** `EvidenceRecord.retentionExpiresAt` is `null` until the per-market
 retention policy is decided (open question below). The field exists so the answer
@@ -260,11 +289,20 @@ never recomputed.
 
 `packages/moderation/src/decision.ts`.
 
-`applyDecision` is a **thin adapter over the shared `accountMachine`**. It adds
-no enforcement of its own: the kernel's guards decide whether a restriction,
-suspension or ban is legal. Moderation's own preconditions are only those the
-kernel does not hold — a case id, a moderator id, a rationale, and that a
-restriction names capabilities the account actually has.
+`applyDecision` is a **thin adapter over the shared `accountMachine`**. The
+kernel's guards decide whether a restriction, suspension or ban is legal at all.
+Moderation's own preconditions are the ones the kernel does not hold — a case
+id, a moderator id, a rationale — plus one the kernel deliberately does not
+enforce: that a restriction names capabilities the account actually has, and
+**none** in `UNRESTRICTABLE_CAPABILITIES` (`report`, `block`, `delete_account`),
+which lives beside `CAPABILITIES_BY_ACCOUNT_STATE` in
+`packages/core/src/states/account.ts`. A moderator who types `report` into a
+restriction is refused rather than having the name silently dropped, because a
+decision that records fewer removals than the one taken is a decision nobody
+made. A missing `caseId` is a `validation_failed` refusal, not
+`invalid_transition`: the guard failed for want of input, which is a different
+thing from the transition being impossible, and a client can act on the
+difference.
 
 ```ts
 applyDecision({
@@ -298,13 +336,36 @@ emits
 - `moderation.decision_recorded` — **restricted**;
 - `moderation.case_resolved` — **restricted**;
 - `account_state.changed` — **public**, and only when the standing actually
-  changed. Its payload is exactly two fields, `{ accountState, capabilities }`.
+  changed. Its payload is exactly three fields, `{ accountState, capabilities,
+  removedCapabilities }`: the state, what is left, and what the case took away.
+  No case, no decision, no moderator, no reason;
+- `moderation.restriction_applied` — **user**, the affected account and nobody
+  else, carrying `{ caseId, decisionId, accountState, removedCapabilities }`.
+  A reversal publishes `moderation.restriction_lifted` with the same shape, the
+  removed set being what came back.
 
 A product domain therefore learns that an account is `limited` and that it can no
-longer send messages. It cannot learn that this happened because of a report, a
-review, a case or a moderator: those events are `restricted` and are never
-delivered to a `public` clearance. Tested in `test/decision.test.ts` with a
-`public`-clearance subscriber on the bus.
+longer send messages, and it learns **what** was taken without learning **why**.
+It cannot learn that this happened because of a report, a review, a case or a
+moderator: those events are `restricted` and are never delivered to a `public`
+clearance. Tested in `test/decision.test.ts` with a `public`-clearance subscriber
+on the bus.
+
+### Why the case reference is a second event
+
+The restricted user is owed a case reference: an action they cannot name is an
+action they cannot contest, and contestability is one of the eight commitments.
+It is not owed to anyone else. Putting `caseId` on `account_state.changed` would
+publish, to every subscriber on the bus, the fact that an open case exists about
+an identifiable person — which is the first thing a `restricted` clearance
+exists to withhold, and would undo §6's guarantee for a notification.
+
+So there are two events over one decision, split by audience rather than by
+redaction: `public` carries the capability projection every enforcing surface
+needs, and `user` carries the reference the affected person needs. A client
+builds `{ accountState, removedCapabilities, effectiveCapabilities }` from the
+first without a local copy of `CAPABILITIES_BY_ACCOUNT_STATE`, and builds the
+restriction notice from both. Neither event carries the other audience's fields.
 
 ## 7. Audit log
 

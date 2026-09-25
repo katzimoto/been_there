@@ -99,17 +99,41 @@ the published event, not as extra edges in the table.
 ```
 
 - A **pass is a soft hide, not a veto**: it removes the candidate from the
-  passer's discovery, and a later like clears it. Only a block is permanent.
+  passer's discovery for a **30-day window** (`PASS_SUPPRESSION_DAYS`), and a
+  later like by the same person supersedes it immediately — the like names the
+  pass it overrode in `supersededPassId`, and the pass record moves to
+  `superseded`. Only a block is permanent.
+- **A pass is a window, not a tombstone, and the clock is an argument.**
+  `isPassInEffect(pass, at)` is the single definition of "suppresses right now",
+  and `DiscoverySnapshot` carries `now` for exactly that reason: a pass that has
+  expired suppresses nobody, so a decision the user cannot review cannot become
+  a permanent exclusion.
+- **A like after a pass, and a match across a pass, are one rule read twice.**
+  `interactionMachine` lets a passer like; `recordLike` supersedes that pass;
+  `resolveMatch` then finds no pass in effect in either direction and matches.
+  The counterpart's own pass is untouched and still refuses, because one
+  person's like cannot speak for the other party's pass. The three functions are
+  exercised together in `interaction.test.ts`; they were not, which is how they
+  came to disagree.
+- **Nothing is deleted.** A retracted like, a superseded pass, an ended match
+  and a released block are all states on retained records, so a pair that once
+  existed can always be reported — see §3.2.
 - **Idempotence.** A like is a fact about the ordered pair `(from, to)`, not
   about a request. `recordLike` replays the same like id as success with an
   unchanged ledger, and rejects a *different* like id for the same pair as
   `conflict`. A retried request can never inflate a like count or a match.
-- **A match needs two distinct reciprocal likes, no active pass in either
+- **A match needs two distinct reciprocal likes, no pass in effect in either
   direction, and no active block.** Anything else is a refusal with a reason
-  (`match_refused: blocked | passed`), not an error.
-- **Unmatch** is available to either participant. The match record is retained
-  with status `unmatched`, and the conversation is closed but kept
-  (`retainedForEvidence: true`).
+  (`match_refused: blocked | passed`), not an error. A pass that has expired or
+  been superseded does not refuse.
+- **Unmatch** is available to either participant. The match record is retained,
+  the likes between them are **withdrawn rather than deleted**, and the
+  conversation is closed but kept (`retainedForEvidence: true`). The command
+  carries an `idempotencyKey`, and a retry with the same key replays the same
+  outcome rather than failing as an invalid transition.
+- **Standing is per party.** `MatchRecord.standings` holds one entry per
+  participant, in `participants` order, and the two are equal only while both
+  are `active`. See §3.3.
 
 ### 3.1 The mutual-match concurrency rule
 
@@ -122,7 +146,7 @@ not depend on who commits second:
 1. Reject a self-pair, and a triggering like that is not the actor's like of the
    counterpart (`validation_failed`).
 2. An active block in either direction → `match_refused: blocked`.
-3. An active pass in either direction → `match_refused: passed`.
+3. A pass **in effect** in either direction → `match_refused: passed`.
 4. No reciprocal like in the ledger → `awaiting_counterpart`. This is a normal
    outcome, not an error.
 5. Otherwise derive the match: `matchId = deriveMatchId(a, b)`, where
@@ -136,7 +160,35 @@ compare-and-set on the pair key), the race is a no-op instead of an error. The
 domain property is stated here so the storage choice stays an implementation
 detail rather than a correctness requirement.
 
-### 3.2 Unmatch does not destroy the right to report
+### 3.2 Standing is per party, and never removed
+
+`MatchRecord.standings` is a two-entry tuple in `participants` order, and
+`MatchEnd` carries the **cause** (`unmatched` | `ended_by_block`) separately.
+The cause is the same for both parties; the standing is not, and that asymmetry
+is the whole reason it is modelled as two entries:
+
+| Event | `participants[0]` | `participants[1]` |
+|-------|--------------------|--------------------|
+| created, both usable | `active` | `active` |
+| `unmatch` by either party | `closed_by_actor` | `closed_by_actor` |
+| `applyBlockToMatch`, blocker first | `closed_by_actor` | `closed_by_target` |
+| counterpart's identity lapses | `dormant_target_unverified` | `active` |
+| counterpart lost `send_message` | `restricted_by_target` | `active` |
+| counterpart cannot appear in the product | `closed_by_target` | `active` |
+
+`deriveMatchStandings(match, standingOf)` computes the four degraded rows from
+the two current `SubjectStandingProjection`s, and reads **only** a capability or
+a visibility bit — never a reason — so a `restricted_by_target` line can name
+the missing capability without ever naming the case that removed it. It never
+reopens an ended match: a `closed_*` standing outranks a degradation, because
+`dormant_*` and `restricted_*` are degradations that clear themselves and
+`closed_*` are ends.
+
+The blocked party seeing `closed_by_target` rather than `closed_by_actor` is
+deliberate and is the anti-disclosure property: they are told they can no longer
+reach this person, never that the other person closed anything.
+
+### 3.3 Unmatch does not destroy the right to report
 
 The right to report is a property of the *recorded relationship*, not of its
 current state. `evidenceForReport` returns the like ids, pass ids, match id and
@@ -148,7 +200,15 @@ conversation id for any subject with a recorded interaction, in any state:
 | unmatched | yes | both likes, retained match, retained conversation |
 | match ended by a block | yes | retained match, retained conversation |
 | released block, retracted like, or a pass | yes | the block / like / pass record |
+| like retracted before it matched | yes | the like record, in state `withdrawn` |
 | never interacted | no — `not_found` | — |
+
+`ReportEvidence` carries each record with its **state**, not just its handle:
+"they liked me and then withdrew it" and "they matched me and then unmatched"
+are different stories, and a state is the only thing that tells them apart. A
+withdrawal is a state change on a retained row, which is why
+`withdrawLike` cannot leave the pair unreportable — the same reason `unmatch`
+retains.
 
 `like.recorded` and `block.created` are the two most sensitive facts this domain
 holds; they are published at `internal` sensitivity and are never rendered to
@@ -165,7 +225,8 @@ A block is stored in one direction and applied in both:
 	                 ├── B does not see A in discovery
 	                 ├── B cannot send A a message (contactPermission: blocked)
 	                 ├── no match can be created from their likes
-	                 └── an open match is ended (status: ended_by_block)
+	                 └── an open match ends: both parties' likes are withdrawn and
+	                     the two standings are written (blocker: closed_by_actor)
 ```
 
 **Precedence is data, not prose.** The same order is encoded in three places, so
@@ -173,7 +234,7 @@ a block cannot lose:
 
 | Layer | Where |
 |-------|-------|
-| Discovery | `blocked` precedes every other candidate rule in `ELIGIBILITY_RULES` |
+| Discovery | `blocked` is R4, ahead of every relational and preference rule, and behind only the identity, profile and account-standing rules |
 | Messaging | `contactPermission` checks the block before it looks at match state |
 | Matching | `resolveMatch` refuses on a block before reciprocity |
 
@@ -201,16 +262,16 @@ relationship layer (block, self, prior decisions), then preference filters last
 | 4 | `candidate_identity_not_verified` | The candidate's identity state is not `verified` — **unconditional, and the first candidate-side rule** |
 | 5 | `candidate_profile_not_complete` | The candidate's profile state is not `complete` (covers `paused`, `hidden`, `deleted`) |
 | 6 | `candidate_account_not_visible` | The candidate is not product-visible, or their standing does not grant `browse_discovery` |
-| 7 | `blocked` | An active block exists in **either** direction |
-| 8 | `self_view` | Viewer and candidate are the same user |
-| 9 | `already_passed` | The viewer passed on the candidate |
-| 10 | `already_liked` | The viewer liked the candidate and the decision is still pending |
-| 11 | `already_matched` | A match is `active` |
-| 12 | `age_out_of_range` | The viewer expressed an age range and the candidate's age is outside it |
-| 13 | `gender_out_of_scope` | The viewer expressed an interest list that does not cover the candidate |
-| 14 | `beyond_distance_limit` | The candidate's coarse band cannot be within the viewer's limit |
-| 15 | `not_mutually_compatible` | The mutual compatibility test fails (rules 12–14 plus the candidate's own wishes) |
-
+| 7 | `candidate_cannot_reciprocate` | The candidate's standing does not grant `like`. A separate rule from visibility, because the two are separate facts: a card the candidate may not act on is a page slot spent for nothing. R3 of the feature spec covers both, and R3 precedes the block rule |
+| 8 | `blocked` | An active block exists in **either** direction |
+| 9 | `self_view` | Viewer and candidate are the same user |
+| 10 | `already_passed` | The viewer has a pass on the candidate **still in effect** — inside its 30-day window and not superseded by a like |
+| 11 | `already_liked` | The viewer has a like on the candidate that still stands: `live` or `matched`. A `withdrawn` like is history and suppresses nothing |
+| 12 | `already_matched` | A match is live (`ended === null`) |
+| 13 | `age_out_of_range` | The viewer expressed an age range and the candidate's age is outside it |
+| 14 | `gender_out_of_scope` | The viewer's `seekingGenders` does not cover the candidate. Gender precedes distance, in this document and in the feature spec |
+| 15 | `beyond_distance_limit` | The candidate's coarse band cannot be within the viewer's limit |
+| 16 | `not_mutually_compatible` | The mutual compatibility test fails (rules 13–15 plus the candidate's own `openTo`) |
 Reason codes are `internal`. They are diagnostic and are never rendered: a user
 is told "no new people right now", never which rule fired, because the reason set
 would otherwise become a side channel for inferring another person's identity
@@ -268,9 +329,34 @@ owns the rule that turns separation into a band.
 
 ## 7. Preferences and mutual compatibility
 
-`DatingPreferences` has three nullable dimensions: `ageRange`, `maxDistanceKm`,
-`interestedIn`. `null` means **not expressed**, never "no one" — a half-configured
-filter would silently exclude the entire population and strand the cold start.
+`DatingPreferences` has five nullable axes — `ageRange`, `maxDistanceKm`,
+`seekingGenders`, `openTo`, `locationPrecision` — and `null` means **not
+expressed**, never "no one" — a half-configured filter would silently exclude the
+entire population and strand the cold start.
+
+**The two gender axes are different questions and are not interchangeable.**
+`seekingGenders` is one-sided: it filters the viewer's own page and is rule 14
+above. `openTo` is pair-wise: it is half of the mutual test and the only gender
+dimension that can end a match. A viewer who seeks only men but is open to being
+matched with anyone can now say so; with one conflated field the openness was
+silently narrowed to the page filter, and the two settings in the empty state
+("Include any gender" and "Include all orientations") were inexpressible.
+`OrientationGroup` is the label model over `GenderIdentity`, named separately
+because it is read in a different role; modelling attraction as anything else is
+open (§11).
+
+`locationPrecision` names the **coarsest** bucket the viewer permits their own
+location to be shown at, and may only be coarser than
+`PLATFORM_DEFAULT_LOCATION_PRECISION` (`5_25_km`) — a request to refine is
+`validation_failed`. The finest band exists for computing *separation*;
+publishing someone's own location at that resolution is the triangulation risk
+the banding exists to prevent.
+
+**Pause being discoverable is the profile's `paused` state, not a preference
+axis.** `profileMachine.pause` is the owner's reversible switch and eligibility
+rule 5 denies a `paused` profile. A `hidden` boolean on the preference record
+would be a second switch for one concept, and `hidden` in the profile machine
+means something else: system-driven, carrying a reason, and not owner-callable.
 
 `areMutuallyCompatible(viewer, candidate, distance)` is pure and **symmetric**:
 the verdict for (A, B) is identical to the verdict for (B, A), including which
@@ -282,7 +368,7 @@ fails it:
 |-----------|---------------|
 | `age` | Both expressed a range, and either party's age falls outside the other's range |
 | `distance` | Both expressed a limit, and the coarse band fails either limit |
-| `gender` | Both expressed a list, and either list fails to cover the other's gender identities |
+| `gender` | Both expressed an `openTo` list, and either list fails to cover the other's gender identities. `seekingGenders` is never read here |
 
 An unknown age or an unresolvable distance never excludes: a missing field is
 not evidence of ineligibility. The viewer's *own* preferences are applied
@@ -290,8 +376,19 @@ separately, as rules 12–14, because a viewer filtering their own page is not u
 for negotiation with the mutual rule.
 
 Validation (`validatePreferences`) rejects what could never be satisfied: an
-inverted or out-of-bounds age range, a fractional bound, a distance outside
-1–500 km, an empty interest list, an unknown gender identity, a duplicate.
+inverted or out-of-bounds age range, a fractional bound, an age window narrower
+than `PREFERENCE_LIMITS.minAgeRangeWidth` (5 years), a distance limit that is not
+one of `DISTANCE_LIMIT_KM`, an empty or duplicated gender list on either axis, an
+unknown gender identity, and a location precision finer than the platform
+default.
+
+`DISTANCE_LIMIT_KM` is **derived** from `DISTANCE_BAND_BOUNDS` — `[5, 25, 50,
+100]`, the bands' own upper edges — rather than restated beside them. A limit
+that is not a band edge cannot be compared against a band, so accepting one
+would store a number no query can honour. This is also the third distance
+vocabulary the review counted: dating's bands and platform's coarser
+presentation bucket are now the only two, and this document is the one that
+names both.
 
 ## 8. Interaction with identity and account restrictions
 
@@ -347,6 +444,7 @@ Published by this domain (`DATING_EVENT_CATALOGUE`, all version 1):
 | Event | Sensitivity | Meaning |
 |-------|-------------|---------|
 | `profile.completed` | `public` | A profile reached `complete` and may be discovered |
+| `profile.state_changed` | `public` | A profile entered or left any state (`draft`, `incomplete`, `complete`, `paused`, `hidden`, `deleted`). `profile.completed` remains the one transition worth alerting on; this is the invalidation signal a consumer needs for the rest |
 | `profile.deleted` | `user` | Content removed; history and evidence retained |
 | `preferences.updated` | `user` | Full preference values changed; owner only |
 | `like.recorded` | `internal` | A directed like exists; rendered to the recipient only |

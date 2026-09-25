@@ -330,6 +330,16 @@ Pipeline, in order, per photo:
    (OCR), face count, brand/logo detection. Produces `approved`,
    `rejected` (with a `reason_code`) or `needs_human` (borderline → routed to a
    moderator queue, photo held out of the live set until a human answers).
+   The state machine is `mediaMachine` in `packages/platform`, and the rule is
+   that **`needs_human` is reachable only from an `inconclusive` verdict** — a
+   scanner that could not decide, as distinct from one that decided against the
+   photo. A definite verdict may act on a definite rule; "this might break a
+   rule" has no such warrant. Leaving `needs_human` in either direction requires
+   a named reviewer, on the same rule as requeueing a rejection: a decision about
+   a person is made by a person. Which verdicts count as inconclusive is an open
+   question in §12 — today only an explicit `inconclusive` verdict reaches the
+   state, and promoting, say, `sexual_content` into a human queue is a
+   queue-cost decision with user-facing consequences, not a mechanical one.
 4. **Likeness check** — the photo's face is compared with the face in the user's
    verified selfie, by Identity. A low likeness result does not reject the photo
    silently: the profile moves to `incomplete` and the user is told
@@ -342,8 +352,12 @@ Pipeline, in order, per photo:
    requested position. A photo's own state is always visible to its owner
    ("approved", "being checked", "not approved — reason").
 
-Per-photo state: `uploading` → `screening` → `approved | rejected | needs_human`.
-The set is valid for discovery only while **index 0 is `approved`**.
+Per-photo state, which is the media machine's states under this document's
+vocabulary: `initiated` (`uploading`) → `scanning` (`screening`) → `approved |
+rejected | needs_human`, with `rejected → initiated` on a reviewer's requeue. The
+set is valid for discovery only while **index 0 is `approved`**; a `needs_human`
+photo at index 0 is held out exactly as a rejected one would be, and says
+something different to its owner (§6.4).
 
 ### 6.4 A photo is rejected while the profile is already live
 
@@ -354,7 +368,7 @@ This is the common case and it must not be a cliff.
 | A non-primary photo is rejected | It is removed from the live set immediately. Order closes up. The profile stays `live` if the rest of the completeness rules still hold. | A toast: "One photo wasn't approved and was removed." with the reason and a Replace action. |
 | The primary photo is rejected and others are approved | The next approved photo is promoted to index 0 automatically; the profile stays `live`; `profile.photo_set_updated` is published with the new count. | "We changed your main photo — here's why the old one wasn't approved." |
 | The primary photo is rejected and **no** approved photo remains | The profile moves `live` → `incomplete`, leaves discovery, and stays in existing matches with a placeholder card. The user is asked for one more photo. | "You're not appearing in discovery until you add a photo we can approve. Your matches are still there." |
-| A photo goes to `needs_human` | It is held out of the live set as if rejected, and the user is told it is "being checked" — not that it failed. | "One photo is being checked. It'll appear if it's approved." |
+| A photo goes to `needs_human` | It is held out of the live set as if rejected, and the user is told it is "being checked" — not that it failed. `profile.photo_rejected` is **not** counted: a hold is a queue, not a refusal, and sharing the counter would make a screening regression and a moderator backlog look like one number. | "One photo is being checked. It'll appear if it's approved." |
 | A photo is removed by a moderator from an open case | The photo is withdrawn everywhere, including in existing matches and conversations already delivered. This is the one case of retroactive removal (see §9.1). | The photo disappears; the user is told it was removed without the case detail. |
 
 Removal never cascades to a punishment: a rejected photo does not hide the
@@ -411,6 +425,28 @@ Each rule is a boolean. The threshold is: **all rules true**.
 | R6 | 3–8 distinct interests | fewer than 3, more than 8, duplicates, or a value outside the catalogue |
 | R7 | exactly 2 prompt answers, each ≤ 140 characters | 0, 1, or 3+ answers, or an over-length answer |
 | R8 | age gate passed | the owner's `dateOfBirth` is absent or computes under 18 ([#9](./account-and-onboarding.md)) |
+
+**This table is the decision; `PROFILE_REQUIREMENTS` in `packages/dating` is the
+implementation, and the two currently disagree.** Recorded rather than quietly
+reconciled, because the disagreement is in both directions and each side has a
+reason:
+
+| Rule | This table | `PROFILE_REQUIREMENTS` today | Which way the code errs |
+|------|-----------|------------------------------|---------------------------|
+| R1 `displayName` | ≤ 40 graphemes | `maxDisplayNameChars: 50` | Looser by 10. A 45-character name is a name nobody can read on a card, and the uniqueness and reserved-term screens already do the real work of the rule. |
+| R3 `bio` | ≥ 30 characters | `minBioChars: 20` | Looser by 10. §5.1's argument for a floor is that a 12-character bio is an empty box with a cursor in it; 20 is the same box. |
+| R5 photos | **1–6**, index 0 `approved` | `minPhotos: 3` | **Stricter by 3×, and this is the one that matters.** The code rejects every one- and two-photo profile this document says is valid, and §6.1's own argument is that *one* photo is enough to enter discovery. A user who uploads one good photo and is told the app wants three is a user who does not upload three. |
+| R6 `interests` | 3–8 | not represented | Missing, not loosened. `ProfileContent` has no `interests` field at all, so the rule cannot fail and does not exist. |
+| R7 `promptAnswers` | exactly 2 | `minAnsweredPrompts: 1` | Looser, and in the wrong direction: §5.3's reason for "exactly 2" is determinism — a fuzzy "at least one" is a rule with no testable boundary. |
+| R4 `datingIntent`, and the required `pronouns` and `intentDetail` | required | not represented | Missing. `ProfileContent` has no such fields. |
+
+The photo count and the four absent fields are the substantive half, and both are
+changes to `packages/dating`, which this document does not own and which its
+author does not edit. What is settled here and needs no code change: **one
+approved photo is enough to enter discovery**, and the completeness gate must
+either evaluate `interests`, `datingIntent`, `pronouns` and `intentDetail` or stop
+listing them — a rule that is written down and not evaluated is a rule the product
+believes it has.
 
 Two things are **not** in the rule set, deliberately: identity verification and
 account standing. They gate *discovery*, not *profile completeness*, and they are
@@ -673,6 +709,13 @@ about a safety judgement.
 - **Whether `paused` should suppress new likes while keeping matches.** Current
   decision is that it does not; a user who pauses may still receive likes, which
   some will find surprising. Needs a product decision, not a technical one.
+- **Which screening verdicts escalate to a human.** Only an explicit
+  `inconclusive` verdict reaches `needs_human` today. The interesting case is
+  `sexual_content`: a machine verdict of sexual content on a stranger's face is
+  frequently wrong, and auto-rejecting a person's only photo on one is a decision
+  with no case and no appeal behind it. Promoting it — or any other verdict —
+  into the human queue trades moderator capacity for fewer wrong rejections, and
+  the exchange rate is a staffing decision rather than an engineering one.
 - **Per-photo moderation appeal.** A rejected photo can be re-uploaded, but a
   formal appeal path for content screening does not exist in v0.1. Whether one
   lands with the appeals work in [#15](https://github.com/katzimoto/been_there/issues/15) is undecided.

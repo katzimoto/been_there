@@ -106,20 +106,88 @@ describe('the catalogue is the whole of what a notification may say', () => {
     // "A counterparty name may appear only after a match exists." A like has no
     // match behind it and an end-of-match notice must not say who ended it, so
     // exactly three kinds may bind a name — and every one of them is pair-scoped.
-    const naming = EVERY_KIND.filter((kind) => NOTIFICATION_KINDS[kind].content.includes('counterparty_first_name'));
+    const naming = EVERY_KIND.filter((kind) => {
+      const spec: NotificationKindSpec = NOTIFICATION_KINDS[kind];
+      return spec.channels.email.content.includes('counterparty_first_name');
+    });
 
     expect(naming).toEqual(['match.created', 'message.received', 'message.digest']);
     for (const kind of naming) {
       expect(NOTIFICATION_KINDS[kind].pairScoped, kind).toBe(true);
     }
+    // A like is about a person and still may not name them.
+    expect(NOTIFICATION_KINDS['like.received'].channels.in_app.content).toEqual([]);
   });
 
   it('keeps message text out of every body by having no word for it', () => {
-    const tokens = new Set(EVERY_KIND.flatMap((kind) => [...NOTIFICATION_KINDS[kind].content]));
+    const tokens = new Set(
+      EVERY_KIND.flatMap((kind) =>
+        EVERY_CHANNEL.flatMap((channel) => [...NOTIFICATION_KINDS[kind].channels[channel].content]),
+      ),
+    );
 
     expect(tokens).toContain('counterparty_first_name');
     expect([...tokens].some((token) => /text|body|excerpt|message/i.test(token))).toBe(false);
-    expect([...NOTIFICATION_KINDS['message.received'].content]).toEqual(['counterparty_first_name']);
+  });
+
+  it('lets a channel say less than the in-app record and never more', () => {
+    // "Shortening for a locked screen may remove detail, never add it." Where a
+    // kind has an in-app record at all, that record is the reference and every
+    // other channel is a subset of it — a diff, not a review. Four kinds have no
+    // in-app surface by design (a ban, a recovery receipt, a deletion receipt, a
+    // message digest), and for those there is nothing to be a subset of.
+    // The exceptions are named, not tolerated: a conditional invariant read as a
+    // universal one is how the next person reintroduces the bug. Four kinds have
+    // no in-app record, for two stated reasons — the durable record already
+    // exists under another kind (`message.digest`), or the user cannot reach the
+    // app at all (a ban, a recovery receipt, a deletion receipt).
+    const withoutInApp = EVERY_KIND.filter(
+      (kind) => NOTIFICATION_KINDS[kind].channels.in_app.mode === 'off',
+    );
+    expect(withoutInApp).toEqual([
+      'message.digest',
+      'account.banned',
+      'account.recovery',
+      'account.deletion_completed',
+    ]);
+
+    for (const kind of EVERY_KIND) {
+      const spec: NotificationKindSpec = NOTIFICATION_KINDS[kind];
+      if (spec.channels.in_app.mode === 'off') {
+        continue;
+      }
+      for (const channel of EVERY_CHANNEL) {
+        for (const token of spec.channels[channel].content) {
+          expect(
+            spec.channels.in_app.content,
+            `${kind}/${channel} adds ${token} to the in-app record`,
+          ).toContain(token);
+        }
+      }
+    }
+  });
+
+  it('keeps the case reference off a lock screen and in the email the user quotes', () => {
+    const enforcementKinds = [
+      'account.restriction.applied',
+      'account.suspended',
+      'account.banned',
+      'moderation.warning_issued',
+      'appeal.resolved',
+    ] as const;
+
+    for (const kind of enforcementKinds) {
+      const spec: NotificationKindSpec = NOTIFICATION_KINDS[kind];
+      // The case reference is how a user contests, and §2.1 is explicit that the
+      // notice carries it. It is the push that omits it: a push is rendered on a
+      // device that may not be the user's own, which is the same reason no
+      // notification carries a distance band.
+      expect(spec.channels.email.content, kind).toContain('case_reference');
+      expect(spec.channels.push.content, kind).not.toContain('case_reference');
+      if (spec.channels.in_app.mode !== 'off') {
+        expect(spec.channels.in_app.content, kind).toContain('case_reference');
+      }
+    }
   });
 });
 
@@ -168,6 +236,7 @@ describe('a critical notice cannot be switched off', () => {
     const verificationKinds = [
       'verification.passed',
       'verification.failed',
+      'verification.rate_limited',
       'verification.review_required',
       'verification.expired',
     ] as const;

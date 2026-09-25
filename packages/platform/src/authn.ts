@@ -106,20 +106,6 @@ export function issueSession(request: IssueSessionRequest): Result<Session, Doma
 }
 
 /**
- * Records that the session did something. The only field that moves is
- * `lastActiveAt`: the refresh window is absolute, and a session that may
- * resurrect itself after a fortnight of silence is not subject to an idle
- * timeout at all.
- */
-export function recordSessionActivity(session: Session, now: Date): Result<Session, DomainError> {
-  const live = validateSession(session, now);
-  if (!live.ok) {
-    return live;
-  }
-  return ok({ ...session, lastActiveAt: now });
-}
-
-/**
  * Applies the concurrent-session cap. The eleventh live session evicts the
  * least recently active one rather than refusing the newcomer, so a user who
  * signs in on a new device is not locked out of the old ones they still want —
@@ -166,12 +152,6 @@ export function validateSession(session: Session, now: Date): Result<Session, Do
   }
   if (now.getTime() >= session.expiresAt.getTime()) {
     return domainError('permission_denied', 'platform', 'session expired', { reason: 'expired' });
-  }
-  if (now.getTime() - session.lastActiveAt.getTime() >= SESSION_IDLE_TIMEOUT_SECONDS * 1000) {
-    // Idle is not a kind of expiry: the window is still open, and the session
-    // can only come back through a fresh credential. Support needs to be able to
-    // tell the two apart, because one is routine and the other is a signal.
-    return domainError('permission_denied', 'platform', 'session went idle', { reason: 'idle' });
   }
   return ok(session);
 }
@@ -232,6 +212,14 @@ function validateSessionRefreshable(session: Session, now: Date): Result<true, D
     return domainError('permission_denied', 'platform', 'refresh window closed', {
       reason: 'refresh_window_closed',
     });
+  }
+  if (now.getTime() - session.lastActiveAt.getTime() >= SESSION_IDLE_TIMEOUT_SECONDS * 1000) {
+    // The idle clock, which is what makes an absolute window survivable. It is
+    // checked here and not in `validateSession` because a fortnight is also
+    // fifty-eight thousand access tokens: by then the token is long expired, so
+    // "idle" would be a reason no caller could ever observe. The two refusals
+    // stay distinct because one is routine and the other is a signal.
+    return domainError('permission_denied', 'platform', 'session went idle', { reason: 'idle' });
   }
   return ok(true);
 }

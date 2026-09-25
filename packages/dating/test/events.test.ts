@@ -69,6 +69,16 @@ describe('event catalogue', () => {
     }
   });
 
+  it('publishes a profile state change at public, and a deletion at user', () => {
+    // The eligibility gate depends on a profile's state, so a consumer
+    // invalidating cached eligibility needs every transition announced, not just
+    // the one that makes somebody discoverable. A deletion is different: it is
+    // content removal, not a discoverability fact.
+    expect(DATING_EVENT_CATALOGUE['profile.state_changed'].sensitivity).toBe('public');
+    expect(DATING_EVENT_CATALOGUE['profile.completed'].sensitivity).toBe('public');
+    expect(DATING_EVENT_CATALOGUE['profile.deleted'].sensitivity).toBe('user');
+  });
+
   it('keeps another person’s private intent off the public clearance', async () => {
     const seen: string[] = [];
     const bus = new InMemoryEventBus();

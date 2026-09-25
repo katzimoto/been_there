@@ -8,7 +8,8 @@ import {
 } from '@been-there/core';
 import type { BlockRecord } from '../src/blocks.js';
 import { type BlockId, type IdempotencyKey, type LikeId, type PassId, castDatingId } from '../src/ids.js';
-import type { LikeLedger, LikeRecord, MatchRecord } from '../src/interaction.js';
+import type { LikeLedger, LikeRecord } from '../src/likes.js';
+import type { MatchRecord } from '../src/interaction.js';
 import type { DistanceBand } from '../src/location.js';
 import type { PassRecord, PassState } from '../src/passes.js';
 import { type DatingPreferences, UNSET_PREFERENCES } from '../src/preferences.js';

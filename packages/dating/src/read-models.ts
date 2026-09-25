@@ -1,6 +1,7 @@
 import type { AccountState, IdentityState, PhotoId, UserId } from '@been-there/core';
 import type { BlockRecord } from './blocks.js';
-import type { LikeRecord, MatchRecord, MatchStanding } from './interaction.js';
+import type { LikeRecord } from './likes.js';
+import type { MatchRecord, MatchStanding } from './interaction.js';
 import type { DistanceBand } from './location.js';
 import type { PassRecord } from './passes.js';
 import type { DatingPreferences } from './preferences.js';

@@ -18,7 +18,7 @@ have, and with the ability to report surviving every way a relationship ends.
 
 | Owned | Notes |
 |-------|-------|
-| The like record and its lifecycle (live / superseded / withdrawn) | Idempotent per ordered pair |
+| The like record and its lifecycle (live / withdrawn / matched) | Idempotent per ordered pair; never deleted |
 | The pass record and the 30-day suppression window it creates | The window itself is specified in #11 §5.2 |
 | Match creation, the match's standing, and the one-per-episode invariant | |
 | The match list: membership, ordering, unread state; unmatch and its consequence chain; like/match funnel events for #18 | |
@@ -53,7 +53,7 @@ have, and with the ability to report surviving every way a relationship ends.
 > differ once `packages/dating` lands.
 
 ```ts
-type LikeState = 'live' | 'superseded' | 'withdrawn' | 'matched';
+type LikeState = 'live' | 'withdrawn' | 'matched';
 
 interface Like {
 	readonly likeId: LikeId;
@@ -78,10 +78,26 @@ A like is accepted only if, at the moment the command is applied:
 - No block edge exists in **either** direction (#11 rule R4).
 - Target is not the actor (R5), and no *active* match already exists between
   them (R8). Liking someone you are already matched with is a no-op, not an
-  error; an ended match is not a match and does not block a fresh one.
+  error — the transition is a self-transition to `matched` and the ledger returns
+  the like already on record, so a double tap is not a `conflict`. An ended match
+  is not a match and does not block a fresh one: unmatch withdraws the likes
+  rather than deleting them, so the pair is free to be decided on again.
 
-Every one of these is re-evaluated at action time against current projections.
-A card served five minutes ago is not a licence to act on.
+Every one of these is re-evaluated at action time against current projections,
+and this domain has no other place to enforce them: `recordLike` takes both
+`ActionStanding`s, the block edges and the clock, so "you cannot like after your
+verification lapsed" is a guard rather than a comment. A card served five minutes
+ago is not a licence to act on. A card the user was never served is not a
+licence either: `InteractionContext` carries no standing, and none is needed,
+because the precondition gate is the write path, not the transition table.
+
+Failures are split by side, and the split is a privacy property. A failure about
+the **actor** is reported honestly (`permission_denied`, with the state that
+caused it) because the actor is being told about their own situation. A failure
+about the **target** is one indistinguishable `not_eligible` with no details — a
+block, a lapsed verification, a hidden profile and a removed capability all
+produce the same error, because a liker who can tell a block from an absence by
+probing with likes has learned something they must not learn.
 
 ### 3.3 Idempotence
 
@@ -96,7 +112,8 @@ A card served five minutes ago is not a licence to act on.
   requests race (§4).
 - The client sends an idempotency key with the command; the server dedups on
   the pair key, and the request key collapses transport retries so a flaky
-  network never produces a visible double-tap. A double-tap on the like button
+  network never produces a visible double-tap. The unmatch command carries the
+  same key (§9), because a double tap is not specific to the like button. A double-tap on the like button
   is the expected case, not an edge case, and is handled as a server retry.
 
 ### 3.4 The target unliked (or passed) in the meantime
@@ -109,10 +126,20 @@ dismissal; a like is an affirmative.
 - If the target had already liked the actor, **a match is created now** (§4). A
   mutual one tap short is not lost because of ordering, and this is the only
   case where a *second* like rather than the second party's like creates one.
+- The counterpart's own pass is untouched and still refuses. One person's like
+  cannot speak for the other party's pass, so "a like after a pass matches" is
+  true of the *passer's* pass and false of the counterpart's. This is the
+  asymmetry A5 depends on, and it is why the machine, `recordLike` and
+  `resolveMatch` have to agree on one definition of a pass in effect
+  (`isPassInEffect`) rather than each having a say.
 
 The reverse order is unremarkable: a like followed by a pass by the same user
-withdraws the like and re-applies suppression. Withdrawal exists because the
-state machine must be total, not because the UI offers a like-then-pass button.
+withdraws the like and re-applies suppression. `pass` is therefore legal from
+`liked`, so the machine can express the sequence rather than rejecting it as
+impossible, and `recordPass` moves the like to `withdrawn` so the ledger and the
+transition table cannot disagree about which decision stands. Withdrawal exists
+because the state machine must be total, not because the UI offers a
+like-then-pass button.
 
 ### 3.5 The target blocked in the meantime
 
@@ -280,7 +307,8 @@ its two parties and to no one else.
 | Either party's account is `limited` with `send_message` removed | `restricted_by_target` | Stays in the list with "Messaging is unavailable right now." The removed capability is named, because a restriction is always explainable (overview §5) | Blocked by `canPerform`, and the block is the capability set, not a special case in the messaging path |
 | Either party's account is `suspended` | `closed_by_target` | Stays in the list, not messageable, with a standing line and a report affordance | Not available (`suspended` has no `send_message`) |
 | Either party's account is `banned` | `closed_by_target` | Stays in the list, not messageable. The other party is told the person is no longer available, and is not told the standing, the reason, or that an enforcement action occurred | Not available |
-| Either party unmatches | `closed_by_actor` | Removed from the active list, retained in match history for the retention window (§8.3) | Closed by Communication |
+| Either party unmatches | `closed_by_actor` for **both** parties | Removed from the active list, retained in match history for the retention window (§8.3) | Closed by Communication |
+| Either party blocks the other | `closed_by_actor` for the blocker, `closed_by_target` for the blocked party | The blocked party is told only that they can no longer reach this person | Closed |
 | Either party deletes their account | `closed_by_actor` | Same as unmatch, from the surviving party's point of view | Closed |
 
 Standing is not the same thing as the end of a match, and the two are kept apart
@@ -391,6 +419,12 @@ is in [`./preferences-and-discovery.md`](./preferences-and-discovery.md) §8.
 | `match.created` | `internal` | Exactly once per match episode (M1): two reciprocal likes produced exactly one match for the pair | `matchId`, `participants: [a, b]`, `likeIds: [a, b]`, `conversationId` |
 | `match.ended` | `internal` | A match left the `active` status. The cause is the new status itself, not a separate narrative | `matchId`, `reason: 'unmatched'\|'ended_by_block'`, `actorId: UserId\|'system'`, `endedAt`, `conversationRetained: true` |
 | `unmatch.performed` | `internal` | An **actor-initiated** unmatch command is accepted. Emitted only when a person did it, so an end a block or a deletion caused stays distinguishable from one a person chose | `matchId`, `actorId`, `idempotencyKey` |
+
+The idempotency key travels on the event because it travels on the command:
+`MatchEnd.idempotencyKey` is what makes a retried unmatch replay its own outcome
+instead of failing as an invalid transition, and a declared field that nothing
+reads is a promise the bus will not keep. This is the same discipline as the
+like's pair-key dedup in §3.3, one layer up.
 
 The envelope sensitivity of every Dating Core event is `internal`, because each
 one carries a decision that a user would consider private. The *fields* inside

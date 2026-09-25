@@ -54,7 +54,7 @@ Concretely, when this issue is done:
 | `IdentityState` | Identity & Verification | `identity_status.changed` → `IdentityStandingProjection` |
 | `AccountState` + removed capabilities | Moderation & Enforcement | `account_state.changed` → `AccountStandingProjection` |
 | Block edges (both directions) | User Safety Controls | block events → `BlockListProjection` |
-| Profile content and publish state | Profile (#10) | `profile.published` / `profile.state_changed` (`draft\|incomplete\|live\|paused\|hidden`) consumed as a projection; the boolean completeness gate is Dating Core's own `profile.completed` |
+| Profile content and publish state | Profile (#10) | `profile.completed` / `profile.state_changed` / `profile.deleted` (`draft\|incomplete\|complete\|paused\|hidden\|deleted`) consumed as a projection. The state set is Dating Core's own `ProfileState`: there is no `live` state, and `profile.deleted` is `user` sensitivity because a deletion is not a fact about discoverability |
 | `InteractionLedger` (likes/passes/matches) | Dating Core | `InteractionLedgerProjection` |
 | Preferences | Dating Core, this feature | local record |
 | Coarse location bucket | Platform (#8) | Platform read-model; the raw coordinate is `sensitive` and is never requested |
@@ -68,14 +68,13 @@ Concretely, when this issue is done:
 
 ```ts
 /** Every axis is three-valued. `null` means unbounded, never "match nobody". */
-interface DiscoveryPreferences {
-	readonly ageRange: { readonly minAge: number | null; readonly maxAge: number | null } | null;
-	readonly maxDistanceKm: number | null;
-	readonly seekingGenders: readonly Gender[] | null;      // null = any
-	readonly openTo: readonly OrientationGroup[] | null;    // null = unexpressed
-	readonly locationPrecision: CoarseBucket;               // coarsening only
-	readonly hidden: boolean;                               // pause discovery
-	readonly verifiedOnly: true;                            // not user-configurable
+interface DatingPreferences {
+	readonly ageRange: { readonly min: number; readonly max: number } | null;
+	readonly maxDistanceKm: number | null;                       // one of DISTANCE_LIMIT_KM
+	readonly seekingGenders: readonly GenderIdentity[] | null;   // one-sided page filter
+	readonly openTo: readonly OrientationGroup[] | null;         // pair-wise match test
+	readonly locationPrecision: DistanceBand | null;             // coarsening only
+	// Pause being discoverable is NOT here: it is the profile's `paused` state.
 }
 ```
 
@@ -84,12 +83,13 @@ interface DiscoveryPreferences {
 | Preference | Meaning | Validation | Default | Unset behaviour |
 |-----------|---------|-----------|---------|------------------|
 | `ageRange` | Inclusive age window | Both ends integers 18–120 (the 18+ gate is the floor, at every end). `minAge <= maxAge`. Width at least 5 years. | `null` | Unbounded: every eligible age in 18–120. The platform never narrows on the user's behalf |
-| `maxDistanceKm` | Maximum coarse-distance bucket | One of the published bucket edges: 1, 5, 15, 50, 100 km. Not a free number. | `null` | Unbounded |
+| `maxDistanceKm` | Maximum coarse-distance bucket | One of `DISTANCE_LIMIT_KM`, **derived** from the bands rather than restated beside them: 5, 25, 50, 100 km. Not a free number — a limit that is not a band edge cannot be compared against a band | `null` | Unbounded |
 | `seekingGenders` | Genders the viewer wants to see | Non-empty subset of the enum. Saving a set that currently matches nobody is allowed, but the user is warned before saving and is never auto-reset | `null` (any) | Any gender, including the viewer's own |
-| `openTo` | Gender/orientation groups the viewer is open to being matched with | Non-empty subset of the enum. Always at least the viewer's own declared group | `null` → resolves to the viewer's own declared group(s) plus the set the user explicitly adds on their profile | See §3.4 |
-| `locationPrecision` | How coarse the viewer's own location is presented | Bucket ids only. May only be *coarser* than the platform default; a request to refine is rejected with `validation_failed` | Platform default bucket | Not unset by construction |
+| `openTo` | Gender/orientation groups the viewer is open to being matched with | Non-empty subset of the enum; no unknown value, no duplicate. **Independent of `seekingGenders`**: a viewer may seek only men and still be open to being matched with anyone, which one conflated field made inexpressible | `null` = unexpressed, and an unexpressed side imposes no requirement on anyone | See §3.4 |
+| — pause being discoverable | Not a preference axis. It is `profileMachine.pause`, an owner-initiated reversible profile state, and rule R2 denies a `paused` profile. A `hidden` boolean on the record would be a second switch for one concept, and `hidden` in the profile machine means something else: system-driven, reason-carrying, not owner-callable | `false` (a `complete` profile) | — |
+| `locationPrecision` | The **coarsest** bucket the viewer's own location may be presented at | Bucket ids only. May only be *coarser* than `PLATFORM_DEFAULT_LOCATION_PRECISION` (`5_25_km`); a request to refine — or the pseudo-bucket `unknown` — is rejected with `validation_failed` | `null` = the platform default | `null` |
 | `hidden` | Pause being discoverable | Boolean | `false` | `false` |
-| `verifiedOnly` | Show only verified users | Fixed `true`. Not present as a user-facing toggle; changing it is not a supported operation | `true` | Never unset |
+| `verifiedOnly` | Show only verified users | Fixed `true`, and not a field at all: it is `DISCOVERABLE_IDENTITY_STATE` in R1, a domain constant rather than a stored preference. Not present as a user-facing toggle; changing it is not a supported operation | — | Never unset |
 
 ### 3.3 The unset rule
 
@@ -158,14 +158,14 @@ an empty page.
 |---|------|-----------|------------------|
 | R1 | **Identity** | The candidate's identity is not `verified` | Unconditional and first. This is commitment 1: the only discoverable identity state is `verified`. No preference, no rank, no experimental flag can precede it, and no other rule may be evaluated on behalf of a candidate that failed R1 |
 | R2 | **Profile presentable** | The candidate's profile is not complete and `live` | After identity, because a profile is only a thing that can be shown once there is a verified person behind it. Consumes a *boolean* — never a completeness score, never a rank |
-| R3 | **Account standing** | The candidate's account is not visible in product (`banned`, or `suspended`), or lacks `browse_discovery` (may appear) or `like` (may reciprocate) | Before everything relational, because a candidate who cannot appear or cannot reciprocate is not a useful page slot. Risk state is **not** consulted: `high`/`critical` risk does not remove a candidate from discovery |
+| R3 | **Account standing** | The candidate's account is not visible in product (`banned`, or `suspended`), or lacks `browse_discovery` (may appear) or `like` (may reciprocate) | Before everything relational, because a candidate who cannot appear or cannot reciprocate is not a useful page slot. Implemented as **two** rules with two reason codes — `candidate_account_not_visible` and `candidate_cannot_reciprocate` — because they are two separate facts and one code would hide which of them denied a candidate. Risk state is **not** consulted: `high`/`critical` risk does not remove a candidate from discovery |
 | R4 | **Block, either direction** | A block edge exists between viewer and candidate in *either* direction | Early, because a block is absolute and undiscussable. It outranks every preference and every earlier decision by both parties, including a like the other party already gave |
 | R5 | **Self** | Candidate is the viewer | Absolute, cheap, and independent of any data drift |
-| R6 | **Already passed** | The viewer has a pass on the candidate within the 30-day window (§5.2) | The viewer's own prior decision, and never overridden by a later page |
+| R6 | **Already passed** | The viewer has a pass on the candidate that is still **in effect**: inside its 30-day window and not superseded by a like (§5.2). The snapshot carries `now`, because a snapshot with no clock cannot answer this | The viewer's own prior decision, and never overridden by a later page |
 | R7 | **Already liked** | The viewer has a live like on the candidate | Same principle, one step later. A candidate who already liked the *viewer* is **not** excluded by this rule — liking them is how the match completes, so hiding them would strand a mutual |
 | R8 | **Already matched** | An **active** match exists between viewer and candidate | A match is a resolved relationship. Only an active match denies; an ended one does not, so an unmatched or block-ended pair is discoverable again |
 | P1 | **Age** | The candidate's age band falls outside the viewer's `ageRange` | Viewer's preferences only |
-| P2 | **Gender** | The candidate's gender is not in the viewer's `seekingGenders` | Viewer's preferences only |
+| P2 | **Gender** | The candidate's gender is not in the viewer's `seekingGenders` | Viewer's preferences only, and the one-sided axis. Evaluated before P3, in this document and in the architecture doc |
 | P3 | **Distance** | The candidate's coarse bucket exceeds the viewer's `maxDistanceKm` | Viewer's preferences only |
 | P4 | **Mutual compatibility** | The pair fails the both-sides test of §3.4 | The only pair-wise filter; an unexpressed dimension never excludes |
 
@@ -195,7 +195,8 @@ type ExclusionReason =
 	| 'viewer_profile_not_complete'       // G3
 	| 'candidate_identity_not_verified'  // R1
 	| 'candidate_profile_not_complete'    // R2
-	| 'candidate_account_not_visible'     // R3
+	| 'candidate_account_not_visible'     // R3, may not appear
+	| 'candidate_cannot_reciprocate'    // R3, may not act
 	| 'blocked'                           // R4
 	| 'self_view'                         // R5
 	| 'already_passed'                    // R6
@@ -365,7 +366,7 @@ five-class model. These are the discovery half of the funnel measured in #18.
 | `discovery.page_served` | `internal` | A page is returned, full or short | `subjectId`, `pageSize`, `short: boolean`, `budgetExhausted: boolean`, `poolBucket: 'empty'\|'small'\|'healthy'` |
 | `discovery.exhausted` | `internal` | The eligible pool is confirmed exhausted for the viewer | `subjectId`, `exhaustedAt` |
 | `discovery.viewer_ineligible` | `internal` | G1 or G2 rejects the viewer | `subjectId`, `gate: 'identity'\|'capability'` — the *class* of gate, never the underlying state, never a reason a moderator would recognise |
-| `preferences.updated` | `user` | A preference record is written | `subjectId`, `changedAxes: string[]` |
+| `preferences.updated` | `user` | A preference record is written | `userId`, `ageRange`, `maxDistanceKm`, `seekingGenders`, `openTo`, `locationPrecision` |
 
 Design constraints on these events:
 
@@ -376,8 +377,16 @@ Design constraints on these events:
   them, and they are kept in the `noun.verb_past` convention so the funnel reads
   as one catalogue. Nothing in `packages/dating` depends on them, and nothing
   may consume them to make a product decision.
-- **No preference *values* are ever published.** `changedAxes` names the axes,
-  not the ages or distances, because analytics is a `public`-clearance consumer.
+- **Preference values are published, and the event is `user` for that reason.**
+  This section previously promised `changedAxes` on the stated ground that
+  "analytics is a `public`-clearance consumer" — but a `public` consumer can
+  never see a `user` event, so that justification was void whichever way the
+  question was decided. What settles it is the schema: `changedAxes` cannot
+  answer a funnel question about *which axis* narrowed a pool, only *that
+  something* did, so it would have been both less useful and still invisible to
+  the analytics sink. The two gender axes are published separately because they
+  are separately meaningful: an analytics consumer that cannot tell "wants to
+  see" from "open to being matched with" cannot read a pool-size funnel at all.
 - `poolBucket` is bucketed rather than exact, so that measuring pool health does
   not become a way to count how many eligible people exist in a small
   geography.
@@ -488,13 +497,20 @@ sensitivity is consistent with the overview's classification table.
   silence) is a v0.2 feature. It implies a match-lifecycle decision, so it
   belongs with #12's open questions too.
 - Whether an age range narrower than 5 years should be rejected or merely
-  warned about. Currently rejected, on the grounds that a validation failure at
-  save time is cheaper to understand than an empty page later.
+  warned about. **Settled and implemented** (C-22): `validatePreferences`
+  rejects it, on the grounds that a validation failure at save time is cheaper
+  to understand than an empty page later. What remains open is only whether the
+  floor should be 5 or wider, and whether a UI hint is owed before the
+  rejection.
 - Whether the 200-examination cap should be raised, lowered, or made adaptive.
   The number is a guess made without production data.
 - Whether location-precision coarsening belongs in the preference record at all,
   or in Privacy & User Settings (#17) with Dating Core merely reading the
-  result. The current split has the value owned here, which may be wrong.
+  result. The value is owned here and validated here, which may be wrong; the
+  one-way ratchet (coarser only) is settled, the *ownership* is not.
+- Whether the pass window should be extendable or shortened per user. Thirty days
+  is implemented and asserted; nothing in the product asks for another number
+  yet.
 - Whether A/B-testing the ordering is acceptable at all. It is a v0.2 question,
   and the answer constrains how much the deterministic ordering in §5.1 can
   rely on being a stable contract.

@@ -238,10 +238,9 @@ function endOfQuietHours(quietHours: QuietHours, now: Date): Date {
 function nextDigestBoundary(
   cadence: 'hourly' | 'weekly',
   digest: DigestPreference,
-  quietHours: QuietHours,
+  timeZone: string,
   now: Date,
 ): Date {
-  const timeZone = quietHours.timeZone;
   const clock = localClock(now, timeZone);
   const minuteOfDay = ((clock.serial % 1440) + 1440) % 1440;
   if (cadence === 'hourly') {
@@ -263,7 +262,12 @@ function plannedDelivery(
   if (spec.channels[channel].mode === 'digest') {
     return {
       mode: 'digest',
-      deliverAt: nextDigestBoundary(spec.digest?.cadence ?? 'hourly', preference.digest, preference.quietHours, now),
+      deliverAt: nextDigestBoundary(
+        spec.digest?.cadence ?? 'hourly',
+        preference.digest,
+        preference.quietHours.timeZone,
+        now,
+      ),
     };
   }
   // Non-critical push and email are held, not dropped. The in-app entry is the
@@ -278,11 +282,11 @@ function plannedDelivery(
 /**
  * Decides delivery for one notification on one channel.
  *
- * In order: the block edge between the two people, the channel the kind uses,
- * whether the recipient has that channel switched on, and whether the account
- * has it at all. A critical notice is decided by the first two alone, which is
- * the point — no preference, and no setting, can stand between a user and a
- * notice about their own safety or standing.
+ * In order: that the kind exists, that it uses this channel at all, whether a
+ * block edge exists between the two people, whether the account has the channel,
+ * and whether the recipient has it switched on. A critical notice is decided by
+ * the first three alone, which is the point — no preference, and no setting, can
+ * stand between a user and a notice about their own safety or standing.
  */
 export function planNotification(
   request: NotificationRequest,

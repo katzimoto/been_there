@@ -28,11 +28,15 @@ const DAY_MS = 86_400_000;
 
 export type PassState = 'live' | 'superseded';
 
-export interface PassRecord {
+/** What a caller supplies; `recordPass` derives the state. */
+export interface NewPass {
   readonly passId: PassId;
   readonly from: UserId;
   readonly to: UserId;
   readonly createdAt: Date;
+}
+
+export interface PassRecord extends NewPass {
   /** `superseded` once the same user liked the person they had passed. */
   readonly state: PassState;
 }
@@ -47,13 +51,12 @@ export function passSuppressesUntil(pass: PassRecord): Date {
  * its window. The boundary is one-sided and deliberate: the end instant is
  * already outside the window, so day 30 and day 31 cannot both be "still
  * suppressed" and the acceptance scenario needs no epsilon to be true.
+ *
+ * The single definition of "suppresses right now", because discovery and
+ * matching must agree on it or a pair can be shown and refused at once.
  */
 export function isPassInEffect(pass: PassRecord, at: Date): boolean {
   return pass.state === 'live' && at.getTime() < passSuppressesUntil(pass).getTime();
-}
-
-export function passesInEffect(passes: readonly PassRecord[], at: Date): readonly PassRecord[] {
-  return passes.filter((pass) => isPassInEffect(pass, at));
 }
 
 export function supersedePasses(

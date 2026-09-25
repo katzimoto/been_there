@@ -12,9 +12,16 @@ import {
 } from '@been-there/core';
 import { type BlockRecord, activeBlockBetween } from './blocks.js';
 import { type IdempotencyKey, type LikeId, type PassId } from './ids.js';
-import { type PassRecord, type PassState, isPassInEffect } from './passes.js';
+import { type NewPass, type PassRecord, type PassState, isPassInEffect } from './passes.js';
 import type { ProfileState } from './profile.js';
-import { DISCOVERABLE_IDENTITY_STATE, LIKE_CAPABILITY } from './read-models.js';
+import {
+  type LikeLedger,
+  type LikeRecord,
+  type LikeState,
+  currentLikeBetween,
+  isMutualLike,
+  setLikeState,
+} from './likes.js';
 
 /**
  * Likes, passes, matches and unmatching (issue #4, #12).
@@ -61,44 +68,6 @@ export interface InteractionContext {
   readonly passActive: boolean;
   readonly like: LikeRecord | null;
   readonly counterpartLike: LikeRecord | null;
-}
-
-/** What a like is now. Every value is a fact, and none of them is a deletion. */
-export type LikeState =
-  /** The liker's current decision; the only state that can become a match. */
-  | 'live'
-  /** The liker passed the same person afterwards, so the like was overtaken. */
-  | 'superseded'
-  /** Retracted before a match, or killed by a block or an unmatch. */
-  | 'withdrawn'
-  /** The pair became a match; the like is a historical fact of that match. */
-  | 'matched';
-
-/** What a caller supplies; the state and the pass link are derived by `recordLike`. */
-export interface NewLike {
-  readonly likeId: LikeId;
-  readonly from: UserId;
-  readonly to: UserId;
-  readonly createdAt: Date;
-}
-
-export interface LikeRecord extends NewLike {
-  readonly state: LikeState;
-  /** The liker's own pass that this like overrode, if any. Never the counterpart's. */
-  readonly supersededPassId: PassId | null;
-}
-
-export function isMutualLike(like: LikeRecord | null, counterpartLike: LikeRecord | null): boolean {
-  return (
-    like !== null &&
-    counterpartLike !== null &&
-    like.state === 'matched' &&
-    counterpartLike.state === 'matched' &&
-    like.from !== like.to &&
-    like.from === counterpartLike.to &&
-    like.to === counterpartLike.from &&
-    like.likeId !== counterpartLike.likeId
-  );
 }
 
 export const interactionMachine = defineStateMachine<
@@ -195,128 +164,6 @@ export function deriveMatchId(a: UserId, b: UserId): MatchId {
   return castId<'MatchId'>(`match:${first}|${second}`);
 }
 
-export interface LikeLedger {
-  readonly likes: readonly LikeRecord[];
-}
-
-export const EMPTY_LEDGER: LikeLedger = { likes: [] };
-
-/**
- * The like that still stands for this ordered pair: a live one, or the one that
- * became the match. A withdrawn or superseded like is history and counts for
- * nothing, which is why the two never collide in a lookup.
- */
-export function currentLikeBetween(ledger: LikeLedger, from: UserId, to: UserId): LikeRecord | null {
-  return (
-    ledger.likes.find(
-      (entry) =>
-        (entry.state === 'live' || entry.state === 'matched') && entry.from === from && entry.to === to,
-    ) ?? null
-  );
-}
-
-/**
- * The minimum a like action reads about one party, taken fresh at action time.
- * A `SubjectStandingProjection` satisfies this structurally, so a caller passes
- * the projection it already holds rather than a copy shaped like one.
- */
-export interface ActionStanding {
-  readonly identity: { readonly state: IdentityState };
-  readonly profile: { readonly state: ProfileState };
-  readonly account: { readonly capabilities: readonly string[]; readonly visibleInProduct: boolean };
-}
-
-export interface LikeActionContext {
-  readonly actor: ActionStanding;
-  readonly target: ActionStanding;
-  readonly blocks: readonly BlockRecord[];
-  /** Current passes, so a like that overrides one can record which. */
-  readonly passes: readonly PassRecord[];
-  readonly at: Date;
-}
-
-/**
- * Records a like, after re-reading every precondition that could have changed
- * since the candidate's card was served.
- *
- * Actor-side failures are reported honestly, because the actor is being told
- * about their own state and hiding it would only strand them. Target-side
- * failures are one indistinguishable refusal, because a liker who can tell a
- * block from an absence has learned something they must not learn.
- */
-export function recordLike(
-  ledger: LikeLedger,
-  like: NewLike,
-  context: LikeActionContext,
-): Result<LikeLedger, DomainError> {
-  const { actor, target, blocks, passes, at } = context;
-  if (like.from === like.to) {
-    return domainError('validation_failed', 'dating.interaction', 'a user cannot like themselves');
-  }
-  if (
-    actor.identity.state !== DISCOVERABLE_IDENTITY_STATE ||
-    !actor.account.capabilities.includes(LIKE_CAPABILITY) ||
-    actor.profile.state !== 'complete'
-  ) {
-    return domainError('permission_denied', 'dating.interaction', 'you cannot like right now', {
-      identityState: actor.identity.state,
-      profileState: actor.profile.state,
-    });
-  }
-  if (
-    target.identity.state !== DISCOVERABLE_IDENTITY_STATE ||
-    target.profile.state !== 'complete' ||
-    !target.account.visibleInProduct ||
-    !target.account.capabilities.includes(LIKE_CAPABILITY) ||
-    activeBlockBetween(like.from, like.to, blocks) !== null
-  ) {
-    return domainError('not_eligible', 'dating.interaction', 'this person is not available');
-  }
-  const existing = currentLikeBetween(ledger, like.from, like.to);
-  if (existing !== null) {
-    if (existing.likeId === like.likeId) {
-      return ok(ledger);
-    }
-    if (existing.state === 'matched') {
-      // The pair is already matched, so the like is on record and the liker is
-      // told exactly that, rather than being handed a conflict for tapping twice.
-      return ok(ledger);
-    }
-    return domainError('conflict', 'dating.interaction', 'this pair already has a like', {
-      from: like.from,
-      to: like.to,
-    });
-  }
-  const superseded = passes.find(
-    (pass) => isPassInEffect(pass, at) && pass.from === like.from && pass.to === like.to,
-  );
-  const record: LikeRecord = { ...like, state: 'live', supersededPassId: superseded?.passId ?? null };
-  return ok({ likes: [...ledger.likes, record] });
-}
-
-/**
- * Retraction, not erasure. The row stays and its state becomes `withdrawn`, so
- * the pair remains reportable and the liker's own later like is a new decision
- * rather than an amendment of this one. Retracting an already-withdrawn like
- * returns the same ledger.
- */
-export function withdrawLike(ledger: LikeLedger, likeId: LikeId): LikeLedger {
-  if (!ledger.likes.some((entry) => entry.likeId === likeId && entry.state !== 'withdrawn')) {
-    return ledger;
-  }
-  return {
-    likes: ledger.likes.map((entry) =>
-      entry.likeId === likeId ? { ...entry, state: 'withdrawn' } : entry,
-    ),
-  };
-}
-
-/** Moves named likes to another state, keeping every row. Three callers, one rule. */
-function markLikes(ledger: LikeLedger, likeIds: readonly LikeId[], state: LikeState): LikeLedger {
-  return {
-    likes: ledger.likes.map((entry) => (likeIds.includes(entry.likeId) ? { ...entry, state } : entry)),
-  };
-}
 
 export interface MatchAttempt {
   readonly actor: UserId;
@@ -392,7 +239,7 @@ export function resolveMatch(attempt: MatchAttempt): Result<MatchResolution, Dom
       : [counterpartLike.likeId, triggeringLike.likeId];
   return ok({
     outcome: 'match_created',
-    ledger: markLikes(ledger, orderedLikes, 'matched'),
+    ledger: setLikeState(ledger, orderedLikes, 'matched'),
     match: {
       matchId: deriveMatchId(actor, counterpart),
       participants: [first, second],
@@ -443,7 +290,7 @@ export function applyBlockToMatch(
       standings,
       ended: { cause: 'ended_by_block', actorId: 'system', at, idempotencyKey: null },
     },
-    ledger: markLikes(ledger, match.likeIds, 'withdrawn'),
+    ledger: setLikeState(ledger, match.likeIds, 'withdrawn'),
   });
 }
 
@@ -505,7 +352,7 @@ export function unmatch(
       standings: ['closed_by_actor', 'closed_by_actor'],
       ended: { cause: 'unmatched', actorId: actor, at, idempotencyKey: key },
     },
-    ledger: markLikes(ledger, match.likeIds, 'withdrawn'),
+    ledger: setLikeState(ledger, match.likeIds, 'withdrawn'),
     conversation,
   });
 }

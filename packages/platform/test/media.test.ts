@@ -83,6 +83,60 @@ describe('media lifecycle', () => {
     ).toBe('initiated');
   });
 
+  it('holds an undecidable scan for a person rather than deciding it', () => {
+    // "Borderline → routed to a moderator queue." Without a state to live in, the
+    // only outcome left for a scanner that could not tell was `rejected` — an
+    // automated enforcement decision about a stranger's face, made with no case
+    // and nobody to appeal to.
+    const scanning = succeeded(mediaMachine.next('initiated', 'begin_scan'));
+
+    expect(succeeded(mediaMachine.next(scanning, 'escalate', { verdict: 'inconclusive' }))).toBe('needs_human');
+  });
+
+  it('refuses to escalate a verdict the scanner actually reached', () => {
+    for (const verdict of ['clean', 'sexual_content', 'malware', 'unreadable'] as const) {
+      expect(rejected(mediaMachine.next('scanning', 'escalate', { verdict })).code, verdict).toBe(
+        'validation_failed',
+      );
+    }
+  });
+
+  it('refuses to decide a held asset without a named person, in either direction', () => {
+    expect(rejected(mediaMachine.next('needs_human', 'approve')).code).toBe('validation_failed');
+    expect(rejected(mediaMachine.next('needs_human', 'reject', { reasonCode: 'nudity' })).code).toBe(
+      'validation_failed',
+    );
+  });
+
+  it('lets a named reviewer release or refuse a held asset', () => {
+    const reviewer = { reviewerId: castId<'ActorId'>('mod-1') };
+
+    expect(succeeded(mediaMachine.next('needs_human', 'approve', reviewer))).toBe('approved');
+    expect(succeeded(mediaMachine.next('needs_human', 'reject', { ...reviewer, reasonCode: 'nudity' }))).toBe(
+      'rejected',
+    );
+  });
+
+  it('never auto-rejects on an undecidable verdict', () => {
+    // The absence of this guard is the whole failure: `inconclusive` is not a
+    // finding, and a rejection with no `reason_code` would have been a machine
+    // refusing a photo for a reason nobody could name.
+    expect(
+      rejected(mediaMachine.next('scanning', 'reject', { verdict: 'inconclusive', reasonCode: 'scanner_error' })).code,
+    ).toBe('validation_failed');
+  });
+
+  it('never serves a held asset', () => {
+    const held = asset({ state: 'needs_human' });
+    const result = issueMediaAccess(held, { userId: OWNER }, 'profile_display', {
+      signer,
+      now: NOW,
+      grantId: grantId('grant-held'),
+    });
+
+    expect(rejected(result).details).toMatchObject({ state: 'needs_human' });
+  });
+
   it('treats approved as a terminal state, which is what makes it a state', () => {
     expect(mediaMachine.legalEvents('approved')).toEqual([]);
     assertMachineIsTotal(mediaMachine, ['approved']);

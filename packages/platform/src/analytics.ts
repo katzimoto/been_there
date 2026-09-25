@@ -56,7 +56,8 @@ export const ANALYTICS_EVENTS = {
     sensitivity: 'internal',
     dimensions: ['method'],
     sampleRate: 1,
-    description: 'A recovery was attempted. The completion twin is audit-only.',
+    description:
+      'A recovery was attempted. The completion carries a count here and the detail in the audit action.',
   },
   'account.session_started': {
     sensitivity: 'internal',

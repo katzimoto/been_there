@@ -44,21 +44,28 @@ relations=$(
     "select count(*) from information_schema.tables where table_schema = 'public';"
 )
 
-if [ "$relations" -eq 0 ]; then
-  echo "${mode}: refusing to run. The local database '${POSTGRES_DB}' has no schema:" \
-    "the public schema has 0 relations." >&2
-  echo "${mode}: this repository has no migrations and no migration runner, so there is" \
-    "nothing to apply. Nothing was applied and no state changed." >&2
+if [ "$mode" = migrate ]; then
+  if [ "$relations" -eq 0 ]; then
+    echo "migrate: refusing to run. The local database '${POSTGRES_DB}' has no schema: the" \
+      "public schema has 0 relations." >&2
+    echo "migrate: this repository has no migrations and no migration runner, so there is" \
+      "nothing to apply." >&2
+  else
+    echo "migrate: refusing to run. The public schema has ${relations} relation(s), but this" \
+      "repository has no migration runner wired up, so applying migrations is not implemented." >&2
+  fi
 else
-  echo "${mode}: refusing to run. The public schema has ${relations} relation(s), but this" \
-    "repository has no migration runner wired up, so applying them is not implemented." >&2
-  echo "${mode}: nothing was applied and no state changed." >&2
+  if [ "$relations" -eq 0 ]; then
+    echo "seed: refusing to run. There is nowhere to load the dataset: the local database" \
+      "'${POSTGRES_DB}' has no schema, the public schema has 0 relations." >&2
+  else
+    echo "seed: refusing to run. The public schema has ${relations} relation(s), but this" \
+      "repository has no persistence layer, so nothing loads the development dataset into it." >&2
+  fi
+  echo "seed: the dataset itself is real and runs today without a database: 'make seed-print'" \
+    "prints it and 'make seed-verify' asserts its invariants." >&2
 fi
-
-if [ "$mode" = seed ]; then
-  echo "seed: the development dataset itself is real and runs today without a database:" >&2
-  echo "seed: 'make seed-print' prints it, 'make seed-verify' asserts its invariants." >&2
-fi
+echo "${mode}: nothing was applied, no state changed, and this target did not succeed." >&2
 
 echo "${mode}: see docs/development/local-environment.md" >&2
 exit 1

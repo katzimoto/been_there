@@ -4,6 +4,7 @@ import {
   EMPTY_LEDGER,
   type LikeActionContext,
   type MatchResolution,
+  PASS_SUPPRESSION_DAYS,
   applyBlockToMatch,
   canonicalPair,
   currentLikeBetween,
@@ -13,12 +14,12 @@ import {
   isMutualLike,
   matchStandingFor,
   recordLike,
+  recordPass,
   resolveMatch,
   supersedePasses,
   unmatch,
   withdrawLike,
 } from '../src/index.js';
-import { PASS_SUPPRESSION_DAYS } from '../src/passes.js';
 import {
   A,
   AT,
@@ -105,8 +106,8 @@ describe('like ledger', () => {
       recordLike(ledger, like(B, A, 'like-b-a'), context({ actor: standing(B), target: standing(A) })),
     );
     const after = withdrawLike(bothWays, likeId('like-a-b'));
-    // The row is retained, not deleted: a deleted like is a relationship that can
-    // no longer be reported.
+    // The row is retained, not deleted: a deleted like is a relationship that
+    // can no longer be reported.
     expect(after.likes.map((entry) => [entry.likeId, entry.state])).toEqual([
       [likeId('like-a-b'), 'withdrawn'],
       [likeId('like-b-a'), 'live'],
@@ -116,17 +117,23 @@ describe('like ledger', () => {
     const evidence = succeeded(
       evidenceForReport({ viewer: B, subject: A, likes: after.likes, passes: [], match: null, blocks: [] }),
     );
-    expect(evidence.likes).toEqual([{ likeId: likeId('like-a-b'), state: 'withdrawn' }]);
+    expect(evidence.likes).toEqual([
+      { likeId: likeId('like-a-b'), state: 'withdrawn' },
+      { likeId: likeId('like-b-a'), state: 'live' },
+    ]);
   });
 
-  it('lets the same user decide again after withdrawing, and refuses a second id meanwhile', () => {
+  it('refuses a second id while a like is current, and accepts a fresh decision once it is withdrawn', () => {
     const first = succeeded(recordLike(EMPTY_LEDGER, like(A, B, 'like-a-b'), context()));
-    const second = recordLike(withdrawLike(first, likeId('like-a-b')), like(A, B, 'like-a-b-again'), context());
-    expect(failureCode(second)).toBe('conflict');
+    expect(failureCode(recordLike(first, like(A, B, 'like-a-b-again'), context()))).toBe('conflict');
     const redecided = succeeded(
       recordLike(withdrawLike(first, likeId('like-a-b')), like(A, B, 'like-a-b-again'), context()),
     );
-    expect(redecided.likes.map((entry) => entry.state)).toEqual(['withdrawn', 'live']);
+    // Both decisions stay on record: the withdrawal did not erase the first one.
+    expect(redecided.likes.map((entry) => [entry.likeId, entry.state])).toEqual([
+      [likeId('like-a-b'), 'withdrawn'],
+      [likeId('like-a-b-again'), 'live'],
+    ]);
   });
 });
 
@@ -341,17 +348,33 @@ describe('a like after a pass', () => {
     expect(result).toEqual({ outcome: 'match_refused', reason: 'passed' });
   });
 
-  it('expresses the like-then-pass sequence, and the pass outranks the like', () => {
-    const passerPass = pass(A, B, 'pass-a-b');
-    const later = recordLike(EMPTY_LEDGER, like(A, B, 'like-a-b'), context({ passes: [passerPass], at: LATER }));
-    expect(failureCode(later)).toBe('not_eligible');
-    expect(succeeded(interactionMachine.next('liked', 'pass', {
+  it('expresses the like-then-pass sequence, and the later pass is the decision that stands', () => {
+    const machineContext = {
       self: false,
       blocked: false,
       passActive: false,
-      like: like(A, B),
-      counterpartLike: null,
-    }))).toBe('passed');
+      like: like(A, B, 'like-a-b'),
+      counterpartLike: like(B, A, 'like-b-a'),
+    };
+    expect(succeeded(interactionMachine.next('none', 'like', machineContext))).toBe('liked');
+    // The documented sequence is expressible: a pass after a like is a decision
+    // the product makes, and the machine must be able to reach it.
+    expect(succeeded(interactionMachine.next('liked', 'pass', machineContext))).toBe('passed');
+
+    // At the ledger level the pass withdraws the like it overtakes, and the pass
+    // is the one that stays live.
+    const liked = succeeded(recordLike(EMPTY_LEDGER, like(A, B, 'like-a-b'), context()));
+    const passed = succeeded(recordPass(liked, [], pass(A, B, 'pass-a-b')));
+    expect(passed.ledger.likes.map((entry) => entry.state)).toEqual(['withdrawn']);
+    expect(passed.passes.map((entry) => entry.state)).toEqual(['live']);
+    expect(currentLikeBetween(passed.ledger, A, B)).toBeNull();
+  });
+
+  it('records a pass once, and refuses a second id for the same pair', () => {
+    const first = succeeded(recordPass(EMPTY_LEDGER, [], pass(A, B, 'pass-a-b')));
+    expect(succeeded(recordPass(first.ledger, first.passes, pass(A, B, 'pass-a-b'))).passes).toHaveLength(1);
+    expect(failureCode(recordPass(EMPTY_LEDGER, first.passes, pass(A, B, 'pass-a-b-again')))).toBe('conflict');
+    expect(failureCode(recordPass(EMPTY_LEDGER, [], pass(A, A, 'pass-a-a')))).toBe('validation_failed');
   });
 });
 
@@ -407,11 +430,11 @@ describe('interaction machine', () => {
     }
   });
 
-  it('detects reciprocity only between opposite directed likes', () => {
-    expect(isMutualLike(like(A, B, 'x'), like(B, A, 'y'))).toBe(false);
-    expect(isMutualLike({ ...like(A, B, 'x'), state: 'matched' }, { ...like(B, A, 'y'), state: 'matched' })).toBe(true);
-    expect(isMutualLike(like(A, B, 'x'), like(B, A, 'y'))).toBe(false);
+  it('detects reciprocity only between opposite directed likes that still count', () => {
+    expect(isMutualLike(like(A, B, 'x'), like(B, A, 'y'))).toBe(true);
+    expect(isMutualLike({ ...like(A, B, 'x'), state: 'withdrawn' }, like(B, A, 'y'))).toBe(false);
     expect(isMutualLike(like(A, B, 'x'), null)).toBe(false);
+    expect(isMutualLike(like(A, B, 'x'), like(A, B, 'y'))).toBe(false);
     expect(isMutualLike(like(A, B, 'x'), like(A, B, 'x'))).toBe(false);
   });
 });
