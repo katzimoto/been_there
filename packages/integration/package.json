@@ -1,0 +1,15 @@
+{
+  "name": "@been-there/integration",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@been-there/core": "*",
+    "@been-there/communication": "*",
+    "@been-there/dating": "*",
+    "@been-there/identity": "*",
+    "@been-there/moderation": "*",
+    "@been-there/platform": "*",
+    "@been-there/trust-safety": "*"
+  }
+}

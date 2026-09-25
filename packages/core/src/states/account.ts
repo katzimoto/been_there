@@ -36,7 +36,7 @@ export const accountMachine: StateMachine<AccountState, AccountEvent, AccountCon
         guard: (ctx) => ctx?.caseId !== undefined && (ctx?.removedCapabilities?.length ?? 0) > 0,
         note: 'A restriction must name a case and at least one removed capability.',
       },
-      { event: 'lift_restriction', from: ['limited'], to: 'active', guard: (ctx) => ctx?.caseId !== undefined },
+      { event: 'lift_restriction', from: ['limited'], to: 'active', guard: (ctx) => ctx?.caseId !== undefined && ctx?.moderatorId !== undefined, note: 'A restriction is a moderator decision, so undoing it is one too. Without this, automation could reverse a human sanction, which is the same violation as automation applying one.' },
       { event: 'suspend', from: ['active', 'limited'], to: 'suspended', guard: (ctx) => ctx?.caseId !== undefined && ctx?.moderatorId !== undefined },
       { event: 'reinstate', from: ['suspended'], to: 'active', guard: (ctx) => ctx?.caseId !== undefined && ctx?.moderatorId !== undefined },
       { event: 'ban', from: ['active', 'limited', 'suspended'], to: 'banned', guard: (ctx) => ctx?.caseId !== undefined && ctx?.moderatorId !== undefined, note: 'Ban is the only terminal-by-default state and is reversible only by a named moderator.' },
@@ -65,12 +65,44 @@ export const CAPABILITIES_BY_ACCOUNT_STATE: Readonly<
   banned: ['report', 'appeal_request', 'delete_account'],
 };
 
+/**
+ * Capabilities a restriction may never take away, owned here beside the
+ * capability record rather than in whichever package happens to accept a
+ * removal. The authoritative list has to live at the point the grant is
+ * computed: a floor enforced only where a removal is *accepted* is one package
+ * downstream of every other caller, and the next caller that is not that
+ * package walks straight past it.
+ *
+ * Each entry earns its place:
+ *
+ * - `report` — the intake valve for abuse reports. A restricted user with a
+ *   genuine safety concern is exactly the person who must still reach a human,
+ *   so every state grants it including `banned`. Removing it stops reports
+ *   arriving at all, and that failure shows up in no metric.
+ * - `block` — how a user protects themselves. A victim who cannot block the
+ *   account targeting them has lost the one control the product gave them.
+ * - `delete_account` — the recommended action on the banned screen. Removing it
+ *   strands a banned account: sanctioned, unappealable, and unable to leave.
+ */
+export const UNRESTRICTABLE_CAPABILITIES: readonly string[] = [
+  'report',
+  'block',
+  'delete_account',
+];
+
 export function capabilitiesFor(
   state: AccountState,
   context?: AccountContext,
 ): readonly string[] {
+  // Defence in depth: the floor is applied where the grant is computed, so a
+  // hand-built context cannot strip it even if the intake valve was bypassed.
+  // Rejecting at intake (`applyDecision`) is the other half — a moderator who
+  // types `report` is told no rather than silently ignored — but correctness
+  // cannot depend on every caller having remembered to check first.
   const base = CAPABILITIES_BY_ACCOUNT_STATE[state];
-  const removed = context?.removedCapabilities ?? [];
+  const removed = (context?.removedCapabilities ?? []).filter(
+    (capability) => !UNRESTRICTABLE_CAPABILITIES.includes(capability),
+  );
   if (removed.length === 0) {
     return base;
   }

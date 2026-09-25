@@ -46,6 +46,12 @@ One specification per MVP feature issue, in `features/`:
 | [Privacy & User Settings](./features/privacy-and-user-settings.md) | [#17](https://github.com/katzimoto/been_there/issues/17) |
 | [Product Quality & Measurement](./features/product-quality-and-measurement.md) | [#18](https://github.com/katzimoto/been_there/issues/18) |
 
+### Review
+
+| Document | Covers |
+|----------|--------|
+| [Baseline review findings](./architecture/review-findings.md) | Independent review of the eight commitments, the domain boundaries, and doc/code agreement, with a runnable reproduction per finding |
+
 ## Research
 
 External, evidence-backed research with sources and dates. Conclusions are marked
@@ -53,6 +59,8 @@ as adopted, rejected, or open.
 
 - [Agent workflow research](./research/agent-workflow-research.md)
 - [Trust & safety and verification reference research](./research/trust-safety-reference-research.md)
+- [Session review, 2026-09-25 — architecture baseline](./research/session-reviews/2026-09-25-architecture-baseline.md):
+  what was verified, what was assumed, what broke, and what to do next
 
 ## Document conventions
 
