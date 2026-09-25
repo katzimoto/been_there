@@ -40,6 +40,7 @@ export const OBSERVATION_KINDS = [
   'communication.conversation_state_changed',
   'communication.message_sent',
   'moderation.report_submitted',
+  'moderation.report_pairing',
   'block.created',
 ] as const;
 
@@ -63,6 +64,16 @@ export interface Observation {
   readonly entityId?: string;
   /** Batched count when the producer already derived a rate or a total. */
   readonly count?: number;
+  /**
+   * A non-reversible join key, and the only field here that is not an id. It
+   * is the reduction of `moderation.report_pairing` and it says nothing on its
+   * own: it names a report, a match and an account to whoever holds the
+   * deployment secret, and to everyone else it is a string that matches another
+   * string or does not. A detector pairs on equality; it cannot read a counter-
+   * party out of it, and there is no function here that turns one back into an
+   * identity.
+   */
+  readonly pairingToken?: string;
 }
 
 /**
@@ -102,6 +113,8 @@ export interface ReductionRule {
   readonly entity?: ReductionField;
   /** A count or rate the producer already derived. Never re-derived here. */
   readonly count?: ReductionField;
+  /** The keyed join token, when the producer published one. Never re-derived. */
+  readonly pairingToken?: ReductionField;
 }
 
 /**
@@ -115,6 +128,7 @@ export type ReducibleEventType =
   | 'profile.state_changed'
   | 'communication.message_sent'
   | 'identity.status_changed'
+  | 'moderation.report_pairing'
   | 'verification.attempt.started';
 
 /**
@@ -175,6 +189,15 @@ export const OBSERVATION_REDUCTION: Readonly<Record<ReducibleEventType, Reductio
     entity: 'payload:verificationId',
     relevance:
       'A verification attempt, as an opaque id. The attempt is the only part of Identity a detector may see: the capture, the document and the reason never cross.',
+  },
+  'moderation.report_pairing': {
+    kind: 'moderation.report_pairing',
+    actor: 'envelope:subjectId',
+    subject: 'envelope:subjectId',
+    entity: 'payload:reportId',
+    pairingToken: 'payload:pairingToken',
+    relevance:
+      'That a report exists about this account, and a join key onto the match it came from — and nothing else. The report record is `restricted` and stays there; this row is the whole of what a detector learns about it, which is why the pairing token rather than a wider clearance is the shape of the fix. The performer is the reported account, so a detector that needs a reporter distinct from the subject has no producer here at all.',
   },
 };
 
@@ -296,6 +319,10 @@ export function toObservation(event: DomainEvent, now: Date): Result<Observation
   if (rule.count !== undefined && count === null) {
     return malformed(event.type, rule.count, 'a whole-number count of at least one');
   }
+  const pairingToken = rule.pairingToken === undefined ? null : readText(event, rule.pairingToken);
+  if (rule.pairingToken !== undefined && pairingToken === null) {
+    return malformed(event.type, rule.pairingToken, 'the pairing token that joins this fact to another');
+  }
 
   return ok({
     kind: rule.kind,
@@ -305,5 +332,6 @@ export function toObservation(event: DomainEvent, now: Date): Result<Observation
     ...(counterpartyId === null ? {} : { counterpartyId }),
     ...(entityId === null ? {} : { entityId }),
     ...(count === null ? {} : { count }),
+    ...(pairingToken === null ? {} : { pairingToken }),
   });
 }

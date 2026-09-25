@@ -144,6 +144,173 @@ export interface AccountStandingRow {
   readonly updatedAt: Date;
 }
 
+/**
+ * Platform account state. The credential, the date of birth, the terms version,
+ * the sessions, the recovery requests and the contact verifications — the six
+ * things an account is before it is a person who can be shown to anybody.
+ *
+ * It is one port rather than six because they are one transaction: a sign-up
+ * writes a credential, an onboarding row and a session together, and splitting
+ * them would let a caller commit two thirds of a sign-up.
+ */
+export interface CredentialRow {
+  readonly userId: UserId;
+  readonly contactKind: string;
+  /** Already normalised at the edge. No other form is ever stored. */
+  readonly contactIdentifier: string;
+  readonly contactVerified: boolean;
+  readonly passwordHash: string;
+  readonly createdAt: Date;
+  readonly updatedAt: Date;
+}
+
+export interface OnboardingRow {
+  readonly userId: UserId;
+  /** ISO `YYYY-MM-DD`. The age and the band are derived from it at read time. */
+  readonly dateOfBirth: string;
+  /** The recorded fact that the user was told the 18+ rule and agreed to it. */
+  readonly ageAttested: boolean;
+  readonly termsVersion: string;
+  readonly termsAcceptedAt: Date;
+  /** A city area. Never a coordinate; the column cannot hold one. */
+  readonly coarseArea: string | null;
+  readonly updatedAt: Date;
+}
+
+export interface SessionRow {
+  readonly sessionId: string;
+  readonly userId: UserId;
+  readonly authMethod: string;
+  readonly status: string;
+  readonly tokenHash: string;
+  readonly issuedAt: Date;
+  readonly expiresAt: Date;
+  readonly refreshableUntil: Date;
+  readonly lastActiveAt: Date;
+  readonly revokedReason: string | null;
+  readonly supersededBy: string | null;
+  readonly deviceLabel: string | null;
+  readonly coarseCity: string | null;
+}
+
+export interface RecoveryRow {
+  readonly recoveryId: string;
+  readonly userId: UserId;
+  readonly method: string;
+  readonly status: string;
+  /** A salted digest. The code or the link token is never stored. */
+  readonly secretHash: string;
+  readonly requestedAt: Date;
+  readonly expiresAt: Date;
+  readonly attempts: number;
+  readonly consumedAt: Date | null;
+  readonly revokedSessionIds: readonly string[];
+}
+
+export interface ContactVerificationRow {
+  readonly verificationId: string;
+  readonly userId: UserId;
+  readonly channel: string;
+  readonly status: string;
+  readonly secretHash: string;
+  readonly attempts: number;
+  readonly createdAt: Date;
+  readonly expiresAt: Date;
+}
+
+export interface AnalyticsEventRow {
+  readonly eventId: string;
+  readonly type: string;
+  readonly occurredAt: Date;
+  readonly correlationId: string;
+  /** Declared dimensions only, all scalar. `recordAnalyticsEvent` enforced it. */
+  readonly properties: Readonly<Record<string, unknown>>;
+}
+
+export interface NoticeRow {
+  readonly notificationId: string;
+  readonly userId: UserId;
+  readonly kind: string;
+  readonly channel: string;
+  readonly status: string;
+  readonly suppressionReason: string | null;
+  readonly idempotencyKey: string;
+  readonly deliverAt: Date;
+  readonly createdAt: Date;
+}
+
+/**
+ * The rate-limit buckets Platform enforces, named so that a caller cannot invent
+ * one. §10 gives the numbers; this names the things they are counted over.
+ */
+export type RateLimitBucket =
+  | 'signup_per_ip'
+  | 'signup_per_contact'
+  | 'login_per_account'
+  | 'recovery_per_account'
+  | 'recovery_per_source'
+  | 'contact_code_per_issued'
+  | 'contact_link_reissue';
+
+export interface AccountPlatformStore {
+  findCredentialByContact(contactIdentifier: string, tx: Transaction): Promise<CredentialRow | null>;
+  findCredential(userId: UserId, tx: Transaction): Promise<CredentialRow | null>;
+  /**
+   * Serialises concurrent sign-ups on the same contact identifier, so the
+   * duplicate rules' read-then-write cannot interleave with another sign-up's.
+   * Released when the transaction ends.
+   */
+  lockContact(contactIdentifier: string, tx: Transaction): Promise<void>;
+  insertCredential(row: CredentialRow, tx: Transaction): Promise<void>;
+  markContactVerified(userId: UserId, at: Date, tx: Transaction): Promise<boolean>;
+  updatePasswordHash(userId: UserId, passwordHash: string, at: Date, tx: Transaction): Promise<boolean>;
+
+  findOnboarding(userId: UserId, tx: Transaction): Promise<OnboardingRow | null>;
+  insertOnboarding(row: OnboardingRow, tx: Transaction): Promise<void>;
+  /** Terms acceptance is the only write here: a version and a timestamp. */
+  acceptTerms(userId: UserId, termsVersion: string, at: Date, tx: Transaction): Promise<boolean>;
+  recordCoarseArea(userId: UserId, coarseArea: string, at: Date, tx: Transaction): Promise<boolean>;
+
+  insertSession(row: SessionRow, tx: Transaction): Promise<void>;
+  /** Resolves a bearer token. The token is a digest; the row is the session. */
+  findSessionByToken(tokenHash: string, tx: Transaction): Promise<SessionRow | null>;
+  findSession(sessionId: string, tx: Transaction): Promise<SessionRow | null>;
+  /** Every session an account holds, most recently active first. */
+  listSessionsFor(userId: UserId, tx: Transaction): Promise<readonly SessionRow[]>;
+  updateSession(row: SessionRow, tx: Transaction): Promise<boolean>;
+  touchSession(sessionId: string, lastActiveAt: Date, tx: Transaction): Promise<boolean>;
+
+  insertRecovery(row: RecoveryRow, tx: Transaction): Promise<void>;
+  findRecovery(recoveryId: string, tx: Transaction): Promise<RecoveryRow | null>;
+  findOpenRecoveryFor(userId: UserId, tx: Transaction): Promise<RecoveryRow | null>;
+  updateRecovery(row: RecoveryRow, tx: Transaction): Promise<boolean>;
+
+  /**
+   * Expires every open verification for an account and returns how many it
+   * expired, so a new link can be issued without violating the one-open-per-
+   * account index and the caller can log what it superseded.
+   */
+  expireOpenContactVerifications(userId: UserId, at: Date, tx: Transaction): Promise<number>;
+  insertContactVerification(row: ContactVerificationRow, tx: Transaction): Promise<void>;
+  findOpenContactVerification(userId: UserId, tx: Transaction): Promise<ContactVerificationRow | null>;
+  updateContactVerification(row: ContactVerificationRow, tx: Transaction): Promise<boolean>;
+
+  recordRateLimitEvent(bucket: RateLimitBucket, subjectKey: string, at: Date, tx: Transaction): Promise<void>;
+  countRateLimitEvents(bucket: RateLimitBucket, subjectKey: string, since: Date, tx: Transaction): Promise<number>;
+
+  /** The metrics sink. Every row has been through `recordAnalyticsEvent`. */
+  insertAnalyticsEvent(row: AnalyticsEventRow, tx: Transaction): Promise<void>;
+  listAnalyticsEvents(type: string, since: Date, tx: Transaction): Promise<readonly AnalyticsEventRow[]>;
+
+  /**
+   * The notice ledger. The unique `idempotency_key` is what makes "the owner
+   * learns once" structural rather than a rule someone has to remember, so a
+   * duplicate raises the store's conflict error instead of sending twice.
+   */
+  insertNotice(row: NoticeRow, tx: Transaction): Promise<void>;
+  listNoticesFor(userId: UserId, tx: Transaction): Promise<readonly NoticeRow[]>;
+}
+
 /** Dating: profiles, preferences, likes, passes, blocks, matches. */
 export interface ProfileRow {
   readonly profileId: string;
@@ -373,6 +540,8 @@ export interface Stores {
   readonly accountStanding: AccountStandingStore;
   /** Verification attempts, so the flow survives a restart. */
   readonly verificationAttempts: VerificationAttemptStore;
+  /** Credentials, the age gate, terms, sessions, recovery, contact verification. */
+  readonly accounts: AccountPlatformStore;
 }
 
 import type { ActorId } from '@been-there/core';

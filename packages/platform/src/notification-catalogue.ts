@@ -311,6 +311,42 @@ export const NOTIFICATION_KINDS = {
       push: { mode: 'off', content: [] },
     },
   },
+  // The three security notices Account & Onboarding §7.1/§7.2 make mandatory:
+  // what a completed recovery revoked, that every device was signed out, and
+  // that recovery was paused after repeated attempts. They are `critical`
+  // because each one describes a fact about the owner's own access that nothing
+  // else in the product will tell them, and each is sent once — the notice
+  // ledger's unique idempotency key is what makes "once" structural.
+  'account.recovery_completed': {
+    category: 'account',
+    critical: true,
+    pairScoped: false,
+    channels: {
+      in_app: { mode: 'immediate', content: ['count', 'event_date'] },
+      email: { mode: 'immediate', content: ['count', 'event_date'] },
+      push: { mode: 'immediate', content: ['count'] },
+    },
+  },
+  'account.signed_out_all_devices': {
+    category: 'account',
+    critical: true,
+    pairScoped: false,
+    channels: {
+      in_app: { mode: 'immediate', content: ['count', 'event_date'] },
+      email: { mode: 'immediate', content: ['count', 'event_date'] },
+      push: { mode: 'immediate', content: ['count'] },
+    },
+  },
+  'account.recovery_paused': {
+    category: 'account',
+    critical: true,
+    pairScoped: false,
+    channels: {
+      in_app: { mode: 'immediate', content: ['event_date'] },
+      email: { mode: 'immediate', content: ['event_date'] },
+      push: { mode: 'off', content: [] },
+    },
+  },
   'account.deletion_completed': {
     category: 'account',
     critical: true,

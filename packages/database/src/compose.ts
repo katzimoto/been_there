@@ -1,6 +1,7 @@
 import type { Pool } from 'pg';
 import type { Stores } from '@been-there/contracts';
 import { PgAccountStandingStore } from './store-account-standing.js';
+import { PgAccountPlatformStore } from './store-accounts.js';
 import { PgConversationStore } from './store-conversation.js';
 import { PostgresIdentityStore } from './store-users-identity.js';
 import { PostgresInteractionStore } from './store-interaction.js';
@@ -37,5 +38,6 @@ export function createStores(pool: Pool): Stores {
     moderation: createModerationStore(),
     accountStanding: new PgAccountStandingStore(),
     verificationAttempts: new PgVerificationAttemptStore(),
+    accounts: new PgAccountPlatformStore(),
   };
 }

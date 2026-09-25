@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { StoreError } from '@been-there/contracts';
-import type { DomainError, Err, Result } from '@been-there/core';
+import { type DomainError, type Err, type Result, castId, ok } from '@been-there/core';
 import { readBody } from './body.js';
 import {
   type FailureBody,
@@ -13,7 +13,7 @@ import {
   statusForStoreError,
 } from './failure.js';
 import { type HttpResponse, type Route, type RouteRequest, matchRoute } from './router.js';
-import type { ServiceDependencies } from '../ports.js';
+import type { RequestActor, ServiceDependencies } from '../ports.js';
 
 /**
  * The HTTP boundary, on Node's own `http`.
@@ -84,6 +84,31 @@ export function createRequestHandler(
   };
 }
 
+/**
+ * The principal a public route runs as.
+ *
+ * `userId: null` is the load-bearing field: it is the value a staff route
+ * reached without a member session already carries, so a public handler that
+ * forgets to check gets a refusal from `authorize` rather than a fabricated
+ * member, and a handler that does check cannot tell "no session" from "a
+ * session belonging to somebody with no id".
+ */
+/** No member identity. A `Principal` is not nullable, so an anonymous
+ * caller carries a sentinel that matches no real user rather than a null. */
+const ANONYMOUS_USER_ID = castId<'UserId'>('anonymous');
+
+const ANONYMOUS_ACTOR: RequestActor = {
+  userId: null,
+  role: 'user',
+  // A platform `Principal` is not nullable, so an anonymous caller carries no
+  // member identity at all rather than a null one. `authorize` refuses any
+  // protected action for a principal with no user id, which is the point:
+  // a public route that forgot to check gets a refusal, not a fabricated member.
+  principal: { userId: ANONYMOUS_USER_ID, role: 'user' },
+  automated: false,
+  actorId: castId<'ActorId'>('anonymous'),
+};
+
 async function handle(
   dependencies: ServiceDependencies,
   routes: readonly Route[],
@@ -100,7 +125,18 @@ async function handle(
     return;
   }
 
-  const actor = dependencies.actors.resolve(message.headers.authorization);
+  // Authenticated after routing, not before it: the three routes a caller
+  // cannot present a session to — sign-up, sign-in, recovery — are declared
+  // public in the route table, and resolving a session for them would refuse
+  // every legitimate first request. A public handler still runs as an
+  // anonymous principal, so `request.actor` is never undefined and a handler
+  // cannot accidentally treat "unauthenticated" as "member".
+  // Async because resolving a bearer token is a database read; see
+  // `ActorResolver.resolve` for why a synchronous resolver would be a second
+  // source of truth for authentication.
+  const actor = await (match.kind === 'matched' && match.route.public
+    ? Promise.resolve(ok(ANONYMOUS_ACTOR))
+    : dependencies.actors.resolve(message.headers.authorization));
   if (!actor.ok) {
     writeFailure(response, actor);
     return;

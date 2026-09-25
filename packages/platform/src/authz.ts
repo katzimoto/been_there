@@ -1,5 +1,6 @@
 import {
   CAPABILITIES_BY_ACCOUNT_STATE,
+  type AccountEvent,
   type AccountContext,
   type AccountId,
   type AccountState,
@@ -23,8 +24,66 @@ import { isWithinClearance } from './redaction.js';
  * every protected action and a caller must satisfy both — a moderator with the
  * right permission still cannot read a `restricted` field unless the role's
  * clearance covers it.
+ *
+ * `identity_privacy_officer` is the one name here that is not a rung on the
+ * moderation ladder. It is an appointment in the identity domain, and it is
+ * named in this package rather than in `packages/moderation` because identity
+ * artefacts are classified `sensitive` and this is the package that owns what a
+ * role may observe at all. It holds no decision permission: an officer who may
+ * read a selfie may not act on a case.
  */
-export type Role = 'user' | 'moderator' | 'senior_moderator' | 'support' | 'system';
+export type Role =
+  | 'user'
+  | 'moderator'
+  | 'senior_moderator'
+  | 'support'
+  | 'identity_privacy_officer'
+  | 'system';
+
+/**
+ * The appointment a role carries, which is a different question from which
+ * permissions it holds. These are the two facts the moderation package's
+ * clearance ladder is computed from, stated in the package that decides who is
+ * who, so that a service builds its actor from the authenticated role rather
+ * than from anything the request body claimed. A caller that read `isLead` off a
+ * JSON body would be handing the lead clearance to anyone who typed it.
+ */
+export interface ReviewerAppointment {
+  readonly isLead: boolean;
+  readonly identityPrivacyRole: boolean;
+}
+
+export const APPOINTMENT_BY_ROLE: Readonly<Record<Role, ReviewerAppointment>> = {
+  user: { isLead: false, identityPrivacyRole: false },
+  support: { isLead: false, identityPrivacyRole: false },
+  moderator: { isLead: false, identityPrivacyRole: false },
+  senior_moderator: { isLead: true, identityPrivacyRole: false },
+  identity_privacy_officer: { isLead: false, identityPrivacyRole: true },
+  system: { isLead: false, identityPrivacyRole: false },
+};
+
+/**
+ * Which protected action governs each move of the account machine.
+ *
+ * A reversal performs the lift event, and the lift is a different authority
+ * from the sanction it answers: `lift_restriction` and `lift_ban` are not the
+ * same permission, and this is the record that says so. `reinstate` is the
+ * suspension authority and `lift_restriction` the restriction one, because
+ * neither is senior-only — only lifting a ban is, and that is the one event
+ * with no other event mapped alongside it.
+ */
+const PROTECTED_ACTION_BY_ACCOUNT_EVENT: Readonly<Record<AccountEvent, ProtectedAction>> = {
+  restrict: 'account.enforce.restrict',
+  lift_restriction: 'account.enforce.restrict',
+  suspend: 'account.enforce.suspend',
+  reinstate: 'account.enforce.suspend',
+  ban: 'account.enforce.ban',
+  lift_ban: 'account.enforce.lift_ban',
+};
+
+export function protectedActionForAccountEvent(event: AccountEvent): ProtectedAction {
+  return PROTECTED_ACTION_BY_ACCOUNT_EVENT[event];
+}
 
 export type Permission =
   | 'discovery.read'
@@ -73,6 +132,7 @@ export const PERMISSIONS_BY_ROLE: Readonly<Record<Role, readonly Permission[]>> 
   // In particular `system` cannot read case evidence: a detector that could
   // read evidence would be an enforcement decision made by a machine.
   system: ['system.integration.call', 'audit.read.internal'],
+  identity_privacy_officer: ['case.read', 'case.evidence.read', 'identity.evidence.read'],
 };
 
 /**
@@ -86,6 +146,11 @@ export const CLEARANCE_BY_ROLE: Readonly<Record<Role, Clearance>> = {
   moderator: { upTo: 'sensitive' },
   senior_moderator: { upTo: 'restricted' },
   system: { upTo: 'internal' },
+  // `sensitive`, not `restricted`: the artefacts this role exists to read are
+  // classified `sensitive`, and granting `restricted` as well would put a
+  // second role in the single cell `platform.md` §4 reserves for senior
+  // moderation.
+  identity_privacy_officer: { upTo: 'sensitive' },
 };
 
 export interface Principal {
@@ -99,6 +164,7 @@ export type ProtectedAction =
   | 'account.enforce.ban'
   | 'account.enforce.lift_ban'
   | 'case.open'
+  | 'case.read'
   | 'case.read_evidence'
   | 'case.decide'
   | 'identity.read_evidence'
@@ -118,13 +184,16 @@ export interface ProtectedActionSpec {
 }
 
 export const PROTECTED_ACTIONS: Readonly<Record<ProtectedAction, ProtectedActionSpec>> = {
-  'account.enforce.restrict': { permission: 'case.decide.restriction', requiredClearance: 'restricted', caseRequired: true, moderatorRequired: true },
-  'account.enforce.suspend': { permission: 'case.decide.suspension', requiredClearance: 'restricted', caseRequired: true, moderatorRequired: true },
-  'account.enforce.ban': { permission: 'case.decide.ban', requiredClearance: 'restricted', caseRequired: true, moderatorRequired: true },
-  'account.enforce.lift_ban': { permission: 'case.decide.lift_ban', requiredClearance: 'restricted', caseRequired: true, moderatorRequired: true },
-  'case.open': { permission: 'case.open', requiredClearance: 'restricted', caseRequired: false, moderatorRequired: true },
-  'case.read_evidence': { permission: 'case.evidence.read', requiredClearance: 'restricted', caseRequired: true, moderatorRequired: false },
-  'case.decide': { permission: 'case.decide.ban', requiredClearance: 'restricted', caseRequired: true, moderatorRequired: true },
+  'account.enforce.restrict': { permission: 'case.decide.restriction', requiredClearance: 'sensitive', caseRequired: true, moderatorRequired: true },
+  'account.enforce.suspend': { permission: 'case.decide.suspension', requiredClearance: 'sensitive', caseRequired: true, moderatorRequired: true },
+  'account.enforce.ban': { permission: 'case.decide.ban', requiredClearance: 'sensitive', caseRequired: true, moderatorRequired: true },
+  'account.enforce.lift_ban': { permission: 'case.decide.lift_ban', requiredClearance: 'sensitive', caseRequired: true, moderatorRequired: true },
+  'case.open': { permission: 'case.open', requiredClearance: 'sensitive', caseRequired: false, moderatorRequired: true },
+  // Seeing the queue is not the authority to act on a case, and it is the one
+  // gate that needs neither: a moderator with nothing assigned still reads it.
+  'case.read': { permission: 'case.read', requiredClearance: 'sensitive', caseRequired: false, moderatorRequired: false },
+  'case.read_evidence': { permission: 'case.evidence.read', requiredClearance: 'sensitive', caseRequired: true, moderatorRequired: false },
+  'case.decide': { permission: 'case.decide.ban', requiredClearance: 'sensitive', caseRequired: true, moderatorRequired: true },
   'identity.read_evidence': { permission: 'identity.evidence.read', requiredClearance: 'sensitive', caseRequired: false, moderatorRequired: false },
   'media.read_any': { permission: 'media.read.reported', requiredClearance: 'internal', caseRequired: true, moderatorRequired: false },
   'audit.read': { permission: 'audit.read.restricted', requiredClearance: 'restricted', caseRequired: false, moderatorRequired: false },

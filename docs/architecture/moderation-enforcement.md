@@ -88,7 +88,7 @@ from `submitted` — the table has no such edge, and that is the point.
 | `subjectId` | Whose behaviour is reported |
 | `reason` | The taxonomy below; the category alone is never the action |
 | `statement` | Free text, ≤ 2000 chars; **mandatory** for `other` (≥ 20 chars) |
-| `relationship` | A frozen `RelationshipSnapshot`: status, conversation, message range |
+| `relationship` | A frozen `RelationshipSnapshot`: status, conversation, message range, and the match the report came from. The match id is not evidence and is never published; it exists so a pairing token can be keyed over it (below) |
 | `capturedEvidence` | Frozen at submission, never re-derived |
 | `state`, `mergedCaseId` | Lifecycle |
 
@@ -137,6 +137,62 @@ invalidate a report or a case built on it. Tested in
 Reporting is also always available: every account state in the shared kernel
 grants the `report` capability, including `banned`, because a banned user with a
 genuine safety concern is exactly the person who must still reach a human.
+
+### Why the pairing token is a second event
+
+Submitting a report also publishes `moderation.report_pairing` at **`user`**,
+carrying `{ reportId, pairingToken }` and nothing else. It is the second half
+of §6's arrangement — two events over one fact, split by audience — applied to
+a fact nobody may see.
+
+The reason it exists is the strongest behavioural signal in the safety engine.
+Unmatch-then-report against the same account is not a statistical coincidence,
+and the detector that reads it needs to know that an unmatch and a report
+describe the *same pair*. The report record could not supply that for two
+independent reasons: it is `restricted`, and its payload named no match, no
+conversation and no counterparty. A clearance can be widened by a decision;
+missing data cannot.
+
+The fix is deliberately **not** a wider clearance. Giving the safety layer
+`restricted` would mean a detector can read who reported whom — the exact fact
+`restricted` exists to withhold — and it would make every future detector author
+a potential privacy leak. Instead:
+
+- The token is an HMAC-SHA256 over the report id, the match id and the reported
+  account, under a **per-deployment secret** (`ContextOptions.pairingKey`).
+  Length-prefixed, so two triples that concatenate to the same bytes cannot
+  collide.
+- Nothing maps a token back to a match, a report or an account. The module
+  exports `pairingToken` and `createPairingMatcher` and nothing else, and a test
+  asserts that surface.
+- The secret is per deployment, so the same report about the same match produces
+  a different token in two installations and a token copied between them joins
+  nothing.
+- `reportId` is inside the hash, so a subject reported repeatedly on one match
+  does not accumulate one stable identifier. Each token answers one question
+  about one pair.
+- The envelope's `actorId` is `system`, never the reporter, and the payload
+  carries no match and no conversation. The restricted record is unchanged.
+
+**Where the token is not.** Not on `moderation.report_submitted`, not in the
+audit log, not in any `DomainError` this domain returns. A join key on a durable
+record is a join key forever, and the only place that needs it is the one place
+it is. Each of those is asserted in `test/pairing.test.ts` by driving the real
+submission path and searching every published envelope, the audit log, the
+returned aggregate and each rejection.
+
+**What it still leaks.** A token is stable for a given (report, match, subject)
+triple, so a holder of many tokens and a small enough user population can still
+correlate, and the secret holder can test a candidate match id against a token —
+which is what `createPairingMatcher` does. What the arrangement buys is narrower
+and worth stating precisely: no party learns *who reported whom*. Whether the
+correlation residual is acceptable at a given user base is an open question with
+a number in it, not an argument, and is recorded in `trust-safety.md` §13.
+
+A context with no `pairingKey` publishes no pairing event, and a report whose
+relationship has no match (`never_matched`) publishes none either. Both are
+honest absences: a join with nothing to join on, and a deployment that has not
+chosen a secret.
 
 ## 4. The case lifecycle
 

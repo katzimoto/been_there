@@ -1,15 +1,8 @@
 import { type DomainError, type Err, type Result, type SubjectId, domainError, ok } from '@been-there/core';
+import { type DetectorReliability, ESCALATION_GATE, type EscalationStatus, unaidedScore } from './escalation.js';
 
 /** Every `DomainError` this domain raises carries this name. */
 export const TRUST_SAFETY_DOMAIN = 'trust-safety';
-
-/**
- * How much a detector is trusted *a priori*, before any evidence is seen.
- *
- * Reliability discounts the score in the policy layer; a `low` detector can
- * still accumulate risk over time, it just cannot do it in one observation.
- */
-export type DetectorReliability = 'low' | 'medium' | 'high';
 
 /** What kind of behaviour the signal describes. Used for friction selection. */
 export type SignalCategory =
@@ -117,6 +110,12 @@ export interface SignalAuthor {
   readonly detector: string;
   readonly reliability: DetectorReliability;
   readonly category: SignalCategory;
+  /**
+   * Whether this detector may move a subject on its own evidence. Required
+   * rather than defaulted: the whole point of the policy is that a detector
+   * chooses, and a detector added without choosing does not compile.
+   */
+  readonly escalation: EscalationStatus;
 }
 
 /**
@@ -131,7 +130,8 @@ export interface Signal {
   readonly detector: string;
   readonly reliability: DetectorReliability;
   readonly category: SignalCategory;
-  /** The account whose risk may move because of this signal. */
+  /** Copied from the author. The policy layer reads this and only this. */
+  readonly escalation: EscalationStatus;
   readonly subjectId: SubjectId;
   /** Whose behaviour it is. Equal to `subjectId` except for `report_against`. */
   readonly actorId: SubjectId;
@@ -166,9 +166,35 @@ function attributionIsValid(kind: BehaviourKind, subjectId: SubjectId, actorId: 
 }
 
 /**
+ * A `self_escalating` declaration the evidence cannot support is refused here,
+ * at the only place a signal comes into existence. The alternative is a
+ * detector that declares the strong status and never fires, which is
+ * indistinguishable from a detector that is simply broken; an error is not.
+ * The same check is the reason `self_escalating` means what it says: the
+ * declaration and the arithmetic cannot disagree, because the arithmetic is
+ * what the declaration is checked against.
+ */
+function checkEscalationDeclaration(input: SignalInput, author: SignalAuthor): Err<DomainError> | null {
+  if (author.escalation !== 'self_escalating') {
+    return null;
+  }
+  const unaided = unaidedScore(input.weight, author.reliability);
+  if (unaided < ESCALATION_GATE) {
+    return domainError('validation_failed', TRUST_SAFETY_DOMAIN, 'a self_escalating detector must clear the escalation gate unaided; declare it corroboration_only', {
+      detector: author.detector,
+      escalation: author.escalation,
+      unaided: unaided,
+      gate: ESCALATION_GATE,
+    });
+  }
+  return null;
+}
+
+/**
  * The only constructor. Bounded weight, closed fact vocabulary, correct
- * attribution and a named author are all checked here, so a malformed signal
- * cannot reach the policy layer even from a JavaScript caller.
+ * attribution, a named author and a declaration the evidence supports are all
+ * checked here, so a malformed signal cannot reach the policy layer even from a
+ * JavaScript caller.
  */
 export function createSignal(input: SignalInput, author: SignalAuthor): Result<Signal, DomainError> {
   if (!DETECTOR_NAME.test(author.detector)) {
@@ -197,6 +223,10 @@ export function createSignal(input: SignalInput, author: SignalAuthor): Result<S
       kind: input.behaviour.kind,
     });
   }
+  const declarationError = checkEscalationDeclaration(input, author);
+  if (declarationError !== null) {
+    return declarationError;
+  }
   const facts = input.facts ?? {};
   const factError = validateFacts(facts);
   if (factError !== null) {
@@ -206,6 +236,7 @@ export function createSignal(input: SignalInput, author: SignalAuthor): Result<S
     detector: author.detector,
     reliability: author.reliability,
     category: author.category,
+    escalation: author.escalation,
     subjectId: input.subjectId,
     actorId: input.actorId,
     behaviour: input.behaviour,

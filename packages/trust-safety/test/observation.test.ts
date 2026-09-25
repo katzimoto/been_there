@@ -19,6 +19,7 @@ import { NOW, at, errorCode, subject } from './support.js';
 interface EventOverrides {
   readonly type?: string;
   readonly occurredAt?: Date;
+  readonly actorId?: ActorId;
   readonly subjectId?: SubjectId;
   readonly sensitivity?: DataSensitivity;
   readonly payload?: Readonly<Record<string, unknown>>;
@@ -138,6 +139,92 @@ describe('reduced on arrival', () => {
     expect(
       reduced(delivered({ type: 'communication.conversation_state_changed', payload: {} })),
     ).toBeNull();
+  });
+});
+
+/**
+ * The pairing token (issue #45). The join exists, and the record behind it does
+ * not: everything asserted here is about how little a detector can be given.
+ */
+describe('the pairing event', () => {
+  const pairingPayload = {
+    reportId: 'rep-1',
+    pairingToken: '0ab1b8c05074e5e31fd24e25055127be81cc6e73b781ce025a018ac3aee541a4',
+  };
+
+  it('reduces to the token, the report and the account it is about', () => {
+    const observation = reduced(
+      delivered({
+        type: 'moderation.report_pairing',
+        sensitivity: 'user',
+        // `system`, because the envelope must not name who reported.
+        actorId: castId<'ActorId'>('system'),
+        subjectId: subject('u-reported'),
+        payload: pairingPayload,
+      }),
+    );
+
+    expect(observation).toEqual({
+      kind: 'moderation.report_pairing',
+      occurredAt: at(0, 1),
+      actorId: subject('u-reported'),
+      subjectId: subject('u-reported'),
+      entityId: 'rep-1',
+      pairingToken: pairingPayload.pairingToken,
+    });
+    // No counterparty, so nothing a detector can read names the other account.
+    expect(observation?.counterpartyId).toBeUndefined();
+  });
+
+  it('is refused at every clearance above the one it is published at', () => {
+    for (const sensitivity of ['sensitive', 'restricted'] as const) {
+      const refused = toObservation(
+        delivered({
+          type: 'moderation.report_pairing',
+          sensitivity,
+          subjectId: subject('u-reported'),
+          payload: pairingPayload,
+        }),
+        NOW,
+      );
+
+      expect(errorCode(refused), sensitivity).toBe('permission_denied');
+    }
+  });
+
+  it('refuses a pairing event that lost its token', () => {
+    const refused = toObservation(
+      delivered({
+        type: 'moderation.report_pairing',
+        sensitivity: 'user',
+        subjectId: subject('u-reported'),
+        payload: { reportId: 'rep-1' },
+      }),
+      NOW,
+    );
+
+    expect(errorCode(refused)).toBe('validation_failed');
+    expect(refused.ok ? null : refused.error.details).toMatchObject({
+      field: 'payload:pairingToken',
+    });
+  });
+
+  it('cannot smuggle a token in on the restricted record', () => {
+    // A producer that put the join on the record instead of on its own event
+    // would be refused for the reason it always was — the clearance — and not
+    // because the payload was read and judged. The refusal happens first.
+    const refused = toObservation(
+      delivered({
+        type: 'moderation.report_submitted',
+        sensitivity: 'restricted',
+        subjectId: subject('u-reported'),
+        payload: { reason: 'harassment', anonymous: false, ...pairingPayload },
+      }),
+      NOW,
+    );
+
+    expect(errorCode(refused)).toBe('permission_denied');
+    expect(JSON.stringify(refused)).not.toContain(pairingPayload.pairingToken);
   });
 });
 

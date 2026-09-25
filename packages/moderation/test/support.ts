@@ -147,6 +147,9 @@ export function unmatchedRelationship(): RelationshipSnapshot {
     capturedAt: new Date('2026-01-04T22:00:00.000Z'),
     conversationId: CONVERSATION,
     messageRange: { from: 'msg-1', to: 'msg-3' },
+    // The join the safety layer needs, and nothing more. Not evidence, not
+    // published: the only thing built from it is a token nothing can read back.
+    matchId: 'match-1',
   };
 }
 

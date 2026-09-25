@@ -47,10 +47,41 @@ export interface Route {
   /** Literal segments, or `:name` for a captured one. */
   readonly pattern: readonly string[];
   readonly handle: RouteHandler;
+  /**
+   * Reached without a session. Sign-up, sign-in and recovery are the three
+   * routes a caller cannot present a session to, because holding one is the
+   * thing they are trying to get, or to get back.
+   *
+   * It is a property of the route rather than something a request can claim, so
+   * no client can opt itself out of authentication: the only way to reach a
+   * protected handler without a session is for that handler to be declared
+   * public in this table, which is a reviewed line rather than a header.
+   */
+  readonly public: boolean;
+}
+
+function routeOf(method: string, pattern: string, handle: RouteHandler, isPublic: boolean): Route {
+  return {
+    method,
+    pattern: pattern.split('/').filter((segment) => segment.length > 0),
+    handle,
+    public: isPublic,
+  };
 }
 
 export function route(method: string, pattern: string, handle: RouteHandler): Route {
-  return { method, pattern: pattern.split('/').filter((segment) => segment.length > 0), handle };
+  return routeOf(method, pattern, handle, false);
+}
+
+/**
+ * A route reached without a session.
+ *
+ * Separate from `route` rather than a fourth argument, because "this endpoint is
+ * deliberately unauthenticated" is the fact a reviewer needs to see at the call
+ * site and an optional boolean is the fact they will not.
+ */
+export function publicRoute(method: string, pattern: string, handle: RouteHandler): Route {
+  return routeOf(method, pattern, handle, true);
 }
 
 export type RouteMatch =

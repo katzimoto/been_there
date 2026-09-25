@@ -18,9 +18,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { createStores, createTransaction } from '@been-there/database';
-import type { Stores } from '@been-there/contracts';
 import type { Principal, Role } from '@been-there/platform';
 import { type DomainError, type Result, type UserId, castId, domainError, ok } from '@been-there/core';
+import { type Stores, type Transaction } from '@been-there/contracts';
 import { type ActorResolver, type RequestActor, type ServiceDependencies, serviceRoutes, startService } from '@been-there/service';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -65,6 +65,13 @@ export interface Harness {
   readonly url: string;
   readonly stores: Stores;
   readonly pool: pg.Pool;
+  /**
+   * The service's own transaction runner, exposed so a suite can read the
+   * records a request wrote — the audit trail in particular is only observable
+   * through a store method, and a property that is only true in the response
+   * body is not the property that matters.
+   */
+  readonly transaction: Transaction;
   close(): Promise<void>;
 }
 
@@ -94,7 +101,20 @@ export function member(token: string): Caller {
  * a convenience, and the suite would be wrong to pretend otherwise.
  */
 export function moderator(token: string, automated = false): Caller {
-  return { token, userId: null, role: 'senior_moderator', automated };
+  return staff(token, 'senior_moderator', automated);
+}
+
+/**
+ * A staff caller in a named role.
+ *
+ * The role is the whole point of the workspace suite: the properties there are
+ * about the difference between `moderator` and `senior_moderator`, and a
+ * harness that could only mint the senior one would make every one of them
+ * vacuous — a refusal would be indistinguishable from a refusal for the wrong
+ * reason.
+ */
+export function staff(token: string, role: Role, automated = false): Caller {
+  return { token, userId: null, role, automated };
 }
 
 function principalOf(caller: Caller, actorId: string): Principal {
@@ -149,9 +169,10 @@ export async function startHarness(callers: readonly Caller[]): Promise<Harness>
   // request instead of as "the database is not there".
   await pool.query('SELECT 1');
   const stores: Stores = createStores(pool);
+  const transaction = createTransaction(pool);
   const dependencies: ServiceDependencies = {
     stores,
-    transaction: createTransaction(pool),
+    transaction,
     actors: resolverFor(callers),
     now: () => new Date(),
   };
@@ -160,6 +181,7 @@ export async function startHarness(callers: readonly Caller[]): Promise<Harness>
     url: running.url,
     stores,
     pool,
+    transaction,
     close: async () => {
       await running.close();
       await pool.end();

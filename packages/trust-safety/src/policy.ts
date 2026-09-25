@@ -8,6 +8,7 @@ import {
   riskMachine,
 } from '@been-there/core';
 import type { Corroboration } from './correlation.js';
+import { unaidedScore } from './escalation.js';
 import {
   FRICTION_KINDS,
   REVERSIBLE_FRICTION,
@@ -15,7 +16,7 @@ import {
   proposeFriction,
 } from './friction.js';
 import type { ReviewCandidate, ReviewTarget } from './review.js';
-import { type DetectorReliability, type Signal, TRUST_SAFETY_DOMAIN } from './signal.js';
+import { type Signal, TRUST_SAFETY_DOMAIN } from './signal.js';
 import { addHours, daysBetween } from './time.js';
 
 export const RISK_RANK: Readonly<Record<RiskState, number>> = {
@@ -23,17 +24,6 @@ export const RISK_RANK: Readonly<Record<RiskState, number>> = {
   elevated: 1,
   high: 2,
   critical: 3,
-};
-
-/**
- * How much a detector's declared weight counts for. A `low` reliability detector
- * is not silenced, it is discounted — over time it can still carry a subject
- * upward, it just cannot do it in one observation.
- */
-export const RELIABILITY_DISCOUNT: Readonly<Record<DetectorReliability, number>> = {
-  low: 0.7,
-  medium: 0.85,
-  high: 1,
 };
 
 /** Each repeat of the same detector on the same behaviour adds this much. */
@@ -61,6 +51,7 @@ export const CORROBORATION_FAST_PATH_SCORE = 0.7;
 export type RiskDecisionReason =
   | 'escalated_by_signal'
   | 'escalated_by_corroboration'
+  | 'corroboration_required'
   | 'below_threshold'
   | 'already_critical'
   | 'report_not_risk_bearing'
@@ -77,7 +68,11 @@ export interface PolicyInput {
 export interface PolicyDecision {
   readonly next: RiskState;
   readonly changed: boolean;
-  /** The shared machine's event, or `null` when no event was legal. */
+  /**
+   * The shared machine's event, or `null` when the policy asked it nothing: the
+   * state is already `critical`, or this signal's own declaration forbids it
+   * from moving a subject without a second detector.
+   */
   readonly event: RiskEvent | null;
   readonly effectiveScore: number;
   readonly reason: RiskDecisionReason;
@@ -94,7 +89,7 @@ export interface PolicyDecision {
 
 /** The weighted evidence, before the shared machine is asked anything. */
 function effectiveScoreOf(signal: Signal, corroboration: Corroboration): number {
-  const base = signal.weight * RELIABILITY_DISCOUNT[signal.reliability];
+  const base = unaidedScore(signal.weight, signal.reliability);
   const repeatMultiplier = Math.min(
     1 + corroboration.repetitions * REPEAT_STEP,
     REPEAT_MULTIPLIER_CAP,
@@ -103,6 +98,27 @@ function effectiveScoreOf(signal: Signal, corroboration: Corroboration): number 
     return Math.min(base * repeatMultiplier, SINGLE_DETECTOR_SCORE_CEILING);
   }
   return Math.min(base * repeatMultiplier * CORROBORATION_MULTIPLIER, 1);
+}
+
+/**
+ * Whether this signal may move a subject on its own evidence.
+ *
+ * A `corroboration_only` detector needs a second, *independent* detector, and
+ * repetition is deliberately not one: six repeats of one detector is one
+ * detector, and letting a detector supply its own corroboration is how a
+ * miscalibrated detector becomes an attack (`corroborate` counts distinct
+ * names, so this predicate cannot be satisfied by volume). A `self_escalating`
+ * detector answers for its own evidence — and `createSignal` has already
+ * refused any that could not clear the gate unaided, so this is not a claim
+ * the policy takes on trust.
+ *
+ * The rule lives here rather than in the score because the score is a number a
+ * moderator is shown, and it should be the weight of the evidence that was
+ * found. Clamping a 0.85 to 0.4999 to express a refusal would put a fiction in
+ * front of a human; the refusal gets its own reason instead.
+ */
+function mayEscalateAlone(signal: Signal, corroboration: Corroboration): boolean {
+  return signal.escalation === 'self_escalating' || corroboration.independentDetectors >= 2;
 }
 
 /**
@@ -193,7 +209,13 @@ export function assessSignal(input: PolicyInput, now: Date): PolicyDecision {
 
   const effectiveScore = effectiveScoreOf(signal, corroboration);
   const corroborated = corroboration.independentDetectors >= 2;
-  const event = selectEvent(current, effectiveScore, corroborated);
+  const mayAlone = mayEscalateAlone(signal, corroboration);
+  // A signal that may not act alone is not asked about: the machine still owns
+  // every transition it is given, and it is simply never handed one on a single
+  // corroboration-only source. The evidence is unchanged — it is in the ledger,
+  // it counts as a contributing detector, and it is what a second detector will
+  // be corroborated against.
+  const event = mayAlone ? selectEvent(current, effectiveScore, corroborated) : null;
   const moved =
     event === null
       ? undefined
@@ -223,11 +245,13 @@ export function assessSignal(input: PolicyInput, now: Date): PolicyDecision {
   const decisionReason: RiskDecisionReason =
     current === 'critical'
       ? 'already_critical'
-      : escalated
-        ? corroborated
-          ? 'escalated_by_corroboration'
-          : 'escalated_by_signal'
-        : 'below_threshold';
+      : !mayAlone
+        ? 'corroboration_required'
+        : escalated
+          ? corroborated
+            ? 'escalated_by_corroboration'
+            : 'escalated_by_signal'
+          : 'below_threshold';
 
   return {
     next,

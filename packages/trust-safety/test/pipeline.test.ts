@@ -14,6 +14,7 @@ import {
 } from '@been-there/core';
 import {
   EMPTY_LEDGER,
+  SAFETY_DETECTORS,
   type RiskRecord,
   type SafetySeam,
   type Signal,
@@ -99,7 +100,7 @@ function assess(
 describe('from a delivered event to a risk transition', () => {
   it('observes an identity attempt, corroborates it with profile churn, and reaches critical', async () => {
     const bus = new InMemoryEventBus();
-    const seam: SafetySeam = createSafetySeam({ now: () => NOW });
+    const seam: SafetySeam = createSafetySeam({ now: () => NOW, detectors: SAFETY_DETECTORS });
     seam.subscribe(bus);
     const subjectId = subject('u-1');
 
@@ -159,7 +160,7 @@ describe('from a delivered event to a risk transition', () => {
         };
       },
     };
-    const seam = createSafetySeam({ now: () => NOW });
+    const seam = createSafetySeam({ now: () => NOW, detectors: SAFETY_DETECTORS });
     seam.subscribe(unfiltered);
 
     for (const event of [

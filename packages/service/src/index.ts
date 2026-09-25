@@ -6,6 +6,7 @@ import { discoveryRoutes } from './routes/discovery.js';
 import { interactionRoutes } from './routes/interactions.js';
 import { matchRoutes } from './routes/matches.js';
 import { moderationRoutes } from './routes/moderation.js';
+import { moderatorWorkspaceRoutes } from './routes/moderation-workspace.js';
 import { reportRoutes } from './routes/reports.js';
 import { profileRoutes } from './routes/profile.js';
 import { verificationRoutes } from './routes/verification.js';
@@ -40,5 +41,6 @@ export function serviceRoutes(dependencies: ServiceDependencies): readonly Route
     ...conversationRoutes(dependencies),
     ...reportRoutes(dependencies),
     ...moderationRoutes(dependencies),
+    ...moderatorWorkspaceRoutes(dependencies),
   ];
 }
