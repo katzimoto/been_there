@@ -106,13 +106,15 @@ setup: install up migrate seed ## One command: install, start, migrate, seed
 # Not implemented, and it says so. This repository has no schema and no
 # migration runner, so there is nothing to apply; the target checks the database
 # for the truth of that and then refuses. It will not exit 0 while doing nothing.
-migrate: ## Apply schema migrations. Refuses: no schema or migration runner exists yet
-	@sh scripts/dev/schema-gate.sh migrate
+migrate: ## Apply the SQL migrations. Idempotent: a second run is a no-op
+	@node packages/database/scripts/migrate.mjs
 
-# Not implemented for the same reason, and refuses for the same reason. The
-# dataset itself is real and runs today — `make seed-print` loads it in process.
-seed: ## Load the development dataset into the database. Refuses: no schema exists yet
-	@sh scripts/dev/schema-gate.sh seed
+# The seed loads through the domain's own transitions rather than writing state
+# directly, so a seeded `verified` account is one the identity machine actually
+# produced. A seed that wrote the state column would make the whole point of the
+# codebase untrue in the one place a developer goes to look.
+seed: ## Load the development dataset through the domain transitions
+	@node packages/seed/scripts/load.mjs
 
 # --- The development dataset. ---------------------------------------------
 
