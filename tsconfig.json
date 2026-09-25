@@ -6,6 +6,9 @@
       "path": "./packages/core"
     },
     {
+      "path": "./packages/contracts"
+    },
+    {
       "path": "./packages/identity"
     },
     {
@@ -24,10 +27,10 @@
       "path": "./packages/platform"
     },
     {
-      "path": "./packages/integration"
+      "path": "./packages/database"
     },
     {
-      "path": "./packages/contracts"
+      "path": "./packages/integration"
     }
   ]
 }
