@@ -122,7 +122,9 @@ describeIfDb('schema guarantees, against Postgres', () => {
   it('gives a pair at most one match, so two concurrent reciprocal likes converge', async () => {
     const { a, b } = await twoUsers();
     const pairKey = [a, b].sort().join('|');
-    const row = (matchId) => [matchId, pairKey, [a, b], [randomUUID()], ['active', 'active']];
+    // `match_id` is text, because the domain's own derivation is `match:{a}|{b}`
+    // rather than a uuid — uniqueness is carried by `pair_key`.
+    const row = (matchId: string) => [matchId, pairKey, [a, b], [randomUUID()], ['active', 'active']];
     await client.query(
       'INSERT INTO app.matches (match_id, pair_key, participants, like_ids, standings) VALUES ($1,$2,$3,$4,$5)',
       row('match:x|y'),
