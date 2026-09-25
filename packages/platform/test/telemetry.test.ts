@@ -125,7 +125,6 @@ function recordingTracer(): { tracer: Tracer; spans: RecordingSpan[] } {
         status: undefined,
         ended: false,
       });
-      span.recorded.attributes = span.attributes;
       spans.push(span);
       return span as unknown as ReturnType<Tracer['startSpan']>;
     },

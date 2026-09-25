@@ -50,6 +50,9 @@ const MAPPING = [
   { step: 'Check research tool', target: 'research-check' },
   { step: 'Check for stale artefacts', target: 'stale-artifacts' },
   { step: 'Check the lockfile covers every workspace package', target: 'lockfile' },
+  // The schema has to exist before the suites run, or every database test skips
+  // on a missing table and the job is green for the wrong reason.
+  { step: 'Migrate', target: 'migrate' },
 ];
 
 /** The target that must run every mapped target, in CI order. */

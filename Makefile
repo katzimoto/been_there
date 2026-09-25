@@ -61,7 +61,7 @@ docs: ## Check that documentation links resolve
 research-check: ## Check the research tool still runs
 	node scripts/research/search.mjs --help > /dev/null
 
-check: typecheck typecheck-tests test docs research-check stale-artifacts lockfile parity ## Everything CI runs, in CI order
+check: typecheck typecheck-tests test docs research-check stale-artifacts lockfile migrate parity ## Everything CI runs, in CI order
 ci: install check ## The whole CI sequence as one command
 
 lockfile: ## Assert the lockfile covers every workspace package
