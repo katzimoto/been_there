@@ -1,4 +1,5 @@
 import { type DomainError, type Result, type SubjectId, domainError, ok } from '@been-there/core';
+import type { Observation } from './observation.js';
 import {
   TRUST_SAFETY_DOMAIN,
   type Signal,
@@ -8,49 +9,13 @@ import {
 } from './signal.js';
 
 /**
- * Everything a detector is allowed to see, in one closed list.
+ * The detection port, and the only surface a detector runs against.
  *
- * These are the reduced, metadata-only facts that arrive from other domains as
- * events or read-model projections. No message body, no photo, no verification
- * artefact, no exact location, and deliberately **no account state** — a
- * detector that could read `limited`/`suspended`/`banned` would be one refactor
- * away from being an enforcement engine, which is exactly what this package
- * must never be.
+ * `Observation` — what arrived, already reduced to metadata — is declared in
+ * `observation.ts`, because this package's problem for a long time was a
+ * detector input with no producer: the vocabulary and the code that builds it
+ * belong next to each other, and `Observation` is what that code emits.
  */
-export const OBSERVATION_KINDS = [
-  'identity_status_changed',
-  'verification_attempted',
-  'profile_edited',
-  'like_sent',
-  'unmatch_initiated',
-  'match_ended',
-  'conversation_opened',
-  'message_sent',
-  'message_reported',
-  'block_created',
-] as const;
-
-export type ObservationKind = (typeof OBSERVATION_KINDS)[number];
-
-/**
- * One reduced fact from another domain. `count` lets a projection batch
- * repeated events, so a detector never needs the raw event stream and the
- * platform never has to hand over message content to run safety analysis.
- */
-export interface Observation {
-  readonly kind: ObservationKind;
-  readonly occurredAt: Date;
-  /** Who performed the behaviour. */
-  readonly actorId: SubjectId;
-  /** Who it happened to. Differs from `actorId` for `message_reported`. */
-  readonly subjectId: SubjectId;
-  /** The other party, when the observation involves two accounts. */
-  readonly counterpartyId?: SubjectId;
-  /** Opaque id of what it happened to — a match, a conversation. */
-  readonly entityId?: string;
-  /** Batched count when the projection aggregated repeats. */
-  readonly count?: number;
-}
 
 /** What the pipeline asks a detector about: one subject, one moment. */
 export interface DetectorInput {

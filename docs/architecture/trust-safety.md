@@ -30,6 +30,7 @@ moderation decision — the type system enforces it, not a review convention.
 |------|-------------|
 | The `Signal` value object: detector, subject, actor, time, bounded weight, corroboration key, derived facts | Any account state. `AccountState` is moderation's; this package cannot write it even by accident |
 | The detector port: what a detector may observe, and the vetting of what it emits | Detector implementations' internal logic, and the storage they read |
+| The reduction seam (`observation.ts`, `pipeline.ts`): which published events become observations, at what clearance, reduced to which fields | Any domain's internals. The seam reads delivered events at `internal` clearance and nothing else; a field it does not name cannot cross |
 | The signal ledger: bounded retention, corroboration counting, repeat counting | Signal storage technology, retention *policy* (see open questions) |
 | The risk assessment: `Signal` + current state → next state, via the shared `riskMachine` | The risk *state machine* itself — that is `packages/core/src/states/risk.ts` |
 | Escalation scoring: reliability discount, repeat multiplier, single-detector ceiling | Account capabilities, enforcement, appeals |
@@ -45,16 +46,21 @@ the enforcement layer **is not in this package**, and no type in this package ca
 name an account state, a case, or a moderator.
 
 ```
- Identity & Dating & Communication events
- (identity.status_changed, unmatch_initiated, message_reported, …)
+ Published events, delivered on the bus
+ (identity.status_changed, unmatch.performed, communication.message_sent, …)
         │
-        │  reduced on arrival to metadata only:
-        │  { kind, actorId, subjectId, counterpartyId?, entityId?, count? }
+        │  observation.ts — the reduction seam, at `internal` clearance:
+        │  OBSERVATION_REDUCTION names the event, its kind and its fields;
+        │  toObservation() refuses what is above the clearance, and returns
+        │  null for what it has no rule for. The result is metadata only:
+        │  { kind, occurredAt, actorId, subjectId, counterpartyId?, entityId?, count? }
         ▼
  ┌──────────────────────────── DETECTION ─────────────────────────────┐
  │  signal.ts     Signal value object — bounded weight, no content     │
  │  detector.ts   Detector { name, reliability, category, detect() }   │
  │                runDetector() builds the context and vets the output │
+ │  detectors.ts  the implemented catalogue; pipeline.ts subscribes,   │
+ │                reduces, indexes per account and runs them          │
  │  ⇒ Signal[]   evidence about a behaviour, attributed to one detector│
  └────────────────────────────────┬───────────────────────────────────┘
                                   ▼
@@ -80,15 +86,70 @@ return, has no field a decision could hide in, and `createSignal` rejects any
 fact outside the closed `SignalFacts` vocabulary. The word "ban" does not appear
 in this package's types.
 
-Three further checks sit on the seam rather than in a convention, and each of
-them is a test:
+Four further checks sit on a seam rather than in a convention, and each of them
+is a test:
 
+- `toObservation` refuses an event classified above `internal`, so a restricted
+  record cannot be laundered into a detector's input by a transport that hands
+  over everything it is given;
 - `runDetector` may only implicate an account that appears in the detector's own
   input, so a detector bug cannot aim risk at an arbitrary user;
 - `applySignal` refuses a signal whose subject is not the record's subject, so a
   wiring bug cannot write one account's evidence onto another's risk state;
 - `createSignal` enforces the attribution rule in §4, so "who did this" cannot
   drift between the ledger and the policy.
+
+### The reduction seam
+
+`toObservation(event, now)` in `observation.ts` is the only way a published
+event becomes something a detector can see, and its three outcomes are
+deliberately different things:
+
+- **an observation** — the event has a row in `OBSERVATION_REDUCTION`. A row
+  names the kind, why a detector needs the fact, and the exact fields the
+  observation is built from: `actor`, `subject`, and where they exist
+  `counterparty`, `entity`, `count`. A payload field that no row names cannot
+  reach an observation, so a message body, a report statement or a provider
+  label has no path across even if a producer puts one in its payload. What a
+  producer already derived is taken as published — `messagesLastHour` is
+  Communication's own count — rather than re-derived here.
+- **`null`** — the event is within the clearance and no row covers it. Unmapped
+  is not refused: a match created, a block recorded, a profile deleted. Not
+  this domain's business, and nothing is retained about it.
+- **an `Err`** — the event is above `REDUCTION_CLEARANCE`, is dated after the
+  moment it was observed, or has lost a field its row names. Refused loudly,
+  because the alternative is a fact quietly changing tier.
+
+The mapping is a `Record<ReducibleEventType, ReductionRule>` rather than a
+switch, so a new published event either maps — visibly, as a row a reviewer
+reads — or reduces to nothing. `ReducibleEventType` is a hand-written union and
+the table is annotated `Readonly<Record<ReducibleEventType, ReductionRule>>`,
+so a row for a type nobody subscribed to, and a subscribed type with no row, are
+both build failures rather than drift.
+
+`pipeline.ts` is the rest of it. `createSafetySeam` subscribes to a transport at
+`internal`, reduces what arrives, indexes each observation under the two
+accounts it is about (bounded at 256 per account, oldest dropped), and runs the
+catalogue. It holds no risk record, no ledger and no account state: `detect`
+returns evidence, and what evidence is worth is §6's decision. A detector that
+fails is reported in `DetectionRun.failures` rather than thrown, because a cycle
+that stops is a cycle that sees nothing. The seam consumes whatever a transport
+delivers; whether a domain has wired its catalogue to one is that domain's
+business, and the seam does not care — it decides on the event in front of it.
+
+One consequence of where the clearance sits is worth stating twice, because it
+is the answer to "why is the best detector in §5 not implemented": **a report
+is not an observation.** `moderation.report_submitted` is `restricted`, so it is
+refused here, and the two catalogue entries that need it have no producer.
+
+One producer-side assumption is worth naming, because the reduction does not
+paper over it: `unmatch.performed` carries the performer in its payload and
+reaches the other account through the envelope's `subjectId`. A producer that
+puts the performer there as well — or leaves it off — produces an observation
+whose performer and subject are the same account, and
+`interaction.unmatch_by_counterparty` stays silent rather than attributing an
+unmatch to the account that did it. A detector that cannot tell who was
+unmatched does not guess.
 
 **The one thing automation may do to a user** is listed in §7, and every entry
 expires. That is the entire authority surface.
@@ -118,26 +179,58 @@ cannot enter this package: they are `sensitive` elsewhere and have no field here
 Base weights are what the detector declares; the effective score is that weight
 after the reliability discount and the repeat multiplier (§6).
 
-| Detector | Inputs (`ObservationKind`) | Behaviour key | Base weight | Reliability | Known false positives |
-|----------|---------------------------|---------------|-------------|-------------|-----------------------|
-| `interaction.unmatch_report` | `unmatch_initiated` + `message_reported` on the same entity | `unmatch_then_report:<matchId>` | 0.6 | high | A user unmatching and then reporting a genuine scammer; one action producing both events; a match ending during a report flow |
-| `report.coordinated_target` | `message_reported` where actor ≠ subject | `report_against:<subjectId>` | 0.9 | high | **Never risk-bearing** (§8). Its only output is campaign detection, so the cost of its false positives is paid by reviewers, not by users |
-| `velocity.message_burst` | Batched `message_sent` counts | `message_velocity:<conversationId>` | 0.4 | medium | New matches, replies after a long gap, emoji-heavy chat, a user with a very talkative partner |
-| `velocity.like_burst` | Batched `like_sent` counts | `like_velocity:<subjectId>` | 0.35 | low | Power users, a user returning after a break, anyone on a bad phone |
-| `interaction.unmatch_by_counterparty` | `unmatch_initiated` where the subject is the counterparty | `unmatch_by_counterparty:<matchId>` | 0.5 | low | Popularity. Deliberately low: "many people unmatched me" is the *opposite* of evidence about me |
-| `identity.reuse` | `verification_attempted` + `identity_status_changed` | `identity_reuse:<verificationId>` | 0.45 | medium | Re-verification after a long absence, shared family devices, provider misreads, an appeals flow that re-submits |
-| `network.device_cluster` | `*` batched into a coarse `cluster` label | `device_cluster:<clusterId>` | 0.5 | medium | Shared wifi, carrier NAT, a household, an office, a single popular handset model |
-| `dating.profile_churn` | Batched `profile_edited` | `profile_churn:<subjectId>` | 0.3 | low | Someone still filling in their profile; an experiment; an accessibility tool rewriting a bio |
-| `communication.external_links` | `message_sent` metadata carrying a link count, never a URL | `external_link_sharing:<conversationId>` | 0.4 | low | Ordinary link sharing, which in a dating product is often an Instagram handle |
+The input column names `ObservationKind`s, and a kind is spelled the way the
+domain that publishes it spells the event — `unmatch.performed`, not
+`unmatch_initiated`. The vocabulary used to be a parallel snake_case scheme
+that shared no spelling with any catalogue, which is how §5 could describe
+detectors reading inputs that no domain emitted. Status says what exists today:
+**implemented** means the detector is in `detectors.ts` and every kind it reads
+has a row in `OBSERVATION_REDUCTION`.
 
-Two catalogue rules, and they are the reason the table looks the way it does:
+| Detector | Inputs (`ObservationKind`) | Behaviour key | Base weight | Reliability | Status | Known false positives |
+|----------|---------------------------|---------------|-------------|-------------|--------|-----------------------|
+| `interaction.unmatch_report` | `unmatch.performed` + `moderation.report_submitted` on the same entity | `unmatch_then_report:<matchId>` | 0.6 | high | **no producer** — the report leg is `restricted` (§3) | A user unmatching and then reporting a genuine scammer; one action producing both events; a match ending during a report flow |
+| `report.coordinated_target` | `moderation.report_submitted` where actor ≠ subject | `report_against:<subjectId>` | 0.9 | high | **no producer** — `restricted` (§3) | **Never risk-bearing** (§8). Its only output is campaign detection, so the cost of its false positives is paid by reviewers, not by users |
+| `velocity.message_burst` | Batched `communication.message_sent` counts | `message_velocity:<conversationId>` | 0.4 | medium | implemented | New matches, replies after a long gap, emoji-heavy chat, a user with a very talkative partner |
+| `velocity.like_burst` | Batched `like.recorded` counts | `like_velocity:<subjectId>` | 0.35 | low | implemented | Power users, a user returning after a break, anyone on a bad phone |
+| `interaction.unmatch_by_counterparty` | `unmatch.performed` where the subject is the other account | `unmatch_by_counterparty:<matchId>` | 0.5 | low | implemented | Popularity. Deliberately low: "many people unmatched me" is the *opposite* of evidence about me |
+| `identity.reuse` | `verification.attempt.started` + `identity.status_changed` | `identity_reuse:<verificationId>` | 0.45 | medium | implemented | Re-verification after a long absence, shared family devices, provider misreads, an appeals flow that re-submits |
+| `network.device_cluster` | `*` batched into a coarse `cluster` label | `device_cluster:<clusterId>` | 0.5 | medium | **not implemented** — no domain publishes a cluster label; `SignalFacts.cluster` has no producer for it | Shared wifi, carrier NAT, a household, an office, a single popular handset model |
+| `dating.profile_churn` | Batched `profile.state_changed` | `profile_churn:<subjectId>` | 0.3 | low | implemented | Someone still filling in their profile; an experiment; an accessibility tool rewriting a bio |
+| `communication.external_links` | `communication.message_sent` metadata carrying a link count, never a URL | `external_link_sharing:<conversationId>` | 0.4 | low | **not implemented** — Communication publishes no link count, and a URL is not a fact this layer may reduce | Ordinary link sharing, which in a dating product is often an Instagram handle |
 
-- **No detector reads identity evidence.** It reads `identity_status_changed`
-  and `verification_attempted` — that a thing happened, not what the selfie was.
-  A likeness score is `sensitive` and belongs to Identity.
+The window thresholds the implemented detectors use are in `detectors.ts` and
+are the unvalidated guesses §13 admits to: 25 outbound likes in an hour, 30
+messages in an hour in one conversation, 10 profile rewrites in a week, and a
+7-day window between a verification attempt and the state change behind it.
+
+Four catalogue rules, and they are the reason the table looks the way it does:
+
+- **No detector reads identity evidence.** It reads `identity.status_changed`
+  and `verification.attempt.started` — that a thing happened, not what the
+  selfie was. A likeness score is `sensitive` and belongs to Identity, and the
+  reduction drops the state name as well as the reason: the observation is the
+  account id, not `pending`.
 - **Every low-reliability detector is a volume detector.** They fire often, so
   the discount is what stops "frequently observed" from being confused with
   "strongly observed".
+- **A catalogue entry with no producer is a design, not a capability.** Four of
+  the nine have no implemented detector and two of those have no producible
+  input; the mass-reporting defence in §8 and the re-verification friction in
+  §7 are therefore *specified but unreachable* until a producer exists. The
+  corollary is stated in §6's arithmetic: every implemented detector is below
+  `normal`'s 0.5 gate even with the maximum repeat multiplier, so on today's
+  evidence the engine cannot move an account off `normal` at all. Risk rises
+  only where a record is already raised, or when two independent detectors
+  corroborate.
+- **A kind with no consumer is not a hole.** `match.ended`,
+  `communication.conversation_state_changed` and `block.created` are declared,
+  reconciled to the events that would produce them, and left unmapped: no
+  detector reads them, so mapping them would mean storing facts nothing looks
+  at. `communication.conversation_state_changed` in particular is not
+  "conversation opened" — a fixed kind cannot express *which* transition — and
+  nothing in the catalogue wants one. They are the vocabulary's honest margin,
+  not its payload.
 
 ## 6. Escalation, corroboration, decay
 
@@ -199,7 +292,10 @@ first; if either changes, the escalation silently stops escalating.
 ### Worked numbers — one account, one loud detector
 
 `interaction.unmatch_report` at weight 0.6, high reliability, the same match,
-six times in a day:
+six times in a day. The arithmetic below is the policy layer's and stays true
+whatever produces the signal; the detector itself is one of the §5 entries with
+no producer, which is the honest reason this example is a worked number and not
+a trace from the pipeline:
 
 | Signal | Repetitions | Effective score | From | To |
 |--------|-------------|-----------------|------|-----|
@@ -213,12 +309,15 @@ six times in a day:
 Six repeats reach `high` and stop. Not `critical`, however long the campaign
 runs, because one detector is not two. Friction stops growing at `high` too.
 
-**The same account, plus one independent detector** (`network.device_cluster`,
-0.5, medium) arriving while the subject is at `high`: two independent detectors,
+**The same account, plus one independent detector** — in the implemented
+catalogue, `identity.reuse` (0.45, medium) alongside `dating.profile_churn`
+(0.3, low) — arriving while the subject is at `high`: two independent detectors,
 so the machine's corroboration branch is satisfied and the state moves to
 `critical`. That is the moment friction widens to a re-verification request and
 a human is asked to look. The difference between the two rows is not the
-account's behaviour — it is whether a second source saw it.
+account's behaviour — it is whether a second source saw it. This is the path
+`test/pipeline.test.ts` drives end to end, from a published event to the
+transition.
 
 Corroboration is necessary but not sufficient: from `normal`, two independent
 detectors at an effective 0.49 stay at `normal`, because the fast path needs
@@ -304,7 +403,7 @@ victory.
 
 ### One unmatch by many accounts
 
-Popularity looks structurally like attack: dozens of `unmatch_initiated`
+Popularity looks structurally like attack: dozens of `unmatch.performed`
 observations about one subject, in a short window, from unrelated accounts. The
 engine answers it with weight rather than with a special case.
 `interaction.unmatch_by_counterparty` carries weight 0.5 at `low` reliability,
@@ -400,11 +499,32 @@ single subject.
 | **Detergent drift** — a detector slowly starts firing on normal behaviour | Repeats are cheap and capped, so a drifting detector accumulates slowly rather than sharply; the review queue shows the detector names, so drift is visible as a queue full of one detector | Drift is only visible once humans look. The queue is the detector |
 | **Queue flooding** — an attacker raising candidates faster than humans work | Candidates expire (72 h) and ranking favours fresh, severe, corroborated cases; a dispute is discounted so it cannot be used to flood | A determined flood degrades the queue for everyone. Rate of arrival per subject is an open question (§13) |
 | **Attacking the reviewers** — a subject who knows they are queued | They are told nothing about risk, and the only thing they can observe is friction they can dispute and reverse | A user can infer that *something* happened. That is unavoidable and acceptable: friction must be perceptible to be disputable |
-| **Cross-domain leakage** | Events are `internal`; the read-model a client sees has no risk field; the engine has no import of another domain's internals | None known |
+| **Cross-domain leakage** | Events are `internal`; the read-model a client sees has no risk field; the engine has no import of another domain's internals; the reduction refuses anything above `internal` and copies only the fields a rule names | A producer that puts free text in a field the rules *do* name — an `entityId`, say — would cross verbatim. The rules name ids, counts and instants, and a test asserts that a mapped observation's serialised form contains no value from the source payload |
 
 ## 13. Open questions
 
 Recorded rather than guessed, because guessing is worse than writing the gap.
+- **What a report looks like to this layer.** `moderation.report_submitted` is
+  `restricted`, so the seam refuses it and the two detectors that need it
+  (`report.coordinated_target`, `interaction.unmatch_report`) have no producer.
+  Three options, none of them a naming problem: moderation publishes a
+  deliberately coarse `internal` counterpart (a report exists, this reason code,
+  no statement); the safety layer is granted `restricted` clearance — which
+  would make a detector a moderation reader, and §8's mass-reporting rule
+  depends on reports never being risk-bearing, so this is the one to be most
+  careful about; or the two detectors are retracted and campaign detection moves
+  to a moderator tool. Deciding needs the answer to a question this document
+  cannot: how much of a report record may be read by a system that is not
+  allowed to act on it.
+- **Whether risk may ever leave `normal` on today's evidence.** The arithmetic
+  in §6 is unforgiving and, with the implemented catalogue, one-way: every
+  detector is below the 0.5 gate even at the maximum repeat multiplier, so a
+  record moves only where it is already raised, or where two independent
+  detectors corroborate. That is a safe default and a nearly useless engine.
+  Either a high-reliability behaviour observation becomes producible at
+  `internal`, or this stays a corroboration layer over another domain's
+  decisions — and that should be a decision, not an accident of which events
+  happen to be `internal`.
 
 - **Automated decision-making law, per market.** Several regimes require a
   person to be able to contest an automated judgement, and some require

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { DetectorContext, Signal, SignalInput } from '../src/index.js';
+import type { DetectorContext, Observation, Signal, SignalInput } from '../src/index.js';
 
 /**
  * Structural guarantees, asserted at compile time.
@@ -33,6 +33,11 @@ type EnforcementVocabulary =
 type _contextShape = Assert<
   Equals<keyof DetectorContext, 'now' | 'observations' | 'priorSignals'>
 >;
+
+// A reduced observation is ids, an instant and a count. It has no field a
+// moderation handle could hide in, so the seam cannot hand a detector a case,
+// a decision or a reason — whatever a producer puts in its payload.
+type _observationIsClean = Assert<Equals<Forbidden<Observation, EnforcementVocabulary>, true>>;
 
 // Nothing in it can express account standing or an enforcement handle.
 type _contextIsClean = Assert<Equals<Forbidden<DetectorContext, EnforcementVocabulary>, true>>;

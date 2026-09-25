@@ -9,7 +9,7 @@ import {
 } from '../src/index.js';
 
 const observation = (overrides: Partial<Observation> = {}): Observation => ({
-  kind: 'unmatch_initiated',
+  kind: 'unmatch.performed',
   occurredAt: at(0, 1),
   actorId: subject('s-1'),
   subjectId: subject('s-1'),
@@ -23,7 +23,7 @@ const unmatchThenReport: Detector = {
   category: 'interaction',
   detect: (input, context) =>
     context.observations
-      .filter((entry) => entry.kind === 'unmatch_initiated' && entry.actorId === input.subjectId)
+      .filter((entry) => entry.kind === 'unmatch.performed' && entry.actorId === input.subjectId)
       .map((entry) => ({
         subjectId: input.subjectId,
         actorId: input.subjectId,
