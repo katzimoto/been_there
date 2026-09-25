@@ -62,6 +62,8 @@ export type RiskAssessmentRow = {
   readonly lastSignalAt: Date | null;
   readonly contributingDetectors: readonly string[];
   readonly updatedAt: Date;
+  /** What the caller read; handed back to `upsertAssessment` so a stale write is refused. */
+  readonly generation: number;
 };
 
 /**
@@ -278,6 +280,10 @@ export class PgRiskStore implements RiskStore {
    * starts at `normal` by absence. It never covers a failed query: those throw
    * a `StoreError`, so "this user is not risky" and "we could not tell" can
    * never be confused by a caller that forgot to check.
+   *
+   * `generation` comes back because the caller has to hand it to
+   * `upsertAssessment` for the write to be applied. A read that dropped it
+   * would leave every caller guessing, and a guess is last-write-wins.
    */
   async findAssessment(subjectId: SubjectId, tx: Transaction): Promise<RiskAssessmentRow | null> {
     try {
@@ -287,9 +293,11 @@ export class PgRiskStore implements RiskStore {
         readonly state: string;
         readonly last_signal_at: unknown;
         readonly contributing_detectors: unknown;
+        readonly generation: number;
         readonly updated_at: unknown;
       }>(
-        `SELECT subject_id, assessment_id, state, last_signal_at, contributing_detectors, updated_at
+        `SELECT subject_id, assessment_id, state, last_signal_at, contributing_detectors,
+                generation, updated_at
            FROM app.risk_assessments
           WHERE subject_id = $1`,
         [subjectId],
@@ -310,6 +318,7 @@ export class PgRiskStore implements RiskStore {
           row.contributing_detectors,
           'risk_assessments.contributing_detectors',
         ),
+        generation: row.generation,
         updatedAt: asDate(row.updated_at, 'risk_assessments.updated_at'),
       };
     } catch (error) {
@@ -318,26 +327,35 @@ export class PgRiskStore implements RiskStore {
   }
 
   /**
-   * Writes the current risk state, replacing whatever was there.
+   * Writes the current risk state, or refuses if the row moved under the
+   * caller. `expectedGeneration` is what the caller read; `null` means it read
+   * nothing, so this may only insert.
    *
    * The store replaces; it never merges in SQL. Accumulation is the *domain's*
    * job — `applySignal` unions the incoming detector into the list it read off
    * the previous record — so the value written here is the whole of the
-   * domain's decision, derived from the row this call is replacing. Merging in
-   * the database would make the result a function of the row being
-   * overwritten as well as of the decision, which reintroduces exactly the
-   * last-write-wins hazard below and would resurrect a detector the domain
-   * dropped when it discarded a signal.
+   * domain's decision. Merging in the database would make the result a
+   * function of the row being overwritten as well as of the decision, and
+   * would resurrect a detector the domain dropped when it discarded a signal.
    *
    * The array is bound as a Postgres `text[]` parameter rather than a JSON
    * blob, because the domain reads it as a list and a moderator-facing query
    * will want to join against it.
    *
-   * Concurrency: last-write-wins. The row is a fold over the signal log, so a
-   * lost update is a lost fold step rather than lost evidence, and the next
-   * signal recomputes it — but only the next one, and until then the subject
-   * is under-scored, which is the direction that matters in a safety system.
-   * See the report for the `generation` column this needs.
+   * ## Why the generation is checked
+   *
+   * The row is a pure fold over `risk_signals`, so a lost update is a lost fold
+   * *step* rather than lost evidence — the next signal would recompute it. That
+   * makes the hazard recoverable but not acceptable, because until the next
+   * signal the subject is under-scored, and under-scoring is the direction that
+   * hurts. The writer set is also wider than one service: `applyDecay`,
+   * `applyDispute` and `reassessByHuman` all rewrite this row.
+   *
+   * One statement covers both paths, with no branching: the conflict clause's
+   * `WHERE` compares the row's generation against the parameter, and a `NULL`
+   * parameter makes the comparison `NULL`, which is not true — so `null` can
+   * only ever insert, and a row created by a racing writer is left alone for
+   * the caller to re-read and re-fold.
    */
   async upsertAssessment(
     subjectId: SubjectId,
@@ -345,8 +363,9 @@ export class PgRiskStore implements RiskStore {
     state: string,
     lastSignalAt: Date | null,
     detectors: readonly string[],
+    expectedGeneration: number | null,
     tx: Transaction,
-  ): Promise<void> {
+  ): Promise<{ applied: boolean }> {
     if (detectors.some((detector) => typeof detector !== 'string')) {
       throw new StoreError('upsertAssessment: contributing_detectors must be strings');
     }
@@ -354,7 +373,7 @@ export class PgRiskStore implements RiskStore {
       throw new StoreError('upsertAssessment: lastSignalAt is not a valid timestamp');
     }
     try {
-      await clientOf(tx).query(
+      const result = await clientOf(tx).query(
         `INSERT INTO app.risk_assessments
            (subject_id, assessment_id, state, last_signal_at, contributing_detectors, updated_at)
          VALUES ($1, $2, $3, $4, $5, now())
@@ -363,9 +382,12 @@ export class PgRiskStore implements RiskStore {
                 state = EXCLUDED.state,
                 last_signal_at = EXCLUDED.last_signal_at,
                 contributing_detectors = EXCLUDED.contributing_detectors,
-                updated_at = now()`,
-        [subjectId, assessmentId, state, lastSignalAt, [...detectors]],
+                generation = app.risk_assessments.generation + 1,
+                updated_at = now()
+          WHERE app.risk_assessments.generation = $6`,
+        [subjectId, assessmentId, state, lastSignalAt, [...detectors], expectedGeneration],
       );
+      return { applied: result.rowCount === 1 };
     } catch (error) {
       throw toStoreError('upsertAssessment', error);
     }

@@ -58,8 +58,16 @@ export interface IdentityRecordRow {
 }
 
 export interface IdentityStore {
+  /**
+   * Creates the row. This is the one write with no generation check, and the
+   * port does not pretend otherwise: a store cannot tell a state the machine
+   * produced from one a caller hand-wrote, and adding a state list here would
+   * be a second definition of the six states sitting next to the CHECK
+   * constraint. The gate belongs in the service that calls this. Until it is
+   * enforced there, this is a path by which a caller could write `verified`,
+   * and the port says so rather than claiming a guarantee it does not provide.
+   */
   insert(row: IdentityRecordRow, tx: Transaction): Promise<void>;
-  find(userId: UserId, tx: Transaction): Promise<IdentityRecordRow | null>;
   /**
    * Write-through of a state the identity machine produced. The generation is
    * part of the row so a stale write is detectable rather than silent.

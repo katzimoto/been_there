@@ -398,4 +398,28 @@ describeIfDb('ModerationStore, against Postgres', () => {
     expect(await run((tx) => store.findCase(caseId, tx))).toBeNull();
     expect(await auditRowsFor(entityIdOf(entry))).toHaveLength(0);
   });
+
+  it('rolls back a nested composition as one unit, because the inner write rides the same connection', async () => {
+    const subjectId = await aSubject();
+    const caseId = aCaseId();
+    const entry = anEntry(subjectId, { dedupeKey: `decision.recorded:${aCaseId()}` });
+
+    // A service method composes several stores into one request, so the inner
+    // `tx.run` must join the outer transaction rather than open a second
+    // connection. If it opened one, the audit row below would commit on that
+    // other connection and outlive the rollback — the appeal record describing
+    // a case that does not exist, which is the one failure this port exists to
+    // make impossible.
+    const failure = await captureFailure(() =>
+      transaction.run(async (tx) => {
+        await store.insertCase(aCase(subjectId, { caseId }), tx);
+        await tx.run(async (inner) => store.appendAudit(entry, inner));
+        throw new StoreError('the enforcement that followed failed');
+      }),
+    );
+
+    expect(failure).toBeInstanceOf(StoreError);
+    expect(await run((tx) => store.findCase(caseId, tx))).toBeNull();
+    expect(await auditRowsFor(entityIdOf(entry))).toHaveLength(0);
+  });
 });

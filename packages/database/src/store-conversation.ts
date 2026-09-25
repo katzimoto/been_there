@@ -16,64 +16,44 @@
  * `message_id` is the arbiter and the store turns a collision into
  * `{created: false}`; a duplicate is a fact the service handles, not a fault.
  *
- * **Reads are scoped to a participant.** `find` and `findMessages` take the
- * reader and check participation in SQL. A caller that guesses a conversation
- * id gets `null` — the same answer as an id that does not exist, so the read is
- * not an existence oracle either.
+ * **Reads are scoped to a participant.** `find`, `findByMatch` and
+ * `findMessages` all take the reader and check participation in SQL. A caller
+ * that guesses a conversation id — or constructs a match id, which is now
+ * `match:{a}|{b}` and derivable from two user ids — gets `null`, the same
+ * answer as an id that does not exist, so a read is not an existence oracle.
  */
 import type { QueryResultRow } from 'pg';
-import { StoreError } from '@been-there/contracts';
-import type { ConversationRow, MessageRow, Page, PageResult, Transaction } from '@been-there/contracts';
+import { ConversationStoreError, StoreError } from '@been-there/contracts';
+import type {
+  ConversationConflictReason,
+  ConversationRow,
+  ConversationStore,
+  MessageRow,
+  Page,
+  PageResult,
+  Transaction,
+} from '@been-there/contracts';
 import { castId } from '@been-there/core';
 import type { ConversationId, MatchId, MessageId, UserId } from '@been-there/core';
 import { isRetryable } from './errors.js';
 import { clientOf } from './transaction.js';
 
-/** Why a conversation could not be created. A conflict, distinct from a fault. */
-export type ConversationConflict =
-  | 'conversation_id_taken'
-  | 'match_already_has_conversation'
-  | 'match_does_not_exist';
-
-export class ConversationConflictError extends StoreError {
-  readonly reason: ConversationConflict;
-
-  constructor(reason: ConversationConflict, cause: unknown) {
-    super(conflictMessage(reason), { retryable: false, cause });
-    this.name = 'ConversationConflictError';
-    this.reason = reason;
-  }
-}
-
-function conflictMessage(reason: ConversationConflict): string {
-  switch (reason) {
-    case 'conversation_id_taken':
-      return 'conversation id is already in use by another conversation';
-    case 'match_already_has_conversation':
-      return 'this match already has a conversation; one match opens exactly one conversation';
-    case 'match_does_not_exist':
-      return 'no such match, so there is nothing to open a conversation for';
-  }
-}
-
 const MIN_BODY = 1;
 const MAX_BODY = 4000;
 
 /**
- * A body the schema will refuse. It is a validation failure the caller can act
- * on — a message that was never sent — and it must not be reported as an
- * outage, so it never arrives as a retryable `StoreError` from a CHECK.
+ * The refusal the port names: a body the schema would refuse is a validation
+ * failure the caller can act on — a message that was never sent — and it must
+ * not be reported as an outage. It is thrown before the statement rather than
+ * caught from the CHECK, because a caught unique/check violation leaves the
+ * caller's transaction aborted and forces a replay of the whole unit of work
+ * to learn that nothing was wrong but their input.
  */
-export class InvalidMessageBodyError extends StoreError {
-  readonly length: number;
-
-  constructor(length: number) {
-    super(`message body must be ${MIN_BODY} to ${MAX_BODY} characters; received ${length}`, {
-      retryable: false,
-    });
-    this.name = 'InvalidMessageBodyError';
-    this.length = length;
-  }
+function refuseBody(length: number): ConversationStoreError {
+  return new ConversationStoreError(
+    'message_body_out_of_range',
+    `message body must be ${MIN_BODY} to ${MAX_BODY} characters; received ${length}`,
+  );
 }
 
 /**
@@ -117,6 +97,16 @@ function readTimestamp(value: unknown, column: string): Date {
   throw malformed(column, `is ${value === null ? 'null' : typeof value}, expected a timestamp`);
 }
 
+/**
+ * A nullable instant. A column that is null is a real, recorded fact — the
+ * conversation has never been in another state — and it is kept as null rather
+ * than turned into an epoch, which would read as "changed at the beginning of
+ * time" to anything that compares the two.
+ */
+function readNullableTimestamp(value: unknown, column: string): Date | null {
+  return value === null || value === undefined ? null : readTimestamp(value, column);
+}
+
 function readParticipants(value: unknown, column: string): readonly [UserId, UserId] {
   if (!Array.isArray(value) || value.length !== 2) {
     throw malformed(column, 'is not a two-element array of user ids');
@@ -135,10 +125,8 @@ function toConversationRow(raw: QueryResultRow): ConversationRow {
     participants: readParticipants(raw['participants'], 'participants'),
     state: readString(raw['state'], 'state'),
     openedAt: readTimestamp(raw['opened_at'], 'opened_at'),
-    lastMessageAt:
-      raw['last_message_at'] === null || raw['last_message_at'] === undefined
-        ? null
-        : readTimestamp(raw['last_message_at'], 'last_message_at'),
+    stateChangedAt: readNullableTimestamp(raw['state_changed_at'], 'state_changed_at'),
+    lastMessageAt: readNullableTimestamp(raw['last_message_at'], 'last_message_at'),
   };
 }
 
@@ -149,6 +137,7 @@ function toMessageRow(raw: QueryResultRow): MessageRow {
     senderId: castId<'UserId'>(readString(raw['sender_id'], 'sender_id')),
     body: readString(raw['body'], 'body'),
     createdAt: readTimestamp(raw['created_at'], 'created_at'),
+    state: 'sent',
   };
 }
 
@@ -191,7 +180,7 @@ async function storeQuery<T>(work: () => Promise<T>): Promise<T> {
 }
 
 const CONVERSATION_COLUMNS =
-  'conversation_id, match_id, participants, state, opened_at, last_message_at';
+  'conversation_id, match_id, participants, state, opened_at, state_changed_at, last_message_at';
 
 const MESSAGE_COLUMNS = 'message_id, conversation_id, sender_id, body, created_at';
 
@@ -202,20 +191,21 @@ const MESSAGE_COLUMNS = 'message_id, conversation_id, sender_id, body, created_a
  * reach around the caller's transaction, and the only defence against that is
  * not having one.
  */
-export class PgConversationStore {
+export class PgConversationStore implements ConversationStore {
   async create(row: ConversationRow, tx: Transaction): Promise<void> {
     const client = clientOf(tx);
     await storeQuery(async () => {
       try {
         await client.query(
-          `INSERT INTO app.conversations (${CONVERSATION_COLUMNS}, state_changed_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $5)`,
+          `INSERT INTO app.conversations (${CONVERSATION_COLUMNS})
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
           [
             row.conversationId,
             row.matchId,
             [...row.participants],
             row.state,
             row.openedAt,
+            row.stateChangedAt,
             row.lastMessageAt,
           ],
         );
@@ -248,14 +238,19 @@ export class PgConversationStore {
     });
   }
 
-  async findByMatch(matchId: MatchId, tx: Transaction): Promise<ConversationRow | null> {
+  /**
+   * Participant-scoped, and this one matters most: a match id is now the
+   * domain's own `match:{a}|{b}`, so anyone who knows two user ids can
+   * construct one. An unscoped lookup here would be a lookup by arithmetic.
+   */
+  async findByMatch(matchId: MatchId, reader: UserId, tx: Transaction): Promise<ConversationRow | null> {
     const client = clientOf(tx);
     return storeQuery(async () => {
       const result = await client.query<QueryResultRow>(
         `SELECT ${CONVERSATION_COLUMNS}
            FROM app.conversations
-          WHERE match_id = $1`,
-        [matchId],
+          WHERE match_id = $1 AND $2 = ANY(participants)`,
+        [matchId, reader],
       );
       const raw = result.rows[0];
       return raw === undefined ? null : toConversationRow(raw);
@@ -321,7 +316,7 @@ export class PgConversationStore {
   async appendMessage(row: MessageRow, tx: Transaction): Promise<{ readonly created: boolean }> {
     const length = bodyLength(row.body);
     if (length < MIN_BODY || length > MAX_BODY) {
-      throw new InvalidMessageBodyError(length);
+      throw refuseBody(length);
     }
     const client = clientOf(tx);
     return storeQuery(async () => {
@@ -403,12 +398,33 @@ function totalOf(row: { total: number } | undefined): number {
 function createConflict(error: unknown): unknown {
   const code = pgField(error, 'code');
   if (code === '23503') {
-    return new ConversationConflictError('match_does_not_exist', error);
+    return conflict('match_does_not_exist', 'no such match, so there is nothing to open a conversation for', error);
   }
   if (code !== '23505') {
     return error;
   }
-  const reason: ConversationConflict =
-    pgField(error, 'constraint') === 'conversations_pkey' ? 'conversation_id_taken' : 'match_already_has_conversation';
-  return new ConversationConflictError(reason, error);
+  // A unique violation on this table is one of exactly two constraints: the
+  // primary key, or the one-conversation-per-match rule the index enforces.
+  // The constraint name is what tells them apart, and a caller that has to
+  // parse a message to learn which rule it hit is a caller with a string
+  // comparison in its error path.
+  return pgField(error, 'constraint') === 'conversations_pkey'
+    ? conflict('conversation_id_taken', 'that conversation id is already in use', error)
+    : conflict(
+        'match_already_has_conversation',
+        'this match already has a conversation; one match opens exactly one conversation',
+        error,
+      );
+}
+
+/**
+ * The port's `ConversationStoreError` carries the closed-vocabulary reason but
+ * takes no cause, so the driver's error is attached here. Without it the
+ * constraint name and the SQLSTATE are lost, and those are what a human needs
+ * when a conflict turns out to be the wrong classification.
+ */
+function conflict(reason: ConversationConflictReason, message: string, cause: unknown): ConversationStoreError {
+  const error = new ConversationStoreError(reason, message);
+  error.cause = cause;
+  return error;
 }

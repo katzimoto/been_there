@@ -30,9 +30,9 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '
 const ENV_FILE = join(REPO_ROOT, '.env');
 if (process.env.DATABASE_URL === undefined && existsSync(ENV_FILE)) {
   for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
-    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
-    if (match !== null && process.env[match[1]] === undefined) {
-      process.env[match[1]] = match[2];
+    const [, name, value] = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line) ?? [];
+    if (name !== undefined && value !== undefined && process.env[name] === undefined) {
+      process.env[name] = value;
     }
   }
 }
@@ -322,6 +322,26 @@ describeIfDb('users and identity stores, against Postgres', () => {
     // of these would still be here.
     expect(await transaction.run((tx) => users.find(user.userId, tx))).toBeNull();
     expect(await transaction.run((tx) => identity.find(user.userId, tx))).toBeNull();
+  });
+
+  it('runs a nested unit of work on the outer transaction, and rolls it back with it', async () => {
+    const user = newUser();
+    // A service method that composes another which uses a store. A nested
+    // `run` that returned without calling the body would leave nothing here
+    // and every caller would look correct.
+    await transaction.run((outer) => outer.run((inner) => users.create(user, inner)));
+    expect(await transaction.run((tx) => users.find(user.userId, tx))).toEqual(user);
+
+    const discarded = newUser();
+    await expect(
+      transaction.run(async (outer) => {
+        await outer.run((inner) => users.create(discarded, inner));
+        throw new Error('the outer unit of work changed its mind');
+      }),
+    ).rejects.toThrow('the outer unit of work changed its mind');
+    // A nested run that opened its own transaction would have committed this
+    // one before the outer work failed.
+    expect(await transaction.run((tx) => users.find(discarded.userId, tx))).toBeNull();
   });
 
   it('refuses to hand back a row whose timestamp did not read back as a Date', async () => {

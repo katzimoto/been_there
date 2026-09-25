@@ -141,3 +141,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS blocks_pair
 ALTER TABLE app.profiles ADD COLUMN IF NOT EXISTS profile_id text;
 CREATE UNIQUE INDEX IF NOT EXISTS profiles_profile_id
   ON app.profiles (profile_id) WHERE profile_id IS NOT NULL;
+
+-- 12. `MessageRow.state` had no column. Every row that can exist today is
+--     `sent`, so a store that hard-codes the constant is correct right now and
+--     wrong the moment delivery receipts or moderation deletion are added — and
+--     it would be wrong silently, because the constant would still typecheck
+--     against the port. The column is cheaper than that lie.
+ALTER TABLE app.messages
+  ADD COLUMN IF NOT EXISTS state text NOT NULL DEFAULT 'sent'
+    CHECK (state IN ('sent', 'delivered', 'read', 'failed', 'deleted'));

@@ -1,12 +1,12 @@
 /**
  * The risk store's promises, proven against a real database.
  *
- * Every test here asserts a property the *port* makes, not a shape the driver
- * happens to return: that a replayed delivery is one signal, that the limit
- * takes the newest rows and hands them back oldest-first, that a rolled-back
- * unit of work leaves nothing, and that a malformed row is loud. A test that
- * inserted a row and read it back would pass against an implementation that
- * ordered by nothing and deduplicated nowhere.
+ * Every test asserts a property the *port* makes, not a shape the driver
+ * happens to return: a replayed delivery is one signal, the limit takes the
+ * newest rows and hands them back oldest-first, a rolled-back unit of work
+ * leaves nothing, and a malformed row is loud. A test that inserted a row and
+ * read it back would pass against an implementation that ordered by nothing
+ * and deduplicated nowhere.
  *
  * Skipped, loudly, when `DATABASE_URL` is unset. A suite that silently passes
  * because it connected to nothing is the worst outcome available.
@@ -65,7 +65,7 @@ describeIfDb('RiskStore, against Postgres', () => {
       id,
       randomUUID(),
     ]);
-    return castId<SubjectId>(id);
+    return castId<'SubjectId'>(id);
   }
 
   function signal(subjectId: SubjectId, overrides: Partial<RiskSignalInput> = {}): RiskSignalInput {
@@ -100,17 +100,37 @@ describeIfDb('RiskStore, against Postgres', () => {
     state: string,
     lastSignalAt: Date | null,
     detectors: readonly string[],
-  ): Promise<void> {
+  ): Promise<{ applied: boolean }> {
+    return write(subjectId, state, lastSignalAt, detectors, null);
+  }
+
+  /**
+   * Writes with an explicit expected generation, which is what a real caller
+   * does: read the row, fold, hand back what it read.
+   */
+  function write(
+    subjectId: SubjectId,
+    state: string,
+    lastSignalAt: Date | null,
+    detectors: readonly string[],
+    expectedGeneration: number | null,
+  ): Promise<{ applied: boolean }> {
     return transaction.run((tx) =>
       store.upsertAssessment(
         subjectId,
-        castId<RiskAssessmentId>(randomUUID()),
+        castId<'RiskAssessmentId'>(randomUUID()),
         state,
         lastSignalAt,
         detectors,
+        expectedGeneration,
         tx,
       ),
     );
+  }
+
+  /** The generation a caller would have read, for the write-back. */
+  async function generationOf(subjectId: SubjectId): Promise<number | null> {
+    return (await assessmentOf(subjectId))?.generation ?? null;
   }
 
   it('treats a redelivered signal as one signal, so a retry cannot escalate a subject', async () => {
@@ -249,7 +269,7 @@ describeIfDb('RiskStore, against Postgres', () => {
 
     // Not merely "no rows": an id that is not a user at all, so a caller can
     // never confuse a missing subject with a missing history.
-    expect(await signalsOf(castId<SubjectId>(randomUUID()))).toEqual([]);
+    expect(await signalsOf(castId<'SubjectId'>(randomUUID()))).toEqual([]);
   });
 
   it('refuses a limit that cannot mean a window', async () => {
@@ -271,10 +291,11 @@ describeIfDb('RiskStore, against Postgres', () => {
         await store.appendSignal(doomed, tx);
         await store.upsertAssessment(
           subject,
-          castId<RiskAssessmentId>(randomUUID()),
+          castId<'RiskAssessmentId'>(randomUUID()),
           'high',
           doomed.occurredAt,
           ['link_velocity'],
+          null,
           tx,
         );
         throw new Error('moderation refused the decision');
@@ -283,6 +304,35 @@ describeIfDb('RiskStore, against Postgres', () => {
 
     expect(await signalsOf(subject)).toEqual([]);
     expect(await assessmentOf(subject)).toBeNull();
+  });
+
+  it('joins a nested unit of work, so an inner run cannot commit past an outer rollback', async () => {
+    const subject = await newSubject();
+    const outerSignal = signal(subject, { behaviour: 'outer' });
+    const innerSignal = signal(subject, { behaviour: 'inner' });
+
+    await expect(
+      transaction.run(async (tx) => {
+        await store.appendSignal(outerSignal, tx);
+        // A service method composing another: the inner run must reach its body
+        // and must share the outer connection, or this writes nothing at all.
+        const innerResult = await tx.run((inner) => store.appendSignal(innerSignal, inner));
+        expect(innerResult).toBeUndefined();
+        throw new Error('outer rolled back');
+      }),
+    ).rejects.toThrow('outer rolled back');
+
+    expect(await signalsOf(subject)).toEqual([]);
+  });
+
+  it('commits a nested unit of work when the outer one commits', async () => {
+    const subject = await newSubject();
+
+    await transaction.run((tx) =>
+      tx.run((inner) => store.appendSignal(signal(subject, { behaviour: 'nested' }), inner)),
+    );
+
+    expect((await signalsOf(subject)).map((row) => row.behaviour)).toEqual(['nested']);
   });
 
   it('refuses to run outside a unit of work rather than on a released connection', async () => {
@@ -312,7 +362,7 @@ describeIfDb('RiskStore, against Postgres', () => {
     const subject = await newSubject();
     expect(await assessmentOf(subject)).toBeNull();
 
-    const assessmentId = castId<RiskAssessmentId>(randomUUID());
+    const assessmentId = castId<'RiskAssessmentId'>(randomUUID());
     const lastSignalAt = new Date('2026-05-05T09:30:00.000Z');
     await transaction.run((tx) =>
       store.upsertAssessment(
@@ -321,6 +371,7 @@ describeIfDb('RiskStore, against Postgres', () => {
         'high',
         lastSignalAt,
         ['link_velocity', 'harassment_language'],
+        null,
         tx,
       ),
     );
@@ -336,16 +387,66 @@ describeIfDb('RiskStore, against Postgres', () => {
 
   it('replaces the detector list on re-assessment, so decayed detectors do not accumulate', async () => {
     const subject = await newSubject();
+    const at = (day: number) => new Date(`2026-05-0${day}T00:00:00.000Z`);
 
-    await assess(subject, 'high', new Date('2026-05-01T00:00:00.000Z'), [
-      'link_velocity',
-      'image_similarity',
-    ]);
-    await assess(subject, 'elevated', new Date('2026-06-01T00:00:00.000Z'), ['link_velocity']);
+    expect(await assess(subject, 'high', at(1), ['link_velocity', 'image_similarity'])).toEqual({
+      applied: true,
+    });
+    expect(await write(subject, 'elevated', at(2), ['link_velocity'], 1)).toEqual({
+      applied: true,
+    });
 
     const found = await assessmentOf(subject);
     expect(found?.state).toBe('elevated');
     expect(found?.contributingDetectors).toEqual(['link_velocity']);
+  });
+
+  it('counts each applied write in the generation, so a stale reader is detectable', async () => {
+    const subject = await newSubject();
+
+    expect(await generationOf(subject)).toBeNull();
+    expect(await assess(subject, 'elevated', null, ['link_velocity'])).toEqual({ applied: true });
+    expect(await generationOf(subject)).toBe(1);
+
+    expect(await write(subject, 'high', null, ['link_velocity', 'harassment_language'], 1)).toEqual(
+      { applied: true },
+    );
+    expect(await generationOf(subject)).toBe(2);
+  });
+
+  it('refuses a write carrying a generation the row has moved past', async () => {
+    const subject = await newSubject();
+    await assess(subject, 'elevated', null, ['link_velocity']);
+
+    // Two writers both read generation 1. The first commits; the second must
+    // learn it lost rather than overwrite an escalation it never saw.
+    const stale = await generationOf(subject);
+    expect(
+      await write(subject, 'critical', null, ['link_velocity', 'image_similarity'], stale),
+    ).toEqual({ applied: true });
+    expect(await write(subject, 'normal', null, [], stale)).toEqual({ applied: false });
+
+    const found = await assessmentOf(subject);
+    expect(found?.state).toBe('critical');
+    expect(found?.contributingDetectors).toEqual(['link_velocity', 'image_similarity']);
+    expect(found?.generation).toBe(2);
+  });
+
+  it('lets a null generation insert but never overwrite, so a first signal cannot clobber a row', async () => {
+    const subject = await newSubject();
+    expect(await assess(subject, 'high', null, ['link_velocity'])).toEqual({ applied: true });
+
+    // A racing writer that read nothing before the row appeared.
+    expect(await assess(subject, 'normal', null, [])).toEqual({ applied: false });
+    expect((await assessmentOf(subject))?.state).toBe('high');
+  });
+
+  it('refuses a generation the row has never reached, rather than treating it as a match', async () => {
+    const subject = await newSubject();
+    await assess(subject, 'elevated', null, ['link_velocity']);
+
+    expect(await write(subject, 'critical', null, [], 99)).toEqual({ applied: false });
+    expect((await assessmentOf(subject))?.state).toBe('elevated');
   });
 
   it('keeps one subject assessment out of another subject row', async () => {
@@ -358,24 +459,19 @@ describeIfDb('RiskStore, against Postgres', () => {
     expect((await assessmentOf(mine))?.state).toBe('high');
   });
 
-  it('stores an empty detector list as an empty list and no signal date as null', async () => {
+  it('stores detector names as a Postgres array, not as an encoded string', async () => {
+    // Names a hand-built array literal or a JSON blob would mangle: a comma, a
+    // quote, a brace and a backslash are all array-syntax characters.
+    const awkward = ['a,b', 'c"d', 'e{f}', 'back\\slash', ' leading space '];
     const subject = await newSubject();
-    await assess(subject, 'normal', null, []);
+    const empty = await newSubject();
+    await assess(subject, 'high', null, awkward);
+    await assess(empty, 'normal', null, []);
 
-    const found = await assessmentOf(subject);
+    expect((await assessmentOf(subject))?.contributingDetectors).toEqual(awkward);
+    const found = await assessmentOf(empty);
     expect(found?.contributingDetectors).toEqual([]);
     expect(found?.lastSignalAt).toBeNull();
-  });
-
-  it('stores detector names as a Postgres array, not as an encoded string', async () => {
-    const subject = await newSubject();
-    // Names a hand-built array literal or a JSON blob would mangle: a comma,
-    // a quote, a brace, and a backslash are all array-syntax characters.
-    const awkward = ['a,b', 'c"d', 'e{f}', 'back\\slash', ' leading space '];
-    await assess(subject, 'high', null, awkward);
-
-    const found = await assessmentOf(subject);
-    expect(found?.contributingDetectors).toEqual(awkward);
   });
 
   it('surfaces a state the risk machine cannot produce as a fault, not a silent no-op', async () => {
@@ -391,7 +487,7 @@ describeIfDb('RiskStore, against Postgres', () => {
   });
 
   it('surfaces a signal for a subject that is not a user, rather than orphaning it', async () => {
-    await expect(append(signal(castId<SubjectId>(randomUUID())))).rejects.toBeInstanceOf(
+    await expect(append(signal(castId<'SubjectId'>(randomUUID())))).rejects.toBeInstanceOf(
       StoreError,
     );
   });

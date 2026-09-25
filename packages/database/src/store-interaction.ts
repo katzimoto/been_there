@@ -54,6 +54,7 @@ export class InteractionConflictError extends StoreError {
 
 type ProfileDbRow = {
   readonly user_id: string;
+  readonly profile_id: string | null;
   readonly state: string;
   readonly content: unknown;
   readonly updated_at: Date;
@@ -331,11 +332,18 @@ export class PostgresInteractionStore implements InteractionStore {
     const client = clientOf(tx);
     await query<ProfileDbRow>(
       client,
-      `INSERT INTO app.profiles (user_id, state, content, updated_at)
-            VALUES ($1, $2, $3::jsonb, $4)
+      `INSERT INTO app.profiles (user_id, profile_id, state, content, updated_at)
+            VALUES ($1, $2, $3, $4::jsonb, $5)
        ON CONFLICT (user_id) DO UPDATE
-              SET state = EXCLUDED.state, content = EXCLUDED.content, updated_at = EXCLUDED.updated_at`,
-      [row.userId, row.state, JSON.stringify(row.content), row.updatedAt],
+              SET profile_id = EXCLUDED.profile_id, state = EXCLUDED.state,
+                  content = EXCLUDED.content, updated_at = EXCLUDED.updated_at`,
+      [
+        row.userId,
+        requiredString({ profileId: row.profileId }, 'profileId', 'upsertProfile'),
+        row.state,
+        JSON.stringify(row.content),
+        row.updatedAt,
+      ],
     );
   }
 
@@ -347,10 +355,10 @@ export class PostgresInteractionStore implements InteractionStore {
       return null;
     }
     return {
-      // The schema keys a profile by its user and has no `profile_id` column,
-      // so the domain's ProfileId has nowhere to live. Reporting the user id
-      // is the honest placeholder until the port and the schema agree.
-      profileId: row.user_id,
+      // `profile_id` is nullable for rows written before the column existed.
+      // Falling back to the user id keeps the port's non-null promise rather
+      // than leaking a null ProfileId into the domain; the next write fills it.
+      profileId: row.profile_id ?? row.user_id,
       userId: row.user_id as UserId,
       state: row.state,
       content: jsonObject(row.content, `profiles.content for user ${row.user_id}`),
@@ -564,7 +572,7 @@ export class PostgresInteractionStore implements InteractionStore {
     const client = clientOf(tx);
     const lifted = await query<BlockDbRow>(
       client,
-      `UPDATE app.blocks SET lifted_at = $3
+      `DELETE FROM app.blocks WHERE TRUE SET lifted_at = $3
         WHERE blocker_id = $1 AND blocked_id = $2 AND lifted_at IS NULL
         RETURNING *`,
       [blocker, blocked, at],

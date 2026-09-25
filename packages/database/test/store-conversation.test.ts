@@ -25,12 +25,8 @@ import type { ConversationId, MatchId, MessageId, UserId } from '@been-there/cor
 import type { ConversationRow, MessageRow, Transaction } from '@been-there/contracts';
 import { pairKey } from '../src/pair-key.js';
 import { createTransaction } from '../src/transaction.js';
-import {
-  ConversationConflictError,
-  InvalidMessageBodyError,
-  PgConversationStore,
-} from '../src/store-conversation.js';
-import { StoreError } from '@been-there/contracts';
+import { PgConversationStore } from '../src/store-conversation.js';
+import { ConversationStoreError, StoreError } from '@been-there/contracts';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const ENV_FILE = join(REPO_ROOT, '.env');
@@ -107,6 +103,7 @@ describeIfDb('ConversationStore, against Postgres', () => {
       participants,
       state: 'active',
       openedAt,
+      stateChangedAt: openedAt,
       lastMessageAt: null,
     };
   }
@@ -124,6 +121,7 @@ describeIfDb('ConversationStore, against Postgres', () => {
       senderId,
       body,
       createdAt,
+      state: 'sent',
     };
   }
 
@@ -169,9 +167,12 @@ describeIfDb('ConversationStore, against Postgres', () => {
 
     // A conflict the caller can act on: distinguishable, and not retryable,
     // because retrying it produces the same answer every time.
-    expect(thrown).toBeInstanceOf(ConversationConflictError);
-    expect((thrown as ConversationConflictError).reason).toBe('match_already_has_conversation');
-    expect((thrown as ConversationConflictError).retryable).toBe(false);
+    expect(thrown).toBeInstanceOf(ConversationStoreError);
+    expect((thrown as ConversationStoreError).reason).toBe('match_already_has_conversation');
+    expect((thrown as ConversationStoreError).retryable).toBe(false);
+    // The driver's error is kept: the classification is a guess until the
+    // constraint name behind it can be read.
+    expect((thrown as ConversationStoreError).cause).toMatchObject({ code: '23505' });
 
     const rows = await client.query<{ conversation_id: string }>(
       'SELECT conversation_id FROM app.conversations WHERE match_id = $1',
@@ -193,8 +194,8 @@ describeIfDb('ConversationStore, against Postgres', () => {
       .then(() => null)
       .catch((error: unknown) => error);
 
-    expect(thrown).toBeInstanceOf(ConversationConflictError);
-    expect((thrown as ConversationConflictError).reason).toBe('conversation_id_taken');
+    expect(thrown).toBeInstanceOf(ConversationStoreError);
+    expect((thrown as ConversationStoreError).reason).toBe('conversation_id_taken');
   });
 
   it('pages messages in a stable order when two share a timestamp', async () => {
@@ -304,11 +305,11 @@ describeIfDb('ConversationStore, against Postgres', () => {
     const empty = aMessage(conversation.conversationId, a, at(2), '');
     const longest = aMessage(conversation.conversationId, a, at(3), 'y'.repeat(4000));
 
-    await expect(transaction.run((tx) => store.appendMessage(tooLong, tx))).rejects.toBeInstanceOf(
-      InvalidMessageBodyError,
-    );
+    await expect(transaction.run((tx) => store.appendMessage(tooLong, tx))).rejects.toMatchObject({
+      reason: 'message_body_out_of_range',
+    });
     await expect(transaction.run((tx) => store.appendMessage(empty, tx))).rejects.toBeInstanceOf(
-      InvalidMessageBodyError,
+      ConversationStoreError,
     );
     // The boundary the CHECK states is the boundary that works, counted the way
     // Postgres counts it: characters, so a body of astral characters is not
