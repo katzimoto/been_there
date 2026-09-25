@@ -43,8 +43,8 @@
 | 14 | `MatchRecord` carries per-party `standings` instead of a single `status` | **partially holds** | The type, the derivations and two end-transitions are right. But **nothing computes the degraded rows** — `deriveMatchStandings` has zero callers and zero tests. See **Major 4**. |
 | 15 | A 21-row notification registry exists; `verification` is a non-suppressible category; blocked-pair suppression is representable | **partially holds** | 21 kinds, `NotificationCategory` derives from them, block suppression and the missing-edge refusal both work, and the "every channel is a subset of the in-app record" invariant is genuinely enforced by an exhaustive test. But see **Major 8** and **Major 9**. |
 | 16 | The §4.2a analytics catalogue holds only events with a producer | **holds** | `CONTENT_BEARING_TYPES` is one name, `communication.message_sent`, which is the name communication actually publishes. Sample rates live in the catalogue. |
-| 17 | B-5 — no producer for the trust-safety `Observation` vocabulary | **still open** | `OBSERVATION_KINDS` has ten entries; nothing in any `src/` constructs an `Observation`. The baseline review's own verdict is accurate. |
-| 18 | B-6 — no counterpart-side messaging check | **still open** | `CommunicationDependencies` is `{match, blocking, senderStanding}`. `SEND_CHECKS` rule 6 reads `dependencies.senderStanding.capabilities` only. A `limited` counterpart can still send. The baseline review's verdict is accurate. |
+| 17 | B-5 — no producer for the trust-safety `Observation` vocabulary | **closed since** | Fixed in [#26](https://github.com/katzimoto/been_there/issues/26). A reduction seam now exists; a restricted event is refused, not dropped. |
+| 18 | B-6 — no counterpart-side messaging check | **closed since** | Fixed in [#26](https://github.com/katzimoto/been_there/issues/26). `peerStanding` is required and is one bit; block still dominates and discloses nothing. |
 
 ### Probe transcripts for the rows that are not clean
 

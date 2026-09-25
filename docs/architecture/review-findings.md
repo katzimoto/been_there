@@ -41,8 +41,8 @@
 > | B-2 a user could demand another user's re-verification | Code. Authority checked first, so a refused caller learns nothing about the target. The refusal is logged and repeats raise an anomaly against the offender. |
 > | B-3 `lift_restriction` required no moderator | Code. One-line guard. |
 > | B-4 a shadowed transition row | Code, twice. Rows reordered, then a test that no machine offers the same event twice from any state. |
-> | B-5 no producer for the observation vocabulary | **Still open.** See below. |
-> | B-6 no counterpart-side messaging check | **Still open.** See below. |
+> | B-5 no producer for the observation vocabulary | **Closed** in [#26](https://github.com/katzimoto/been_there/issues/26). |
+> | B-6 no counterpart-side messaging check | **Closed** in [#26](https://github.com/katzimoto/been_there/issues/26). |
 > | B-7 three packages imported core undeclared | Code, and `check-workspace-lockfile.mjs` now fails on it. |
 > | B-9 nine audit actions threw | Code. All sixteen covered; `append` returns a `Result` instead of throwing. |
 > | B-10 the router dropped every moderation event | Code. A `moderation.` prefix, and an unroutable event is reported rather than discarded. |
@@ -66,24 +66,33 @@
 >> a held photo is not servable. It is now reachable only from an `inconclusive`
 > scan, so an undecidable screening result can never be auto-rejected.
 >
-> ### Still open
+> ### Closed after this document was written
 >
-> Two findings are not fixed, and the review was right about both:
+> Both findings that were left open are now fixed, in [#26](https://github.com/katzimoto/been_there/issues/26).
 >
-> - **B-5** — trust-safety declares ten `ObservationKind`s and no domain emits
->   any of them. Nothing converts a published event into an `Observation`, so the
->   reduction seam ADR 0003 describes has no owner. Until a reduction layer
->   exists, the detectors documented in `trust-safety.md` §5 describe an input no
->   producer supplies.
-> - **B-6** — the restriction spec states the refusal is symmetric, and `canSend`
->   reads only the sender's capabilities. A `limited` user as the *counterparty*
->>   in a thread can still send into it, so the "cannot be probed" argument in
->>   that spec is unimplemented and a client will behave asymmetrically.
+> - **B-5** — trust-safety now reduces. `toObservation` is a pure function over
+>   delivered events at a declared clearance, the mapping is data rather than a
+>   switch, and a restricted event is refused rather than silently dropped. The
+>   parallel snake_case kind names are gone, so an observation and the event it
+>   came from cannot drift apart.
+> - **B-6** — `CommunicationDependencies.peerStanding` is required, and the send
+>   gate evaluates both participants under one rule. The projection is **one
+>   bit**, not a capability set: a capability set would let the transport
+>   distinguish a banned peer from a limited one, which is the profile-
+>   reachability leak arriving through a different door. Read access is
+>   deliberately not symmetric — a restriction removes the ability to message,
+>   not the history, because a restricted user keeps the evidence a case wants.
 >
-> Both are real and neither was cheap to fix correctly: B-5 needs a decision about
-> where the reduction lives, and B-6 needs the counterpart's standing to reach
-> communication as a projection, which is a contract change. They are recorded
-> here rather than quietly dropped.
+> Building the reduction seam surfaced two further defects, tracked as
+> [#44](https://github.com/katzimoto/been_there/issues/44) and
+> [#45](https://github.com/katzimoto/been_there/issues/45):
+>
+> - Four of the five implemented detectors cannot escalate a subject on their
+>   own. The weights, the reliability discounts and the 0.5 gate are each
+>   sensible and were never multiplied out.
+> - `interaction.unmatch_report` — the strongest signal in the catalogue —
+>   cannot see its report leg at all: the event is `restricted` *and* carries
+>   no `matchId`, so the pairing is not derivable even at that clearance.
 
 ## 1. Summary
 
