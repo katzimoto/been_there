@@ -13,9 +13,9 @@
   ],
   "scripts": {
     "build": "tsc --build",
-    "typecheck": "tsc --build --pretty",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "docs": "node scripts/check-doc-links.mjs",
+    "research": "node scripts/research/search.mjs",
+    "check": "npm run typecheck && npm test && npm run docs",
     "check": "npm run typecheck && npm run test",
     "format": "prettier --write \"**/*.{ts,md,json}\""
   },

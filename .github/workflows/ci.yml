@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # The solution build typechecks every package's source through the project
+      # graph. It is the check that catches a package added without being wired
+      # into tsconfig.json, which `tsc -p` on a single package would not.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Typecheck tests
+        run: |
+          for pkg in packages/*/test/tsconfig.json; do
+            echo "::group::$pkg"
+            npx tsc -p "$pkg"
+            echo "::endgroup::"
+          done
+
+      - name: Test
+        run: npm test
+
+      - name: Check documentation links
+        run: node scripts/check-doc-links.mjs
+
+      - name: Check research tool
+        run: node scripts/research/search.mjs --help > /dev/null

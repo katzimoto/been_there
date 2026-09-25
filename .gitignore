@@ -5,3 +5,11 @@ dist/
 .env
 .env.local
 coverage/
+
+# Compiled output must never sit next to the TypeScript it is built from.
+# vitest resolves `../src/index.js` to a real .js file before it reaches the .ts,
+# so a committed artefact silently makes the test suite run stale code.
+packages/*/src/**/*.js
+packages/*/src/**/*.d.ts
+packages/*/src/**/*.js.map
+packages/*/src/**/*.d.ts.map
