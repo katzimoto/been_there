@@ -69,6 +69,21 @@ export interface IdentityStore {
    */
   insert(row: IdentityRecordRow, tx: Transaction): Promise<void>;
   /**
+   * The current state and generation, or `null` for a user who has never
+   * started verification.
+   *
+   * Not optional and not a convenience. `evaluateEligibility` reads the
+   * viewer's and the candidate's identity state, and `recordLike` refuses a
+   * like from anyone who is not `verified` — with no read there is no
+   * standing, both of those rules are dead, and an unverified account becomes
+   * indistinguishable from a verified one. That is the "verified for
+   * everyone" failure the identity machine exists to prevent.
+   *
+   * The generation it returns is also what makes `update` a compare-and-set
+   * rather than an unconditional write.
+   */
+  find(userId: UserId, tx: Transaction): Promise<IdentityRecordRow | null>;
+  /**
    * Write-through of a state the identity machine produced. The generation is
    * part of the row so a stale write is detectable rather than silent.
    */
