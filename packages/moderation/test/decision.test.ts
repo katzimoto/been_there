@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { type AccountState, InMemoryEventBus, capabilitiesFor, isClearedToConsume } from '@been-there/core';
+import { type AccountState, type ActorId, InMemoryEventBus, capabilitiesFor, castId, isClearedToConsume } from '@been-there/core';
 import {
   type AccountStateChangedPayload,
   type Decision,
+  type DecisionCommand,
   type RestrictionAppliedPayload,
   applyDecision,
   closeReportsWithDecision,
@@ -14,6 +15,7 @@ import {
 } from '../src/index.js';
 import {
   CORRELATION,
+  HUMAN_MODERATOR,
   LEAD,
   MODERATOR,
   SUBJECT,
@@ -32,7 +34,8 @@ function command(overrides: Partial<Parameters<typeof applyDecision>[0]> = {}) {
   return {
     decisionId: 'd-1',
     caseId: 'case-1' as never,
-    moderatorId: MODERATOR.actorId,
+    moderatorId: HUMAN_MODERATOR,
+    automated: false,
     subjectId: SUBJECT,
     action: 'suspend' as const,
     rationale: RATIONALE,
@@ -55,6 +58,38 @@ describe('applyDecision — the adapter over the shared account machine', () => 
     expect(rejected(applyDecision(command({ action: 'ban', moderatorId: null }))).code).toBe(
       'validation_failed',
     );
+  });
+
+  it('refuses a command whose caller states it is a machine', () => {
+    // The runtime half of commitment 2, checked on the exported function that
+    // produces the `Decision` an appeal is answered from — not only on the
+    // orchestrator that happens to call it. A service holding a case id and
+    // saying so gets nothing.
+    for (const action of ['warn', 'restrict', 'suspend', 'ban', 'clear'] as const) {
+      const error = rejected(applyDecision(command({ automated: true, action })));
+      expect(error.code).toBe('permission_denied');
+      expect(error.message).toContain('automation never enforces');
+    }
+    expect(succeeded(applyDecision(command({ automated: false }))).action).toBe('suspend');
+  });
+
+  it('refuses a command that does not state who is calling', () => {
+    // A claim has to be made to be believed. An untyped caller — the seed
+    // script, a future service — can omit the field, and a truthiness test
+    // would read that omission as consent; `undefined` is refused here.
+    const unstated = { ...command(), automated: undefined } as unknown as DecisionCommand;
+    expect(rejected(applyDecision(unstated)).code).toBe('permission_denied');
+  });
+
+  it('is not callable with the actor id a service minted for itself', () => {
+    // The compile-time half. `@ts-expect-error` fails the test build if the
+    // error stops happening, so this is what pins the brand: widen
+    // `DecisionCommand.moderatorId` back to `ActorId` and the reproduction from
+    // the review compiles again without a single runtime change.
+    const service: ActorId = castId<'ActorId'>('system');
+    // @ts-expect-error an `ActorId` a service already holds is not a `HumanActorId`
+    const reproduction: DecisionCommand = { ...command(), moderatorId: service };
+    expect(reproduction.moderatorId).toBe('system');
   });
 
   it('rejects a decision with no rationale to defend', () => {
@@ -138,6 +173,27 @@ describe('applyDecision — the adapter over the shared account machine', () => 
     );
     expect(error.code).toBe('validation_failed');
     expect(error.message).toContain('delete_account');
+  });
+
+  it('reports delete_account as unrestrictable, not as a capability the account lacks', () => {
+    // `banned` is the only state that grants `delete_account`, so from every
+    // other state the not-held check used to win and the moderator was told the
+    // account did not hold a capability that may never be removed anyway — the
+    // one message explaining the floor never fired for it. The order is part
+    // of what a caller can act on, so it is pinned here.
+    for (const currentAccountState of ['active', 'limited'] as const) {
+      const error = rejected(
+        applyDecision(
+          command({
+            action: 'restrict',
+            currentAccountState,
+            removedCapabilities: ['delete_account'],
+          }),
+        ),
+      );
+      expect(error.code, currentAccountState).toBe('validation_failed');
+      expect(error.message, currentAccountState).toContain('may never remove');
+    }
   });
 
   it('still accepts a restriction naming only restrictable capabilities', () => {

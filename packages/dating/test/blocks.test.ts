@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import type { Result } from '@been-there/core';
 import {
   activeBlockBetween,
   BLOCK_EFFECTS,
@@ -7,14 +6,7 @@ import {
   createBlock,
   releaseBlock,
 } from '../src/index.js';
-import { A, AT, B, C, block, blockId } from './fixtures.js';
-
-function succeeded<T, E extends { code: string }>(result: Result<T, E>): T {
-  if (!result.ok) {
-    throw new Error(`expected success, got ${result.error.code}`);
-  }
-  return result.value;
-}
+import { A, AT, B, C, block, blockId, succeeded } from './fixtures.js';
 
 describe('blocks', () => {
   it('cannot be aimed at yourself', () => {

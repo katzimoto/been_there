@@ -11,6 +11,8 @@ import {
   DEFAULT_NOTIFICATION_PREFERENCE,
   InMemoryNotificationLedger,
   NOTIFICATION_KINDS,
+  NOTIFICATION_CONTENT_TOKENS,
+  NON_SUPPRESSIBLE_CATEGORIES,
   deliverNotification,
   isWithinQuietHours,
   planNotification,
@@ -20,6 +22,8 @@ import {
   type NotificationKind,
   type NotificationKindSpec,
   type NotificationPlan,
+  renderNotificationBody,
+  type NotificationFacts,
   type NotificationPreference,
   type NotificationRequest,
   type Suppression,
@@ -33,6 +37,16 @@ const NOISE_PREFERENCE: NotificationPreference = {
   channelOptIn: {},
   quietHours: { enabled: true, startHour: 0, endHour: 24, timeZone: 'UTC' },
   digest: { dayOfWeek: 1, hour: 9 },
+};
+
+/**
+ * Every channel every kind uses, switched on, with quiet hours off. The render
+ * tests are about what a body may say, and a preference that mutes a channel
+ * would hide the pairs they need to reach.
+ */
+const EVERYTHING_ON: NotificationPreference = {
+  ...DEFAULT_NOTIFICATION_PREFERENCE,
+  channelOptIn: { ...DEFAULT_CHANNEL_OPT_IN, like: [...EVERY_CHANNEL] },
 };
 
 function notificationId(seed: string): NotificationId {
@@ -74,6 +88,31 @@ function planned(result: Result<NotificationPlan | Suppression, DomainError>): N
 
 function preferenceFor(overrides: Partial<NotificationPreference> = {}): NotificationPreference {
   return { ...DEFAULT_NOTIFICATION_PREFERENCE, ...overrides };
+}
+
+/**
+ * Adds a catalogue row for the duration of one test and removes it again.
+ *
+ * The properties below are about what a *twenty-second* row would do, and a
+ * test that only reads the twenty-one rows in the table cannot say: a rule
+ * keyed off a list the test wrote out is only as strong as that list. The
+ * catalogue is a plain object, so a row can be added to it, planned through
+ * the public entry point, and taken away before the next test sees it.
+ */
+function withKind<T>(
+  kind: string,
+  spec: NotificationKindSpec,
+  body: (kind: NotificationKind) => T,
+): T {
+  Object.defineProperty(NOTIFICATION_KINDS, kind, { value: spec, configurable: true, writable: true });
+  try {
+    // Unchecked cast: the row was just written into the catalogue, so at runtime
+    // it is a `NotificationKind`. The union is a compile-time list of names, and
+    // naming one it does not contain yet is the point of the seam.
+    return body(kind as NotificationKind);
+  } finally {
+    delete (NOTIFICATION_KINDS as Record<string, unknown>)[kind];
+  }
 }
 
 describe('the catalogue is the whole of what a notification may say', () => {
@@ -130,17 +169,17 @@ describe('the catalogue is the whole of what a notification may say', () => {
     expect([...tokens].some((token) => /text|body|excerpt|message/i.test(token))).toBe(false);
   });
 
-  it('lets a channel say less than the in-app record and never more', () => {
+  it('lets a channel say less than the in-app record and never more, on every kind that has one', () => {
     // "Shortening for a locked screen may remove detail, never add it." Where a
     // kind has an in-app record at all, that record is the reference and every
-    // other channel is a subset of it — a diff, not a review. Four kinds have no
-    // in-app surface by design (a ban, a recovery receipt, a deletion receipt, a
-    // message digest), and for those there is nothing to be a subset of.
-    // The exceptions are named, not tolerated: a conditional invariant read as a
-    // universal one is how the next person reintroduces the bug. Four kinds have
-    // no in-app record, for two stated reasons — the durable record already
-    // exists under another kind (`message.digest`), or the user cannot reach the
-    // app at all (a ban, a recovery receipt, a deletion receipt).
+    // other channel is a subset of it — a diff, not a review.
+    //
+    // The invariant is **conditional**, and the condition is the point. Four
+    // kinds have no in-app surface, so for those there is nothing to be a
+    // subset of and the loop below does not reach them. They are named rather
+    // than tolerated, and the next test says what shape an exception has to
+    // have, because a conditional invariant read as a universal one is how the
+    // next person reintroduces the bug.
     const withoutInApp = EVERY_KIND.filter(
       (kind) => NOTIFICATION_KINDS[kind].channels.in_app.mode === 'off',
     );
@@ -164,6 +203,38 @@ describe('the catalogue is the whole of what a notification may say', () => {
           ).toContain(token);
         }
       }
+    }
+  });
+
+  it('lets a kind have no in-app record only where one of the two stated reasons applies', () => {
+    // Both reasons are structural, so neither needs a human to remember it:
+    //
+    //   1. the durable record already exists under another kind in the same
+    //      category — a second in-app entry per digest window would say the
+    //      same thing twice; or
+    //   2. the user cannot reach the app at all, which is a critical notice
+    //      whose delivery guarantee is an immediate email and nothing else.
+    //
+    // A twenty-second kind that is `off` for in-app for any other reason fails
+    // here, which is what stops the exception list from becoming a dumping
+    // ground for a row nobody wanted to think about.
+    for (const kind of EVERY_KIND) {
+      const spec: NotificationKindSpec = NOTIFICATION_KINDS[kind];
+      if (spec.channels.in_app.mode !== 'off') {
+        continue;
+      }
+      const recordedElsewhere = EVERY_KIND.some(
+        (other) =>
+          other !== kind &&
+          NOTIFICATION_KINDS[other].category === spec.category &&
+          NOTIFICATION_KINDS[other].channels.in_app.mode !== 'off',
+      );
+      const unreachableByDesign =
+        spec.critical &&
+        spec.channels.email.mode === 'immediate' &&
+        spec.channels.push.mode === 'off';
+
+      expect(recordedElsewhere || unreachableByDesign, kind).toBe(true);
     }
   });
 
@@ -192,59 +263,224 @@ describe('the catalogue is the whole of what a notification may say', () => {
 });
 
 describe('a critical notice cannot be switched off', () => {
-  it('delivers every critical kind on every channel it uses, with every lever pulled', () => {
-    let delivered = 0;
+  it('delivers exactly the non-suppressible pairs and mutes exactly the rest, with every lever pulled', () => {
+    // No threshold and no hand-written list: every usable pair in the catalogue
+    // is planned, and the two outcomes must partition it exactly. A count with
+    // slack in it is not a floor — it is a number that is allowed to shrink
+    // until someone notices, and the per-pair assertions only ever reach the
+    // rows the loop chose to skip.
+    const delivered: string[] = [];
+    const muted: string[] = [];
 
     for (const kind of EVERY_KIND) {
-      const spec: NotificationKindSpec = NOTIFICATION_KINDS[kind];
-      if (!spec.critical) {
-        continue;
-      }
       for (const channel of EVERY_CHANNEL) {
-        if (spec.channels[channel].mode === 'off') {
+        if (NOTIFICATION_KINDS[kind].channels[channel].mode === 'off') {
           continue;
         }
-        const plan = planned(planNotification(requestFor(kind, channel), NOISE_PREFERENCE, EVERY_CHANNEL));
-        expect(plan.critical, `${kind}/${channel}`).toBe(true);
-        expect(plan.mode, `${kind}/${channel}`).toBe('immediate');
-        delivered += 1;
+        const pair = `${kind}/${channel}`;
+        const outcome = succeeded(
+          planNotification(requestFor(kind, channel), NOISE_PREFERENCE, EVERY_CHANNEL),
+        );
+        if ('suppressed' in outcome) {
+          muted.push(pair);
+          expect(outcome, pair).toMatchObject({ reason: 'channel_muted' });
+        } else {
+          delivered.push(pair);
+          expect(outcome.critical, pair).toBe(true);
+          expect(outcome.mode, pair).toBe('immediate');
+        }
       }
     }
 
-    expect(delivered).toBeGreaterThan(20);
+    // Re-derived from the catalogue, independently of the loop: a kind is
+    // non-suppressible when its own row says so, or when its category is
+    // non-suppressible whatever the row says.
+    const usablePairs = (kind: NotificationKind): string[] =>
+      EVERY_CHANNEL.filter((channel) => NOTIFICATION_KINDS[kind].channels[channel].mode !== 'off').map(
+        (channel) => `${kind}/${channel}`,
+      );
+    const nonSuppressible = EVERY_KIND.filter(
+      (kind) =>
+        NOTIFICATION_KINDS[kind].critical ||
+        NON_SUPPRESSIBLE_CATEGORIES.includes(NOTIFICATION_KINDS[kind].category),
+    );
+
+    expect(delivered.sort()).toEqual(nonSuppressible.flatMap(usablePairs).sort());
+    expect(muted.sort()).toEqual(
+      EVERY_KIND.filter((kind) => !nonSuppressible.includes(kind)).flatMap(usablePairs).sort(),
+    );
   });
 
-  it('suppresses every non-critical kind once its channels are all switched off', () => {
-    for (const kind of EVERY_KIND) {
-      const spec: NotificationKindSpec = NOTIFICATION_KINDS[kind];
-      if (spec.critical) {
-        continue;
-      }
-      for (const channel of EVERY_CHANNEL) {
-        if (spec.channels[channel].mode === 'off') {
-          continue;
-        }
-        const outcome = succeeded(planNotification(requestFor(kind, channel), NOISE_PREFERENCE, EVERY_CHANNEL));
-        expect(outcome, `${kind}/${channel}`).toMatchObject({ suppressed: true, reason: 'channel_muted' });
-      }
-    }
-  });
-
-  it('treats a verification outcome as critical, which is why it has its own category', () => {
-    // The four verification notices determine whether the user is discoverable at
-    // all; filing them under a suppressible category made them muteable.
-    const verificationKinds = [
-      'verification.passed',
-      'verification.failed',
-      'verification.rate_limited',
-      'verification.review_required',
-      'verification.expired',
-    ] as const;
+  it('delivers every kind in the verification category, whichever way its own row is written', () => {
+    // Derived, never written out. The five notices in this category answer the
+    // one question a user cannot answer for themselves — whether they are
+    // discoverable at all — so a mute switch on them is a switch on the user's
+    // own visibility. A twenty-second verification row is covered by this loop
+    // on the day it is added, which a list written out here could not be.
+    const verificationKinds = EVERY_KIND.filter(
+      (kind) => NOTIFICATION_KINDS[kind].category === 'verification',
+    );
+    expect(verificationKinds.length).toBeGreaterThan(3);
 
     for (const kind of verificationKinds) {
-      expect(NOTIFICATION_KINDS[kind].category, kind).toBe('verification');
-      expect(NOTIFICATION_KINDS[kind].critical, kind).toBe(true);
+      for (const channel of EVERY_CHANNEL) {
+        if (NOTIFICATION_KINDS[kind].channels[channel].mode === 'off') {
+          continue;
+        }
+        const plan = planned(
+          planNotification(requestFor(kind, channel), NOISE_PREFERENCE, EVERY_CHANNEL),
+        );
+        expect(plan.critical, `${kind}/${channel}`).toBe(true);
+        expect(plan.mode, `${kind}/${channel}`).toBe('immediate');
+      }
     }
+  });
+
+  it('keeps a verification row that does not claim criticality out of reach of the mute switch', () => {
+    // The row flag is authored and the category rule is not, so the floor has
+    // to be the one that holds. This is the twenty-second kind: added, planned
+    // through the public entry point with every channel switched off, and the
+    // answer has to be delivery.
+    withKind(
+      'verification.locked',
+      {
+        category: 'verification',
+        critical: false,
+        pairScoped: false,
+        channels: {
+          in_app: { mode: 'immediate', content: [] },
+          email: { mode: 'immediate', content: [] },
+          push: { mode: 'immediate', content: [] },
+        },
+      },
+      (locked) => {
+        for (const channel of EVERY_CHANNEL) {
+          const plan = planned(
+            planNotification(requestFor(locked, channel), NOISE_PREFERENCE, EVERY_CHANNEL),
+          );
+          expect(plan.critical, channel).toBe(true);
+          expect(plan.mode, channel).toBe('immediate');
+        }
+      },
+    );
+  });
+});
+
+describe('a body is assembled from the catalogue and from nothing else', () => {
+  const matchPlan = (): NotificationPlan =>
+    planned(
+      planNotification(requestFor('match.created', 'in_app'), EVERYTHING_ON, EVERY_CHANNEL),
+    );
+
+  it('carries the catalogue set on the plan, so an adapter cannot re-derive it', () => {
+    // The plan is what an adapter holds. If the bindable set had to be looked
+    // up again at render time, the set that reached the bytes would be
+    // whichever copy of the catalogue the adapter happened to read.
+    expect(matchPlan().content).toEqual(NOTIFICATION_KINDS['match.created'].channels.in_app.content);
+  });
+
+  it('renders a declared fact and nothing else', () => {
+    const body = succeeded(
+      renderNotificationBody(
+        matchPlan(),
+        'You matched with {{counterparty_first_name}}.',
+        { counterparty_first_name: 'Sam' },
+      ),
+    );
+
+    expect(body.text).toBe('You matched with Sam.');
+    expect(body.facts).toEqual(['counterparty_first_name']);
+  });
+
+  it('refuses a slot that is not a fact anyone may bind, so a body cannot render a message', () => {
+    // The whole guarantee. `message_body` is not a member of the token union,
+    // so there is no value that could fill the slot and no key the caller could
+    // spell to get one — the template comes back as a refusal rather than as a
+    // body with a literal `{{message_body}}` in it.
+    const error = rejected(
+      renderNotificationBody(matchPlan(), 'Sam said {{message_body}}', {
+        counterparty_first_name: 'Sam',
+      }),
+    );
+
+    expect(error.code).toBe('validation_failed');
+    expect(error.message).toContain('message_body');
+    expect(error.details).toEqual({
+      kind: 'match.created',
+      channel: 'in_app',
+      slot: 'message_body',
+    });
+  });
+
+  it('refuses a real fact this channel does not declare', () => {
+    // `account.restriction.applied` on email binds the case reference; the
+    // deletion receipt's retention date belongs to a different notice and has
+    // no business in this one.
+    const plan = planned(
+      planNotification(requestFor('account.restriction.applied', 'email'), EVERYTHING_ON, EVERY_CHANNEL),
+    );
+    const error = rejected(
+      renderNotificationBody(plan, 'Restricted on {{event_date}} until {{retained_until}}.', {
+        own_capability_list: 'send_message',
+        case_reference: 'case-1',
+        event_date: '2026-03-01',
+        appeal_route: '/appeals',
+      }),
+    );
+
+    expect(error.code).toBe('validation_failed');
+    expect(error.details).toMatchObject({ slot: 'retained_until' });
+  });
+
+  it('refuses a fact the catalogue declares and the body never binds', () => {
+    const error = rejected(renderNotificationBody(matchPlan(), 'You have a new match.', {}));
+
+    expect(error.code).toBe('validation_failed');
+    expect(error.message).toContain('counterparty_first_name');
+  });
+
+  it('refuses a value for a fact this notification does not declare', () => {
+    const error = rejected(
+      renderNotificationBody(matchPlan(), 'You matched with {{counterparty_first_name}}.', {
+        counterparty_first_name: 'Sam',
+        case_reference: 'case-1',
+      }),
+    );
+
+    expect(error.code).toBe('validation_failed');
+    expect(error.details).toMatchObject({ token: 'case_reference' });
+  });
+
+  it('binds every declared fact on every channel a kind uses, and leaves no slot behind', () => {
+    for (const kind of EVERY_KIND) {
+      for (const channel of EVERY_CHANNEL) {
+        if (NOTIFICATION_KINDS[kind].channels[channel].mode === 'off') {
+          continue;
+        }
+        const plan = planned(
+          planNotification(requestFor(kind, channel), EVERYTHING_ON, EVERY_CHANNEL),
+        );
+        // Unchecked cast: `fromEntries` cannot prove the keys are tokens, and
+        // they are the plan's own `content` list, which is tokens by type.
+        const facts = Object.fromEntries(plan.content.map((token) => [token, 'x'])) as NotificationFacts;
+        const body = succeeded(
+          renderNotificationBody(plan, plan.content.map((token) => `{{${token}}}`).join(' '), facts),
+        );
+
+        expect(body.facts, `${kind}/${channel}`).toEqual(plan.content);
+        expect(body.text, `${kind}/${channel}`).not.toContain('{{');
+      }
+    }
+  });
+
+  it('binds every token in the vocabulary somewhere, so the union is not padded', () => {
+    const bound = new Set(
+      EVERY_KIND.flatMap((kind) =>
+        [...NOTIFICATION_KINDS[kind].channels.in_app.content, ...NOTIFICATION_KINDS[kind].channels.email.content, ...NOTIFICATION_KINDS[kind].channels.push.content],
+      ),
+    );
+
+    expect([...NOTIFICATION_CONTENT_TOKENS].filter((token) => !bound.has(token))).toEqual([]);
   });
 });
 

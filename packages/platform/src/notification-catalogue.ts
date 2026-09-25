@@ -35,25 +35,42 @@ export interface ChannelUse {
 /**
  * The only facts a notification body may bind.
  *
- * There is no message-text token, and that absence is the guarantee: a template
- * cannot render a message body because the vocabulary it binds against has no
- * word for one. The list is per channel rather than per kind because the same
- * fact is not equally safe to say everywhere — a case reference belongs in the
- * in-app record and in the email the user will quote to support, and not on a
- * lock screen that may not be the user's own.
+ * There is no message-text token, and that absence is the guarantee — but only
+ * because the guarantee is enforced in two places rather than one. The
+ * catalogue is the first: `ChannelUse.content` is a list of these, so a row
+ * cannot name a message body even in principle. The renderer is the second,
+ * and it is the one that matters at runtime: `renderNotificationBody` refuses a
+ * template whose `{{slots}}` name anything outside the tokens the planned
+ * channel declares, so a body reaching the bytes is assembled from the
+ * catalogue and from nothing else. The catalogue alone constrains the
+ * catalogue; the renderer is what makes the absence of a message-text member
+ * load-bearing.
+ *
+ * A runtime array rather than a type-only union, for the same reason
+ * `NOTIFICATION_CHANNELS` is one: the renderer has to tell "not a fact anyone
+ * may bind" apart from "a real fact this channel does not use", and a type
+ * alias is erased before it can.
+ *
+ * The list is per channel rather than per kind because the same fact is not
+ * equally safe to say everywhere — a case reference belongs in the in-app
+ * record and in the email the user will quote to support, and not on a lock
+ * screen that may not be the user's own.
  */
-export type NotificationContentToken =
-  | 'counterparty_first_name'
-  | 'own_capability_list'
-  | 'case_reference'
-  | 'report_reference'
-  | 'event_date'
-  | 'retained_until'
-  | 'retry_at'
-  | 'coarse_city'
-  | 'device_label'
-  | 'appeal_route'
-  | 'count';
+export const NOTIFICATION_CONTENT_TOKENS = [
+  'counterparty_first_name',
+  'own_capability_list',
+  'case_reference',
+  'report_reference',
+  'event_date',
+  'retained_until',
+  'retry_at',
+  'coarse_city',
+  'device_label',
+  'appeal_route',
+  'count',
+] as const;
+
+export type NotificationContentToken = (typeof NOTIFICATION_CONTENT_TOKENS)[number];
 
 export interface NotificationKindSpec {
   readonly category: NotificationCategory;

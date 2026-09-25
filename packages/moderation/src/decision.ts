@@ -23,7 +23,7 @@ import {
   OUTWARD_ENFORCEMENT_EVENT,
   type RestrictionAppliedPayload,
 } from './events.js';
-import type { DecisionId } from './ids.js';
+import { type DecisionId, type HumanActorId, asHumanActor } from './ids.js';
 import { type Report, reportMachine } from './report.js';
 
 /**
@@ -36,10 +36,13 @@ import { type Report, reportMachine } from './report.js';
  * is what makes an appeal answerable later (issue #1 lists appeals as P1):
  * the full chain of decisions for an account is still there to be read.
  *
- * `applyDecision` is a thin adapter over the shared `accountMachine` and nothing
- * else. It adds no enforcement of its own: the case id, the moderator id and
- * the named capabilities are all checked by the kernel's guards, so there is one
- * place where "who may restrict whom, and on what authority" is answered.
+ * `applyDecision` is a thin adapter over the shared `accountMachine`: the
+ * kernel's guards decide whether a restriction, suspension or ban is legal at
+ * all, so there is one place where "on what authority" is answered. The two
+ * things the kernel deliberately does not hold — the capability floor and the
+ * fact that a person, not a service, is behind the decision — are checked here
+ * rather than left to the orchestrator, because this is the function that
+ * produces the `Decision` an appeal is answered from and it is exported.
  */
 export type DecisionAction = 'warn' | 'restrict' | 'suspend' | 'ban' | 'clear';
 
@@ -88,8 +91,20 @@ export interface DecisionCommand {
   readonly decisionId: DecisionId;
   /** Nullable at the boundary: an enforcement decision with no case is invalid. */
   readonly caseId: CaseId | null;
-  /** Nullable at the boundary: automation never enforces (commitment #2). */
-  readonly moderatorId: ActorId | null;
+  /**
+   * Not nullable for want of an id, and not an `ActorId`: `HumanActorId` is an
+   * id only a human-facing entry point can mint, so the id a service already
+   * holds is not assignable and the call does not compile (commitment #2).
+   */
+  readonly moderatorId: HumanActorId | null;
+  /**
+   * The runtime half of the same claim, and required rather than defaulted: a
+   * caller that states nothing about its own provenance has not earned
+   * enforcement, and an absent claim is refused rather than assumed human.
+   * The id above is a type the domain cannot verify, so this is where a forged
+   * one is caught — inside the function, for every caller.
+   */
+  readonly automated: boolean;
   readonly subjectId: UserId;
   readonly action: DecisionAction;
   readonly rationale: string;
@@ -101,7 +116,7 @@ export interface DecisionCommand {
 
 /** Returns the narrowed ids, so callers never re-check authority themselves. */
 function validateAuthority(
-  command: Pick<DecisionCommand, 'caseId' | 'moderatorId' | 'rationale'>,
+  command: Pick<DecisionCommand, 'caseId' | 'moderatorId' | 'rationale' | 'automated'>,
 ): Result<{ readonly caseId: CaseId; readonly moderatorId: ActorId }, DomainError> {
   if (command.caseId === null) {
     return domainError(
@@ -109,6 +124,17 @@ function validateAuthority(
       'moderation.decision',
       'every decision must reference the case it was taken on',
       { action: 'enforcement' },
+    );
+  }
+  // Compared against `false`, not tested for truth: the claim has to be made
+  // to be believed, so a caller that omits it — an untyped caller, or a new
+  // field someone forgot — is refused rather than assumed human.
+  if (command.automated !== false) {
+    return domainError(
+      'permission_denied',
+      'moderation.decision',
+      'automation never enforces: a decision requires a caller that states a human took it',
+      { caseId: command.caseId, automated: command.automated },
     );
   }
   if (command.moderatorId === null) {
@@ -144,22 +170,14 @@ export function applyDecision(
   let resultingAccountState = command.currentAccountState;
 
   if (accountEvent !== null) {
-    const held = capabilitiesFor(command.currentAccountState);
-    const unknown = removed.filter((capability) => !held.includes(capability));
-    if (unknown.length > 0) {
-      return domainError(
-        'validation_failed',
-        'moderation.decision',
-        `a restriction may only name capabilities the account actually holds: ${unknown.join(', ')}`,
-        { caseId, unknown: unknown.length },
-      );
-    }
-    // The intake valve. `capabilitiesFor` also refuses to strip these, but a
-    // moderator who types `report` into a restriction must be told no rather
-    // than have the name silently dropped: a decision that records fewer
-    // removals than the one taken is a decision nobody made. Checked before the
-    // not-held check so a capability the account does not hold *and* may never
-    // lose is reported for the reason that actually matters.
+    // The intake valve, and the first of the two capability checks.
+    // `capabilitiesFor` also refuses to strip these, but a moderator who types
+    // `report` into a restriction must be told no rather than have the name
+    // silently dropped: a decision that records fewer removals than the one
+    // taken is a decision nobody made. Ahead of the not-held check so a
+    // capability the account does not hold *and* may never lose —
+    // `delete_account`, granted only by `banned` — is reported for the reason
+    // that actually matters rather than as a capability the account lacks.
     const unrestrictable = removed.filter((capability) =>
       UNRESTRICTABLE_CAPABILITIES.includes(capability),
     );
@@ -169,6 +187,16 @@ export function applyDecision(
         'moderation.decision',
         `a restriction may never remove ${unrestrictable.join(', ')}: reporting and blocking must survive every sanction, and every state keeps a way out`,
         { caseId, unrestrictable: unrestrictable.join(',') },
+      );
+    }
+    const held = capabilitiesFor(command.currentAccountState);
+    const unknown = removed.filter((capability) => !held.includes(capability));
+    if (unknown.length > 0) {
+      return domainError(
+        'validation_failed',
+        'moderation.decision',
+        `a restriction may only name capabilities the account actually holds: ${unknown.join(', ')}`,
+        { caseId, unknown: unknown.length },
       );
     }
     // The kernel decides whether this transition is legal. We only pass the
@@ -202,7 +230,10 @@ export function applyDecision(
 export interface ReversalCommand {
   readonly decisionId: DecisionId;
   readonly caseId: CaseId | null;
-  readonly moderatorId: ActorId | null;
+  /** A reversal is a decision, so it carries the same human authority. */
+  readonly moderatorId: HumanActorId | null;
+  /** See `DecisionCommand.automated`: a machine may not lift a sanction either. */
+  readonly automated: boolean;
   readonly subjectId: UserId;
   /** The decision being answered. Never mutated, never removed. */
   readonly reverses: Decision;
@@ -299,7 +330,10 @@ export function decide(
   const decided = applyDecision({
     decisionId,
     caseId: command.moderationCase.caseId,
-    moderatorId: command.actor.actorId,
+    // `canWorkCase` has just refused an automated actor, so the narrowing the
+    // brand stands for is true here rather than asserted here.
+    moderatorId: asHumanActor(command.actor.actorId),
+    automated: command.actor.automated,
     subjectId: command.moderationCase.subjectId,
     action: command.action,
     rationale: command.rationale,
@@ -461,7 +495,8 @@ export function reverseDecision(
   const reversed = applyReversal({
     decisionId,
     caseId: command.moderationCase.caseId,
-    moderatorId: command.actor.actorId,
+    moderatorId: asHumanActor(command.actor.actorId),
+    automated: command.actor.automated,
     subjectId: command.reverses.subjectId,
     reverses: command.reverses,
     rationale: command.rationale,

@@ -15,6 +15,7 @@ import {
   type Case,
   type ContextOptions,
   type EmitSpec,
+  type HumanActorId,
   type ModerationContext,
   type ModerationEventType,
   type ModeratorActor,
@@ -30,6 +31,7 @@ import {
   submitReport,
   triageReport,
 } from '../src/index.js';
+import { asHumanActor } from '../src/ids.js';
 
 /**
  * Test seams. Reading `.value` off a `Result` is a compile error by design, so
@@ -125,6 +127,14 @@ export const IDENTITY_OFFICER: ModeratorActor = {
   identityPrivacyRole: true,
   automated: false,
 };
+
+/**
+ * The id a decision is recorded under. It can only be built through the
+ * package's own minting crossing point, which the barrel deliberately does not
+ * export — so this import is the one legitimate way in, and it exists here
+ * because these tests live inside the package.
+ */
+export const HUMAN_MODERATOR: HumanActorId = asHumanActor(MODERATOR.actorId);
 
 export const CORRELATION: CorrelationId = castId<'CorrelationId'>('corr-1');
 

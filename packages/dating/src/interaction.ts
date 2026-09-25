@@ -51,9 +51,9 @@ import {
  *     of what happened rather than of what survives.
  *
  *  4. **Preconditions are re-read at action time.** `recordLike` takes the two
- *     standings and the block edges as arguments, so "you cannot like after
- *     your verification lapsed" is a guard somebody can delete rather than a
- *     comment somebody can forget. A card served five minutes ago is not a
+ *     standings, the block edges and the pass list as arguments, so "you cannot
+ *     like after your verification lapsed" is a guard somebody can delete rather
+ *     than a comment somebody can forget. A card served five minutes ago is not a
  *     licence to act on.
  */
 
@@ -142,7 +142,14 @@ export interface MatchRecord {
   readonly conversationId: ConversationId | null;
 }
 
-/** The standing one party sees, or `null` when they are not in this match. */
+/**
+ * The standing one party sees, or `null` when they are not in this match.
+ *
+ * Reads the record as given, so it is only as current as the read that produced
+ * it: `relationshipView` recomputes both entries from the live standings, and a
+ * record taken straight from a write is the as-written one, which is what an
+ * ended match must keep.
+ */
 export function matchStandingFor(match: MatchRecord, viewer: UserId): MatchStanding | null {
   if (match.participants[0] === viewer) {
     return match.standings[0];

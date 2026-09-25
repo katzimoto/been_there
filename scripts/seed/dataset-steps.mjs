@@ -31,6 +31,7 @@ import {
   createBlock,
   profileMachine,
   recordLike,
+  recordPass,
   resolveMatch,
 } from '@been-there/dating';
 import { activeBlockView, sendMessage, startConversation } from '@been-there/communication';
@@ -90,6 +91,7 @@ export const asSubject = (value) => castId(value);
 export const asCorrelation = (value) => castId(value);
 export const asBlock = (value) => castId(value);
 export const asLike = (value) => castId(value);
+export const asPass = (value) => castId(value);
 export const asMessage = (value) => castId(value);
 export const asConversation = (value) => castId(value);
 export const asReport = (value) => castId(value);
@@ -274,8 +276,19 @@ export function riskTrail(subjectId, signals) {
   };
 }
 
-/** Two reciprocal likes, each checked against both parties' real standings. */
-export function mutualLikes(standings, a, b, now) {
+/**
+ * Two reciprocal likes, each checked against both parties' real standings, and
+ * the pass list they leave behind.
+ *
+ * Both ledgers come back because a like may supersede a pass: keeping only the
+ * likes would let the dataset describe a live pass and a match that crossed it,
+ * which is exactly the state a seed must never be in.
+ *
+ * `passer` records a pass from that user to the other one *before* the like, so
+ * the dataset walks the sequence the product makes when somebody changes their
+ * mind: pass, then like the same person, and match anyway.
+ */
+export function mutualLikes(standings, a, b, now, { passer } = {}) {
   const at = now();
   const like = (from, to) => ({
     likeId: asLike(`like-${from}-${to}`),
@@ -283,26 +296,40 @@ export function mutualLikes(standings, a, b, now) {
     to: asUser(to),
     createdAt: at,
   });
+  const passedOver = passer === undefined ? null : passer === a ? b : a;
+  const passed =
+    passedOver === null
+      ? { ledger: EMPTY_LEDGER, passes: [] }
+      : must(
+          recordPass(EMPTY_LEDGER, [], {
+            passId: asPass(`pass-${passer}-${passedOver}`),
+            from: asUser(passer),
+            to: asUser(passedOver),
+            createdAt: at,
+          }),
+          `${passer} passes on ${passedOver}`,
+        );
   const first = must(
-    recordLike(EMPTY_LEDGER, like(a, b), {
+    recordLike(passed.ledger, like(a, b), {
       actor: standings.get(a),
       target: standings.get(b),
       blocks: [],
-      passes: [],
+      passes: passed.passes,
       at,
     }),
     `${a} likes ${b}`,
   );
-  return must(
-    recordLike(first, like(b, a), {
+  const second = must(
+    recordLike(first.ledger, like(b, a), {
       actor: standings.get(b),
       target: standings.get(a),
       blocks: [],
-      passes: [],
+      passes: first.passes,
       at,
     }),
     `${b} likes ${a}`,
   );
+  return { ledger: second.ledger, passes: second.passes };
 }
 /** An account standing of `active`, before any enforcement is applied. */
 export function activeUser(userId, displayName, identity) {
@@ -317,15 +344,24 @@ export function activeUser(userId, displayName, identity) {
 }
 
 
-export function matchFromLedger(ledger, actorId, counterpartId, conversation) {
+/**
+ * Resolves the pair through the matcher, with the pass list the likes actually
+ * produced. The passes cannot be an empty literal here: a like may have
+ * superseded one, and a matcher handed a list that does not know that would
+ * refuse a match the dataset has every reason to allow.
+ *
+ * `blocks` is empty because it genuinely is: the dataset's one block is created
+ * *after* this match, and `blockAndEnd` carries it to the end it causes.
+ */
+export function matchFromLedger(likes, actorId, counterpartId, conversation) {
   const resolution = must(
     resolveMatch({
       actor: asUser(actorId),
       counterpart: asUser(counterpartId),
-      like: ledger.likes.find((entry) => entry.from === asUser(actorId)),
-      ledger,
+      like: likes.ledger.likes.find((entry) => entry.from === asUser(actorId)),
+      ledger: likes.ledger,
       blocks: [],
-      passes: [],
+      passes: likes.passes,
       conversationId: conversation,
     }),
     `resolve the ${actorId}/${counterpartId} match`,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { type Result, assertMachineIsTotal } from '@been-there/core';
+import { assertMachineIsTotal } from '@been-there/core';
 import {
   type MissingProfileField,
   PROFILE_REQUIREMENTS,
@@ -8,14 +8,7 @@ import {
   type ProfileContent,
   profileMachine,
 } from '../src/index.js';
-import { photo } from './fixtures.js';
-
-function succeeded<T, E extends { code: string }>(result: Result<T, E>): T {
-  if (!result.ok) {
-    throw new Error(`expected success, got ${result.error.code}`);
-  }
-  return result.value;
-}
+import { photo, succeeded } from './fixtures.js';
 
 const TODAY = new Date('2026-09-25T00:00:00Z');
 

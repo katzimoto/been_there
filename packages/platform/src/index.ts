@@ -7,6 +7,7 @@ export * from './authn.js';
 export * from './media.js';
 export * from './notifications.js';
 export * from './notification-catalogue.js';
+export * from './notification-render.js';
 export * from './location.js';
 export * from './observability.js';
 export * from './integration.js';
