@@ -14,6 +14,7 @@
  * the suite fails rather than skipping.
  */
 import { existsSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
@@ -21,6 +22,7 @@ import { createStores, createTransaction } from '@been-there/database';
 import type { Principal, Role } from '@been-there/platform';
 import { type DomainError, type Result, type UserId, castId, domainError, ok } from '@been-there/core';
 import { type Stores, type Transaction } from '@been-there/contracts';
+import type { ContactMessage } from '@been-there/service';
 import { type ActorResolver, type RequestActor, type ServiceDependencies, serviceRoutes, startService } from '@been-there/service';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -62,6 +64,8 @@ export function requireDatabase(): string {
 }
 
 export interface Harness {
+  /** Every message the service tried to deliver, newest last. */
+  readonly messages: readonly ContactMessage[];
   readonly url: string;
   readonly stores: Stores;
   readonly pool: pg.Pool;
@@ -139,15 +143,29 @@ function principalOf(caller: Caller, actorId: string): Principal {
  * can register a caller after the server has started — which it has to, because
  * the account id is the database's to mint and only exists after the create call.
  */
-export function resolverFor(callers: readonly Caller[]): ActorResolver {
-  return {
-    resolve(authorization: string | undefined): Result<RequestActor, DomainError> {
-      const token = authorization?.startsWith('Bearer ') === true ? authorization.slice(7) : undefined;
+/**
+ * Static callers first, then a real session lookup.
+ *
+ * The fallback is what makes "an unauthenticated request is refused" an honest
+ * assertion rather than "a token nobody registered is refused": a suite that
+ * signs in obtains a real token, and this resolves it the way production does.
+ */
+export function resolverFor(
+  callers: readonly Caller[],
+  stores?: Stores,
+  transaction?: Transaction,
+): ActorResolver {
+  const staticTable: ActorResolver = {
+    async resolve(authorization: string | undefined): Promise<Result<RequestActor, DomainError>> {
+      const token = bearerOf(authorization);
       const caller = token === undefined ? undefined : callers.find((entry) => entry.token === token);
       if (caller === undefined) {
-        return domainError('permission_denied', 'service.http', 'this request carries no recognised session', {
-          reason: 'unauthenticated',
-        });
+        return domainError(
+          'permission_denied',
+          'service.http',
+          'this request carries no recognised session',
+          { reason: 'unauthenticated' },
+        );
       }
       const actorId = caller.userId ?? caller.token;
       return ok({
@@ -159,6 +177,35 @@ export function resolverFor(callers: readonly Caller[]): ActorResolver {
       });
     },
   };
+
+  if (stores === undefined || transaction === undefined) {
+    return staticTable;
+  }
+  const live = createSessionActorResolver({ stores, transaction, now: () => new Date() });
+
+  return {
+    async resolve(authorization: string | undefined): Promise<Result<RequestActor, DomainError>> {
+      const caller = await staticTable.resolve(authorization);
+      if (caller.ok) {
+        return caller;
+      }
+      // Anything the static table does not know goes through the production
+      // resolver, which applies `validateSession`.
+      //
+      // An earlier version of this harness did the token lookup itself and
+      // returned an actor for any row it found, so a revoked, superseded or
+      // expired token authenticated: a bare lookup answers "was this token ever
+      // issued", which is not the question. The check belongs in the resolver
+      // because the router resolves an actor *before* opening the request
+      // transaction, and a handler that trusted the actor was trusting a value
+      // whose meaning depended on who produced it.
+      return live.resolve(authorization);
+    },
+  };
+}
+
+function bearerOf(authorization: string | undefined): string | undefined {
+  return authorization?.startsWith('Bearer ') === true ? authorization.slice(7) : undefined;
 }
 
 export async function startHarness(callers: readonly Caller[]): Promise<Harness> {
@@ -170,10 +217,18 @@ export async function startHarness(callers: readonly Caller[]): Promise<Harness>
   await pool.query('SELECT 1');
   const stores: Stores = createStores(pool);
   const transaction = createTransaction(pool);
+  const messages: ContactMessage[] = [];
   const dependencies: ServiceDependencies = {
     stores,
     transaction,
-    actors: resolverFor(callers),
+    actors: resolverFor(callers, stores, transaction),
+    // Captures rather than sends, so a suite can read the verification code or
+    // reset link. It must not throw and must not reach a relay.
+    contacts: {
+      deliver: async (message: ContactMessage) => {
+        messages.push(message);
+      },
+    },
     now: () => new Date(),
   };
   const running = await startService(dependencies, { routes: serviceRoutes(dependencies) });
@@ -182,6 +237,8 @@ export async function startHarness(callers: readonly Caller[]): Promise<Harness>
     stores,
     pool,
     transaction,
+    /** Every message the service tried to deliver, newest last. */
+    messages,
     close: async () => {
       await running.close();
       await pool.end();
