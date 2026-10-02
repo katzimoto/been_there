@@ -32,13 +32,34 @@ const scryptAsync = promisify(scrypt) as (
   password: string,
   salt: Buffer,
   keylen: number,
-  options: { readonly N: number; readonly r: number; readonly p: number },
-
+  options: {
+    readonly N: number;
+    readonly r: number;
+    readonly p: number;
+    readonly maxmem: number;
+  },
 ) => Promise<Buffer>;
 const SCRYPT_KEY_LENGTH = 64;
 const SCRYPT_COST = 2 ** 15;
 const SCRYPT_BLOCK_SIZE = 8;
 const SCRYPT_PARALLELISM = 1;
+
+/**
+ * Node's default `maxmem` is 32 MiB and scrypt's own requirement is
+ * `128 * N * r`, which at these parameters is 33,554,432 bytes - exactly 32 MiB,
+ * before any overhead. The default is therefore not merely tight, it is failing,
+ * and every hash and every verify threw `digital envelope routines::memory limit
+ * exceeded` until this was found. Unnoticed for as long as no route called them.
+ *
+ * Derived from the parameters and doubled, rather than a literal: raising
+ * `SCRYPT_COST` later must not silently start throwing again, which is the same
+ * failure the parameterised hash string exists to prevent.
+ */
+function scryptMemoryFor(cost: number, blockSize: number): number {
+  return 128 * cost * blockSize * 2;
+}
+
+const SCRYPT_MAX_MEMORY = scryptMemoryFor(SCRYPT_COST, SCRYPT_BLOCK_SIZE);
 
 export interface CredentialCopy {
   readonly title: string;
@@ -233,6 +254,7 @@ export async function hashPassword(password: string): Promise<string> {
     N: SCRYPT_COST,
     r: SCRYPT_BLOCK_SIZE,
     p: SCRYPT_PARALLELISM,
+    maxmem: SCRYPT_MAX_MEMORY,
   })) as Buffer;
   return `scrypt:${SCRYPT_COST}:${SCRYPT_BLOCK_SIZE}:${SCRYPT_PARALLELISM}$${salt.toString('base64')}$${derived.toString('base64')}`;
 }
@@ -261,6 +283,9 @@ export async function verifyPassword(password: string, stored: string): Promise<
     N: Number(cost),
     r: Number(blockSize),
     p: Number(parallelism),
+    // From the *stored* parameters, not the current ones: a hash written at a
+    // higher cost must still verify after the cost is lowered.
+    maxmem: scryptMemoryFor(Number(cost), Number(blockSize)),
   })) as Buffer;
   return derived.length === expected.length && timingSafeEqual(derived, expected);
 }
