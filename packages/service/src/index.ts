@@ -1,6 +1,8 @@
 import type { Route } from './http/router.js';
 import type { ServiceDependencies } from './ports.js';
-import { accountRoutes } from './routes/accounts.js';
+import { accountRoutes, accountSessionRoutes } from './routes/accounts.js';
+import { healthRoutes } from './routes/health.js';
+import { readinessRoutes } from './routes/readiness.js';
 import { conversationRoutes } from './routes/conversations.js';
 import { discoveryRoutes } from './routes/discovery.js';
 import { interactionRoutes } from './routes/interactions.js';
@@ -32,7 +34,10 @@ export * from './wiring/standing.js';
  */
 export function serviceRoutes(dependencies: ServiceDependencies): readonly Route[] {
   return [
+    ...healthRoutes(dependencies),
+    ...readinessRoutes(dependencies),
     ...accountRoutes(dependencies),
+    ...accountSessionRoutes(dependencies),
     ...verificationRoutes(dependencies),
     ...profileRoutes(dependencies),
     ...discoveryRoutes(dependencies),
@@ -44,3 +49,10 @@ export function serviceRoutes(dependencies: ServiceDependencies): readonly Route
     ...moderatorWorkspaceRoutes(dependencies),
   ];
 }
+export * from './health/meter.js';
+export * from './health/metrics.js';
+export * from './health/readiness.js';
+export * from './health/lifecycle.js';
+export * from './health/service.js';
+export * from './routes/health.js';
+export * from './routes/readiness.js';

@@ -1,7 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { StoreError } from '@been-there/contracts';
+import { StoreError, type Transaction } from '@been-there/contracts';
 import { type DomainError, type Err, type Result, castId, ok } from '@been-there/core';
+import { createServiceHealth } from '../health/service.js';
 import { readBody } from './body.js';
 import {
   type FailureBody,
@@ -56,6 +57,26 @@ export interface ServerOptions {
   readonly routes: readonly Route[];
   readonly onFailure?: FailureReporter;
 }
+
+/**
+ * The transaction a non-transactional route is handed.
+ *
+ * It cannot write: `clientOf(tx)` in the database package throws a `StoreError`
+ * the moment a handler tries to use it, because the client is `undefined`. A
+ * health route that reached for the store by accident should fail loudly rather
+ * than silently report itself healthy while every query fails - which is the
+ * failure this whole mechanism exists to prevent.
+ *
+ * It exists for one reason: readiness has to be answerable while the database is
+ * unreachable. With a dead pool `transaction.run` throws before a handler is
+ * reached, so a readiness probe that took a transaction would answer 503 on a
+ * transient database fault and every replica would be restarted, turning a
+ * degradation into an outage.
+ */
+const PASSIVE_TRANSACTION: Transaction = {
+  client: undefined,
+  run: (body) => body(PASSIVE_TRANSACTION),
+};
 
 export function createRequestHandler(
   dependencies: ServiceDependencies,
@@ -152,21 +173,25 @@ async function handle(
   }
 
   const now = dependencies.now();
+  const requestFor = (tx: Transaction): RouteRequest => ({
+    method: message.method ?? 'GET',
+    path: url.pathname,
+    params: match.params,
+    query: url.searchParams,
+    body: body.value,
+    actor: actor.value,
+    now,
+    tx,
+  });
   let outcome: Result<HttpResponse, DomainError>;
   try {
-    outcome = await dependencies.transaction.run(async (tx) => {
-      const request: RouteRequest = {
-        method: message.method ?? 'GET',
-        path: url.pathname,
-        params: match.params,
-        query: url.searchParams,
-        body: body.value,
-        actor: actor.value,
-        now,
-        tx,
-      };
-      return match.route.handle(request);
-    });
+    // A non-transactional route skips the wrapper so readiness can be answered
+    // while the database is unreachable. It is handed `PASSIVE_TRANSACTION`, whose
+    // client is `undefined`, so a store call throws rather than silently doing
+    // nothing.
+    outcome = match.route.transactional
+      ? await dependencies.transaction.run(async (tx) => match.route.handle(requestFor(tx)))
+      : await match.route.handle(requestFor(PASSIVE_TRANSACTION));
   } catch (thrown) {
     // A `StoreError` is the one failure the store layer classifies for us, so it
     // is the one that is reported as one: 503 when the store says the fault is
@@ -224,6 +249,12 @@ export async function startService(
       resolve();
     });
   });
+
+  // A process that has bound its port has finished starting. Before this the
+  // route table is mounted but the service is not something to send traffic to,
+  // and that window is a real, observable phase rather than one that does not
+  // exist — which is what makes a readiness failure during startup diagnosable.
+  createServiceHealth(dependencies).lifecycle.beginServing();
   const address = server.address() as AddressInfo;
   return {
     server,

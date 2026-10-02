@@ -58,19 +58,50 @@ export interface Route {
    * public in this table, which is a reviewed line rather than a header.
    */
   readonly public: boolean;
+  /**
+   * Whether the request runs inside `transaction.run`.
+   *
+   * False exists for exactly one reason: readiness has to be answerable *while*
+   * the database is unreachable. With a dead pool, `transaction.run` throws
+   * before a handler is reached, so a readiness probe that took a transaction
+   * would answer 503 on a transient database fault and every replica would be
+   * restarted — turning a degradation into an outage.
+   *
+   * A non-transactional route is handed `PASSIVE_TRANSACTION`, whose client is
+   * `undefined`, so a store call from one throws rather than silently doing
+   * nothing. The flag is opt-out and defaults true: a new route is transactional
+   * unless someone deliberately decides otherwise, which is a reviewed line.
+   */
+  readonly transactional: boolean;
 }
 
-function routeOf(method: string, pattern: string, handle: RouteHandler, isPublic: boolean): Route {
+export interface RouteOptions {
+  readonly transactional?: boolean;
+}
+
+function routeOf(
+  method: string,
+  pattern: string,
+  handle: RouteHandler,
+  isPublic: boolean,
+  transactional: boolean,
+): Route {
   return {
     method,
     pattern: pattern.split('/').filter((segment) => segment.length > 0),
     handle,
     public: isPublic,
+    transactional,
   };
 }
 
-export function route(method: string, pattern: string, handle: RouteHandler): Route {
-  return routeOf(method, pattern, handle, false);
+export function route(
+  method: string,
+  pattern: string,
+  handle: RouteHandler,
+  options: RouteOptions = {},
+): Route {
+  return routeOf(method, pattern, handle, false, options.transactional ?? true);
 }
 
 /**
@@ -80,8 +111,13 @@ export function route(method: string, pattern: string, handle: RouteHandler): Ro
  * deliberately unauthenticated" is the fact a reviewer needs to see at the call
  * site and an optional boolean is the fact they will not.
  */
-export function publicRoute(method: string, pattern: string, handle: RouteHandler): Route {
-  return routeOf(method, pattern, handle, true);
+export function publicRoute(
+  method: string,
+  pattern: string,
+  handle: RouteHandler,
+  options: RouteOptions = {},
+): Route {
+  return routeOf(method, pattern, handle, true, options.transactional ?? true);
 }
 
 export type RouteMatch =

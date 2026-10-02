@@ -1,6 +1,7 @@
 import type { UserId } from '@been-there/core';
 import { castId } from '@been-there/core';
 import { type Caller, type Harness, call, member } from './harness.js';
+import { CURRENT_TERMS_VERSION } from '../../src/accounts/terms.js';
 
 /**
  * Fixtures both suites share.
@@ -44,8 +45,31 @@ export interface Created {
   readonly accountId: string;
 }
 
+let signUpCounter = 0;
+
+/**
+ * A real sign-up, not an empty body.
+ *
+ * Sign-up now requires a contact, a password, a date of birth and a terms
+ * version — and it answers 202 for a contact it has seen before, because
+ * telling a caller "this address already exists" is an account-enumeration hole.
+ * A fixed address in a shared fixture therefore worked exactly once and every
+ * later run got a 202 it did not expect.
+ *
+ * The contact carries a per-call suffix and the date of birth an adult one, so
+ * each call creates a genuinely new, genuinely eligible account. The password
+ * is deliberately weak-but-valid: it must satisfy the password rule without
+ * appearing in the breach seed.
+ */
 export async function createAccount(harness: Harness, token: string): Promise<Created> {
-  const response = await call(harness, 'POST', '/v1/accounts', token);
+  signUpCounter += 1;
+  const contact = `member-${signUpCounter}-${Date.now().toString(36)}@example.test`;
+  const response = await call(harness, 'POST', '/v1/accounts', token, {
+    contact,
+    password: 'correct-horse-battery-staple-42',
+    dateOfBirth: '1990-06-15',
+    termsVersion: CURRENT_TERMS_VERSION,
+  });
   if (response.status !== 201) {
     throw new Error(`creating an account returned ${response.status}: ${JSON.stringify(response.body)}`);
   }
