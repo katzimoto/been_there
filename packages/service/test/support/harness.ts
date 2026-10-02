@@ -17,6 +17,11 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { IncomingMessage } from 'node:http';
+// A .mjs seam on purpose: `requireDatabase` is used by every suite that builds
+// its own pool, and the migrations are plain SQL files, so a TypeScript
+// module would buy nothing here.
+import { type IsolatedDatabase, isolatedDatabase } from './isolation.js';
 import pg from 'pg';
 import { createStores, createTransaction } from '@been-there/database';
 import type { Principal, Role } from '@been-there/platform';
@@ -52,22 +57,110 @@ function loadDotEnv(): void {
 
 loadDotEnv();
 
+/**
+ * The base connection string, before any isolation.
+ *
+ * Suites that build their own pools should call `requireDatabase()` instead, so
+ * they inherit the per-suite database. This exists for the code paths that need
+ * the un-isolated URL deliberately — a check that the isolation itself is
+ * working, for instance.
+ */
 export const CONNECTION_STRING = process.env.DATABASE_URL;
 
+let isolation: IsolatedDatabase | undefined;
+
 /**
- * Fails loudly rather than skipping.
+ * A connection string pointing at this process's own database, created and
+ * migrated on first use.
  *
- * A skipped suite reads as a passing one in CI, and a service that cannot reach
- * its database is exactly the situation where a green tick is most damaging.
+ * Every suite used to share one database and nothing truncated between runs. It
+ * reached 741 cases, 597 open, and two correct moderation suites started failing
+ * — a queue test asked for 500 rows and did not get its own, and a service test
+ * found 50 cases where it expected one. Both passed alone. A suite whose result
+ * depends on what else ran is not a test, and the failure looks like a data
+ * problem rather than an isolation one.
+ *
+ * **The seam is this function, not `startHarness`.** Three suites build their own
+ * pools because they need faulted stores or several servers, and one passes the
+ * string into spawned child processes. Returning the isolated URL from here is
+ * what stops those suites sharing rows with everything else; returning it from
+ * `startHarness` would leave the coupling intact in exactly the suites that
+ * opted out, with nothing failing to say so.
+ *
+ * Per-suite **database**, not schema: every store query is qualified `app.`, so
+ * `search_path` is bypassed and does not isolate. That was tried and measured.
  */
 export function requireDatabase(): string {
   if (CONNECTION_STRING === undefined) {
     throw new Error(
-      'DATABASE_URL is not set. The service suite runs against real Postgres and will not ' +
-        'silently pass without it. Run `cp .env.example .env` then `make up`.',
+      'DATABASE_URL is not set. Every database suite in this repository runs against real ' +
+        'Postgres and will not silently pass without it. Run `cp .env.example .env` then `make up`.',
     );
   }
-  return CONNECTION_STRING;
+  return currentIsolation().connectionString;
+}
+
+/** Applies the migrations into this process's database. Call once, in `beforeAll`. */
+function currentIsolation(): IsolatedDatabase {
+  isolation ??= isolatedDatabase('service');
+  return isolation;
+}
+
+export async function prepareDatabase(): Promise<void> {
+  if (prepared) {
+    return;
+  }
+  await currentIsolation().create();
+  prepared = true;
+}
+
+/**
+ * The connection string, preparing the database if this is the first call.
+ *
+ * A suite that only ever calls `requireDatabase()` should not also have to
+ * remember `prepareDatabase()`: the first pool to be opened is the natural
+ * moment to create and migrate, and a suite that builds its own pool — because
+ * it needs faulted stores or several servers — is exactly the one that would
+ * otherwise forget. `startHarness` still calls `prepareDatabase()` explicitly,
+ * because it is `await`able and a caller should not depend on pool construction
+ * to have run migrations.
+ */
+let prepared = false;
+export async function requireDatabaseReady(): Promise<string> {
+  await prepareDatabase();
+  return currentIsolation().connectionString;
+}
+
+/** How many harnesses in this process still hold the database open. */
+let openHarnesses = 0;
+
+/**
+ * Drops this process's database, if nothing is still using it.
+ *
+ * Reference-counted rather than idempotent, because a suite may legitimately run
+ * two services against one database — `rate-limit.test.ts` starts a second one
+ * with no trusted hop to cover the direct-socket path. Dropping on the first
+ * `close()` terminated the second pool's connections mid-suite (`terminating
+ * connection due to administrator command`), and re-creating the singleton made
+ * it worse: the second harness was then talking to a *different* database than
+ * the first, which is the kind of thing that passes.
+ *
+ * The last harness out drops it. A suite that leaks a harness leaks the
+ * database with it, which is the lesser evil — and visible, because the next run
+ * finds a database it did not create.
+ */
+export async function dropDatabase(): Promise<void> {
+  if (isolation === undefined || --openHarnesses > 0) {
+    return;
+  }
+  const dropping = isolation;
+  isolation = undefined;
+  await dropping.drop();
+}
+
+/** The database name, for a suite that wants to assert it is not the shared one. */
+export function isolatedDatabaseName(): string {
+  return isolation?.database ?? 'not created';
 }
 
 export interface Harness {
@@ -86,6 +179,17 @@ export interface Harness {
    * service reads the address through `ServerOptions.peerAddressFrom` — the same
    * hook a production proxy deployment installs — so the code under test is the
    * code that ships rather than a test-only branch.
+   *
+   * **`startHarness` installs the hop; a suite that calls `startService` itself
+   * does not get one.** A suite assembling its own service — because it needs
+   * faulted stores, several servers, or a child process — must pass
+   * `peerAddressFrom` to `startService` itself, or there is no seam and every
+   * request is stuck on the socket address with no way to vary it. Three suites
+   * have now been bitten by this and the symptom is not an error: the suite
+   * simply cannot present a distinct address, so a per-address limit refuses the
+   * sixth sign-up and the failure lands in an unrelated test looking like a data
+   * problem. If a suite finds itself out of `fromAddress` calls it does not
+   * recognise, this is why.
    */
   fromAddress(address: string | null): void;
   /**
@@ -227,7 +331,30 @@ function bearerOf(authorization: string | undefined): string | undefined {
   return authorization?.startsWith('Bearer ') === true ? authorization.slice(7) : undefined;
 }
 
-export async function startHarness(callers: readonly Caller[]): Promise<Harness> {
+export interface HarnessOptions {
+  /**
+   * Whether to install `peerAddressFrom`, the trusted-hop seam.
+   *
+   * True — the default — is the deployment behind a proxy, and the only shape in
+   * which every request in this repository can present a distinct address: they
+   * all arrive over one loopback socket. False is the deployment with nothing in
+   * front of the service, where `request.clientAddress` can only be
+   * `message.socket.remoteAddress`. Both are production paths, and a suite that
+   * only ever exercises the seam cannot tell whether the socket path works.
+   */
+  readonly trustedHop?: boolean;
+}
+
+export async function startHarness(
+  callers: readonly Caller[],
+  options: HarnessOptions = {},
+): Promise<Harness> {
+  // Before `requireDatabase()`: the connection string names this process's own
+  // database, and that database does not exist until it has been created and
+  // migrated. Connecting first would fail with "database does not exist" and
+  // read as a broken environment rather than an un-prepared one.
+  await prepareDatabase();
+  openHarnesses += 1;
   const connectionString = requireDatabase();
   const pool = new pg.Pool({ connectionString });
   // Assert the connection rather than assuming it. A pool that cannot answer a
@@ -250,13 +377,23 @@ export async function startHarness(callers: readonly Caller[]): Promise<Harness>
     },
     now: () => new Date(),
   };
+  const trustedHop = options.trustedHop ?? true;
   // The proxy seam, read per request rather than captured once, so a suite can
   // change the presented address between calls. `null` falls through to the
   // socket address, which is the direct-deployment path.
   let presentedAddress: string | null = null;
   const running = await startService(dependencies, {
     routes: serviceRoutes(dependencies),
-    peerAddressFrom: (message) => presentedAddress ?? message.socket.remoteAddress ?? null,
+    // Absent rather than returning `null` when the seam is switched off. A
+    // `peerAddressFrom` that answers null is still a hop the address came
+    // through, and the branch under test — `?? message.socket.remoteAddress` —
+    // would never run.
+    ...(trustedHop
+      ? {
+          peerAddressFrom: (message: IncomingMessage) =>
+            presentedAddress ?? message.socket.remoteAddress ?? null,
+        }
+      : {}),
   });
   return {
     url: running.url,
@@ -265,15 +402,43 @@ export async function startHarness(callers: readonly Caller[]): Promise<Harness>
     transaction,
     /** Every message the service tried to deliver, newest last. */
     messages,
-    /** Presents every subsequent request as arriving from `address`. */
-    fromAddress: (address) => {
-      presentedAddress = address;
-    },
+    /**
+     * Presents every subsequent request as arriving from `address`, or refuses:
+     * a harness with no trusted hop has no seam to present one through, and a
+     * silently-ignored call would let a suite believe it was varying the address
+     * when every request was arriving from the same socket.
+     */
+    fromAddress: trustedHop
+      ? (address: string | null) => {
+          presentedAddress = address;
+        }
+      : socketAddressOnly,
     close: async () => {
       await running.close();
       await pool.end();
+      // The database goes with the harness. Not doing this leaked 161 of them
+      // during development, which is invisible until someone runs out of
+      // connections or disk — and a leaked database still holds its rows, so a
+      // later run against it would quietly see old data.
+      await dropDatabase();
     },
   };
+}
+
+/**
+ * The `fromAddress` of a harness that runs no trusted hop.
+ *
+ * Exported for the suites that assemble their own `Harness` because they inject
+ * faulted stores rather than the production wiring. Those suites have no hop to
+ * present an address through, so this is the honest implementation for them — and
+ * it is exported rather than defaulted so that saying so stays a visible act. A
+ * harness that could present an address only by accident would let a suite
+ * believe it was varying the address when every request was in fact arriving
+ * from the same socket.
+ */
+export function socketAddressOnly(): void {
+  // Deliberately does nothing: this harness has no seam, so every request takes
+  // `message.socket.remoteAddress`, which is the direct-deployment path.
 }
 
 export interface JsonResponse {
