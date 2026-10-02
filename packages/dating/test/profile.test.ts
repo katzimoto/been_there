@@ -74,7 +74,7 @@ describe('profile completeness', () => {
       approval: 'pending' as const,
     }));
     expect(missingOf({ photos: pending })).toEqual<MissingProfileField[]>(['photos']);
-    expect(missingOf({ photos: [{ photoId: 'p1', approval: 'approved' }] })).not.toContain('photos');
+    expect(missingOf({ photos: [{ photoId: photo('p1'), approval: 'approved' }] })).not.toContain('photos');
   });
 
   it('requires at least one answered prompt and a usable bio length', () => {
