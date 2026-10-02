@@ -56,3 +56,4 @@ export * from './health/lifecycle.js';
 export * from './health/service.js';
 export * from './routes/health.js';
 export * from './routes/readiness.js';
+export * from './accounts/session-resolver.js';

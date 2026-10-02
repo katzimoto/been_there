@@ -23,7 +23,14 @@ import type { Principal, Role } from '@been-there/platform';
 import { type DomainError, type Result, type UserId, castId, domainError, ok } from '@been-there/core';
 import { type Stores, type Transaction } from '@been-there/contracts';
 import type { ContactMessage } from '@been-there/service';
-import { type ActorResolver, type RequestActor, type ServiceDependencies, serviceRoutes, startService } from '@been-there/service';
+import {
+  type ActorResolver,
+  type RequestActor,
+  type ServiceDependencies,
+  createSessionActorResolver,
+  serviceRoutes,
+  startService,
+} from '@been-there/service';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, '..', '..', '..', '..');
