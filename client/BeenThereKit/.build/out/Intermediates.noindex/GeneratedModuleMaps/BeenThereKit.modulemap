@@ -1,0 +1,4 @@
+module BeenThereKit {
+header "BeenThereKit-Swift.h"
+export *
+}

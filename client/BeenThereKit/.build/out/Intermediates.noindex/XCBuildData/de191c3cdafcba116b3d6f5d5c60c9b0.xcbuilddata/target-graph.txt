@@ -1,0 +1,11 @@
+Target dependency graph (4 targets)
+Target 'AllIncludingTests' in project 'Aggregate'
+➜ Explicit dependency on target 'BeenThereKitTests-product' in project 'BeenThereKit'
+➜ Dependency on target 'BeenThereKitTests-product' in project 'BeenThereKit' via transitive dependency through 'BeenThereKitTests-test-runner'
+➜ Explicit dependency on target 'BeenThereKit-product' in project 'BeenThereKit'
+➜ Explicit dependency on target 'BeenThereKit' in project 'BeenThereKit'
+Target 'BeenThereKit-product' in project 'BeenThereKit'
+➜ Explicit dependency on target 'BeenThereKit' in project 'BeenThereKit'
+Target 'BeenThereKitTests-product' in project 'BeenThereKit'
+➜ Explicit dependency on target 'BeenThereKit' in project 'BeenThereKit'
+Target 'BeenThereKit' in project 'BeenThereKit' (no dependencies)
