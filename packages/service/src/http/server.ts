@@ -174,6 +174,9 @@ async function handle(
 
   const now = dependencies.now();
   const requestFor = (tx: Transaction): RouteRequest => ({
+    // The socket's peer address, never a header: a client-set X-Forwarded-For
+    // is not a rate-limit key, it is a suggestion.
+    clientAddress: message.socket.remoteAddress ?? null,
     method: message.method ?? 'GET',
     path: url.pathname,
     params: match.params,

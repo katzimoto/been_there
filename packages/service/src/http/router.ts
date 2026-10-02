@@ -33,6 +33,22 @@ export interface RouteRequest {
    * transactions — the unit of work is the request, not the method.
    */
   readonly tx: Transaction;
+  /**
+   * The peer's address, for the per-address rate limits the account spec
+   * requires (`signup_per_ip`, `recovery_per_source`).
+   *
+   * Taken from the socket, never from a header a client can set: an
+   * `X-Forwarded-For` a caller controls is not a rate-limit key, it is a
+   * suggestion. A deployment behind a proxy that does not terminate the
+   * connection sees the proxy's address, which fails *closed* — everyone
+   * shares one bucket — rather than open, which is the failure that matters
+   * for an abuse control.
+   *
+   * Optional because a non-transactional route has no connection to read it
+   * from; a handler that needs it should treat its absence as "no key", which
+   * the rate-limit code decides.
+   */
+  readonly clientAddress: string | null;
 }
 
 export interface HttpResponse {

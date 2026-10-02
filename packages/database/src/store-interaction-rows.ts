@@ -13,6 +13,10 @@
  * Nothing here talks to the database on its own; `store-interaction.ts` owns
  * the behaviour and this module owns the vocabulary.
  */
+import type { UserId } from '@been-there/core';
+import { castId } from '@been-there/core';
+import type { ProfilePhotoState } from '@been-there/contracts';
+import { StoreError } from '@been-there/contracts';
 import { optionalDate, optionalString, stringPair } from './store-support.js';
 
 // ---------------------------------------------------------------- row shapes --
@@ -58,8 +62,42 @@ export type MatchDbRow = {
 };
 export type CountRow = { readonly total: string };
 
+export type ProfilePhotoDbRow = {
+  readonly photo_id: string;
+  readonly user_id: string;
+  readonly media_asset_id: string;
+  readonly alt_text: string;
+  readonly state: string;
+  readonly position: number | null;
+  readonly reason_code: string | null;
+  readonly created_at: Date;
+};
+
+export type LocationAnchorDbRow = {
+  readonly user_id: string;
+  readonly latitude: number;
+  readonly longitude: number;
+  readonly sensitivity: string;
+  readonly observed_at: Date;
+};
+
+
 /** The `likes` states `isCurrentLike` counts, and so the only ones a read keeps. */
 export const CURRENT_LIKE_STATES = "('live', 'matched')";
+
+/**
+ * The photo states as a lookup rather than a list, because this is the one read
+ * that narrows instead of searching: an unknown state has to be distinguishable
+ * from every legal one, and `includes` cannot say which value it did not
+ * recognise. No `Map`/`Set` — it is static, string-keyed and built once.
+ */
+const PHOTO_STATE_BY_VALUE: Readonly<Record<string, ProfilePhotoState>> = {
+  initiated: 'initiated',
+  scanning: 'scanning',
+  needs_human: 'needs_human',
+  approved: 'approved',
+  rejected: 'rejected',
+};
 
 /** The patch columns, so an unknown key is a fault rather than a dropped write. */
 export const PATCH_COLUMNS: Readonly<Record<string, string>> = {
@@ -100,6 +138,73 @@ export const INSERT_BLOCK = `
   VALUES ($1, $2, $3, $4)
   ON CONFLICT DO NOTHING
   RETURNING *`;
+
+export const INSERT_PROFILE_PHOTO = `
+  INSERT INTO app.profile_photos
+    (photo_id, user_id, media_asset_id, alt_text, state, position, reason_code, created_at, updated_at)
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+  RETURNING *`;
+
+export const FIND_PROFILE_PHOTO = 'SELECT * FROM app.profile_photos WHERE photo_id = $1';
+
+export const FIND_PROFILE_PHOTOS_FOR = `
+  SELECT * FROM app.profile_photos WHERE user_id = $1 ORDER BY created_at, photo_id`;
+
+/**
+ * The published set, in order. `state = 'approved'` rather than
+ * `position IS NOT NULL` because the state is the fact and the position is the
+ * order; reading the order off the order column would let a row with a
+ * position but no approval be served.
+ */
+export const PUBLISHED_PROFILE_PHOTOS = `
+  SELECT * FROM app.profile_photos
+   WHERE user_id = $1 AND state = 'approved'
+   ORDER BY position`;
+
+export const APPLY_PHOTO_DECISION = `
+  UPDATE app.profile_photos
+     SET state = $2, position = $3, reason_code = $4, updated_at = $5
+   WHERE photo_id = $1
+  RETURNING *`;
+
+export const DELETE_PROFILE_PHOTO = `
+  DELETE FROM app.profile_photos WHERE photo_id = $1 AND user_id = $2 RETURNING photo_id`;
+
+/**
+ * A reorder, as two statements over the whole set.
+ *
+ * The offset is the point. Postgres checks a unique index row by row within a
+ * statement, so mapping old positions onto new ones directly collides the
+ * moment two photos swap: a swap is a permutation, and every permutation has an
+ * instant where two rows hold the same number. Adding a large constant pushes
+ * every target position clear of the current range for the duration of the
+ * write, so the intermediate rows cannot collide with the rows they are
+ * replacing; the second statement lands them back where they belong. Both run
+ * inside the request's transaction, so the set has no observable half-applied
+ * order.
+ */
+export const REORDER_PROFILE_PHOTOS = `
+  UPDATE app.profile_photos p
+     SET position = n.new_position + 1000, updated_at = $3
+    FROM unnest($2::uuid[], $4::int[]) AS n(photo_id, new_position)
+   WHERE p.photo_id = n.photo_id AND p.user_id = $1 AND p.state = 'approved'
+  RETURNING p.photo_id`;
+
+export const FINALISE_PROFILE_PHOTO_ORDER = `
+  UPDATE app.profile_photos
+     SET position = position - 1000
+   WHERE user_id = $1 AND state = 'approved' AND position >= 1000
+  RETURNING photo_id`;
+
+export const UPSERT_LOCATION_ANCHOR = `
+  INSERT INTO app.location_anchors (user_id, latitude, longitude, sensitivity, observed_at)
+  VALUES ($1, $2, $3, 'sensitive', $4)
+  ON CONFLICT (user_id) DO UPDATE
+         SET latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude,
+             sensitivity = 'sensitive', observed_at = EXCLUDED.observed_at
+  RETURNING *`;
+
+export const FIND_LOCATION_ANCHOR = 'SELECT * FROM app.location_anchors WHERE user_id = $1';
 
 /**
  * The convergence. The `like_ids` union is the only thing a losing writer adds:
@@ -175,6 +280,42 @@ export function blockView(row: BlockDbRow): Readonly<Record<string, unknown>> {
     createdAt: row.created_at,
     liftedAt: row.lifted_at,
     active: row.lifted_at === null,
+  };
+}
+
+/**
+ * The photo row as the port names it.
+ *
+ * The state is narrowed against the port's own vocabulary rather than cast: a
+ * row whose state the media machine cannot produce means the CHECK constraint
+ * and the port have disagreed, and reporting that beats handing the route a
+ * state it would then write back into the next decision.
+ */
+export function photoView(row: ProfilePhotoDbRow): {
+  readonly photoId: string;
+  readonly userId: UserId;
+  readonly mediaAssetId: string;
+  readonly altText: string;
+  readonly state: ProfilePhotoState;
+  readonly position: number | null;
+  readonly reasonCode: string | null;
+  readonly createdAt: Date;
+} {
+  const state = PHOTO_STATE_BY_VALUE[row.state];
+  if (state === undefined) {
+    throw new StoreError(`profile_photos.state is '${row.state}' for photo ${row.photo_id}`, {
+      retryable: false,
+    });
+  }
+  return {
+    photoId: row.photo_id,
+    userId: castId<'UserId'>(row.user_id),
+    mediaAssetId: row.media_asset_id,
+    altText: row.alt_text,
+    state,
+    position: row.position,
+    reasonCode: row.reason_code,
+    createdAt: row.created_at,
   };
 }
 

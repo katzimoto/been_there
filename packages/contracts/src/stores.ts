@@ -261,6 +261,20 @@ export interface AccountPlatformStore {
    * Released when the transaction ends.
    */
   lockContact(contactIdentifier: string, tx: Transaction): Promise<void>;
+  /**
+   * Serialises rate-limit work for one subject within the current transaction.
+   *
+   * A count-then-record needs this to be a lock rather than a counter. Without
+   * it, two concurrent sign-ups from one address can each read count=4 and each
+   * pass a limit that admits one more — the limit would hold against a
+   * sequential test and fail under real concurrency.
+   *
+   * A transaction-scoped advisory lock, keyed on (bucket, subjectKey), which is
+   * why it belongs in the store: the service has no business issuing SQL, and a
+   * `pg_advisory_xact_lock` inside a route would be a second place that knows
+   * the store's dialect.
+   */
+  lockRateLimitSubject(bucket: string, subjectKey: string, tx: Transaction): Promise<void>;
   insertCredential(row: CredentialRow, tx: Transaction): Promise<void>;
   markContactVerified(userId: UserId, at: Date, tx: Transaction): Promise<boolean>;
   updatePasswordHash(userId: UserId, passwordHash: string, at: Date, tx: Transaction): Promise<boolean>;
@@ -320,11 +334,91 @@ export interface ProfileRow {
   readonly updatedAt: Date;
 }
 
+
+/**
+ * The per-photo state of a profile photo, which is the media machine's own
+ * vocabulary rather than a second one. `initiated` and `scanning` are the
+ * screening window; `needs_human` is a hold, not a refusal; `approved` is the
+ * only state a photo counts in, because only an approved photo is published.
+ */
+export type ProfilePhotoState = 'initiated' | 'scanning' | 'needs_human' | 'approved' | 'rejected';
+
+/**
+ * One row of a profile's photo set.
+ *
+ * There is no field here a byte or an original could hide in, and no address:
+ * `mediaAssetId` is the opaque handle the media service resolves, and the
+ * column's CHECK constraints refuse a URI scheme or a leading slash so that a
+ * URL to the original cannot be stored even by accident. Everything else here is
+ * a fact *about* the photo — its order, its state, the owner's alt text — and
+ * all of it is derived, never the artefact.
+ */
+export interface ProfilePhotoRow {
+  readonly photoId: string;
+  readonly userId: UserId;
+  readonly mediaAssetId: string;
+  readonly altText: string;
+  readonly state: ProfilePhotoState;
+  /** Position in the published set. Index 0 is the primary. Null while unpublished. */
+  readonly position: number | null;
+  /** Machine-readable refusal code. Present only on `rejected`. */
+  readonly reasonCode: string | null;
+  readonly createdAt: Date;
+}
+
+/**
+ * A stored location anchor: the precise point, classified `sensitive`.
+ *
+ * This is the only shape in the system that carries a coordinate, and it never
+ * leaves the service. What crosses a boundary is a `DistanceBand` computed from
+ * two of these by the dating domain's bucketing rule, which consumes both
+ * arguments and returns only the band.
+ */
+export interface LocationAnchorRow {
+  readonly userId: UserId;
+  readonly latitude: number;
+  readonly longitude: number;
+  readonly sensitivity: 'sensitive';
+  readonly observedAt: Date;
+}
+
 export interface InteractionStore {
   upsertProfile(row: ProfileRow, tx: Transaction): Promise<void>;
   findProfile(userId: UserId, tx: Transaction): Promise<ProfileRow | null>;
   upsertPreferences(userId: UserId, preferences: Readonly<Record<string, unknown>>, tx: Transaction): Promise<void>;
   findPreferences(userId: UserId, tx: Transaction): Promise<Readonly<Record<string, unknown>> | null>;
+
+  /**
+   * Every photo the owner holds, whatever its state, oldest first. The owner's
+   * audit trail is the whole set: a photo awaiting a verdict is as much theirs
+ * as an approved one, and a route that returned only the published set would
+ * make "being checked" indistinguishable from "never arrived".
+ */
+  listProfilePhotos(userId: UserId, tx: Transaction): Promise<readonly ProfilePhotoRow[]>;
+  insertProfilePhoto(row: Omit<ProfilePhotoRow, 'createdAt'>, tx: Transaction): Promise<void>;
+  /**
+   * The screening verdict, as one write. State and position move together
+   * because the schema ties them: a photo is in the ordered set exactly when it
+ * is approved, so a route that could write one without the other could create
+ * a primary that does not exist or an approved photo with nowhere to sit.
+   */
+  applyPhotoDecision(
+    photoId: string,
+    decision: { readonly state: ProfilePhotoState; readonly position: number | null; readonly reasonCode: string | null },
+    at: Date,
+    tx: Transaction,
+  ): Promise<boolean>;
+  /**
+   * Renumbers the published set to the given order. Returns how many rows moved,
+   * and refuses a list that is not exactly the published set, so a reorder can
+   * never silently drop a photo from the set.
+   */
+  reorderProfilePhotos(userId: UserId, orderedPhotoIds: readonly string[], at: Date, tx: Transaction): Promise<number>;
+  deleteProfilePhoto(photoId: string, userId: UserId, tx: Transaction): Promise<boolean>;
+
+  /** Writes the owner's precise anchor, classified `sensitive`. Never returned by a route. */
+  upsertLocationAnchor(row: LocationAnchorRow, tx: Transaction): Promise<void>;
+  findLocationAnchor(userId: UserId, tx: Transaction): Promise<LocationAnchorRow | null>;
 
   /**
    * The live like ledger for one user, ordered by creation. Every like-taking

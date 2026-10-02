@@ -116,6 +116,24 @@ export class PgAccountPlatformStore implements AccountPlatformStore {
     await affected('lockContact', tx, 'SELECT pg_advisory_xact_lock(hashtext($1))', [contactIdentifier]);
   }
 
+  /**
+   * Serialises rate-limit work for one (bucket, subject) pair.
+   *
+   * A count-then-record is a read followed by a write, so without a lock two
+   * concurrent sign-ups from one address can each read count=4 and each pass a
+   * limit that admits one more. The limit then holds against a sequential test
+   * and fails under real concurrency, which is the only place it matters.
+   *
+   * Transaction-scoped, so it releases on commit or rollback without a cleanup
+   * path. Both parts of the key are included because `signup_per_ip` and
+   * `signup_per_contact` must not serialise against each other.
+   */
+  async lockRateLimitSubject(bucket: string, subjectKey: string, tx: Transaction): Promise<void> {
+    await affected('lockRateLimitSubject', tx, 'SELECT pg_advisory_xact_lock(hashtext($1))', [
+      `${bucket}:${subjectKey}`,
+    ]);
+  }
+
   async findCredentialByContact(contactIdentifier: string, tx: Transaction): Promise<CredentialRow | null> {
     const found = await rows(
       'findCredentialByContact',

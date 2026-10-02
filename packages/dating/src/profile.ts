@@ -60,7 +60,10 @@ export const PROFILE_REQUIREMENTS = {
   maxDisplayNameChars: 50,
   minBioChars: 20,
   maxBioChars: 500,
-  minPhotos: 3,
+  minPhotos: 1, // R5: one approved photo is enough to enter discovery. It was 3,
+  // which rejected every one- and two-photo profile the specification calls valid.
+  // 'A user who uploads one good photo and is told the app wants three is a
+  // user who does not upload three.'
   minAnsweredPrompts: 1,
   minAge: 18,
   maxAge: 120,
