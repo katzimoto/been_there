@@ -43,6 +43,8 @@ const MAKEFILE = 'Makefile';
  */
 const MAPPING = [
   { step: 'Install', target: 'install' },
+  // Early, because a workflow that does not parse is rejected in 0s and never starts.
+  { step: 'Check the workflow file', target: 'workflow' },
   { step: 'Typecheck', target: 'typecheck' },
   { step: 'Typecheck tests', target: 'typecheck-tests' },
   { step: 'Test', target: 'test' },

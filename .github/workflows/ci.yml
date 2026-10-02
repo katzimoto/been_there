@@ -51,6 +51,12 @@ jobs:
       - name: Install
         run: npm ci
 
+      # Validates this very workflow. It must be early: a workflow that does
+      # not parse is rejected in 0s and never starts, so the real gate is
+      # `make check` before the push and this is the belt to its braces.
+      - name: Check the workflow file
+        run: node scripts/dev/check-workflow.mjs
+
       # The solution build typechecks every package's source through the project
       # graph. It is the check that catches a package added without being wired
       # into tsconfig.json, which `tsc -p` on a single package would not.
@@ -110,8 +116,6 @@ jobs:
       # is what proves the source is actually iOS-compatible rather than merely
       # building on the Mac.
       - name: Compile for the iOS simulator
-        env:
-          SDK: ${{ runner.temp }}/sdk
         env:
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
