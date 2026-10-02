@@ -53,6 +53,10 @@ const MAPPING = [
   // The schema has to exist before the suites run, or every database test skips
   // on a missing table and the job is green for the wrong reason.
   { step: 'Migrate', target: 'migrate' },
+  // The client mirrors rules the server enforces; a mirror that drifts is worse
+  // than no mirror, so its gate runs with everything else rather than on demand.
+  { step: 'Test the client safety gate', target: 'client-test' },
+  { step: 'Compile for the iOS simulator', target: 'client-ios' },
 ];
 
 /** The target that must run every mapped target, in CI order. */

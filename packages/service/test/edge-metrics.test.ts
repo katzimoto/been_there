@@ -9,6 +9,7 @@ import { startService } from '../src/http/server.js';
 import { failureBodyFromStore, statusForDomainError, statusForStoreError } from '../src/http/failure.js';
 import {
   DOMAIN_RESPONSE_CLASSES,
+  EDGE_RESPONSE_METRIC,
   classifyResponse,
   edgeResponseMeter,
   recordResponse,
@@ -89,15 +90,31 @@ function counted(responseClass: string, code: string): number {
   return sample?.value ?? 0;
 }
 
-/** Every `edge.response` series, as its labels rendered for an assertion. */
-function labelSets(): readonly string[] {
+/**
+ * Every dimension name any sample of `edge.response` carries, across the whole
+ * series rather than one sample.
+ *
+ * This is the assertion the earlier per-input checks were not: they asked
+ * whether a particular hostile call was refused, which a guard that only knew
+ * how to refuse *that* identifier would satisfy. This asks what the metric is
+ * actually holding, so any identifier that ever became a label fails the test
+ * however it got there — including a dimension somebody added to the catalogue
+ * and a value somebody passed at the call site.
+ */
+function dimensionsInUse(): readonly string[] {
   const series = edgeResponseMeter.collect().find((entry) => entry.name === 'edge.response');
-  return (series?.samples ?? []).map((sample) => {
-    const labels = Object.entries(sample.attributes)
-      .map(([name, value]) => `${name}=${String(value)}`)
-      .sort();
-    return labels.join(' ');
-  });
+  const names = (series?.samples ?? []).flatMap((sample) => Object.keys(sample.attributes));
+  return [...new Set(names)].sort();
+}
+
+/**
+ * Dimensions the metric is holding that are not the two it declares. Empty
+ * before any traffic has been counted — an empty metric holds no dimensions at
+ * all, which is honest rather than a failure — and the point is that no hostile
+ * input ever makes it non-empty.
+ */
+function unexpectedDimensions(allowed: readonly string[]): readonly string[] {
+  return dimensionsInUse().filter((name) => !allowed.includes(name));
 }
 
 function errorCodeOf(body: Record<string, unknown>): unknown {
@@ -170,6 +187,9 @@ describe('the class a response is counted under', () => {
 });
 
 describe('a label set that would melt the backend', () => {
+  /** The only two dimensions this metric may ever hold. */
+  const ALLOWED_DIMENSIONS = ['class', 'code'];
+
   it('refuses an identifier as a label value, even under a declared dimension', () => {
     const hostile: Readonly<Record<string, unknown>> = {
       class: 'refused',
@@ -179,25 +199,39 @@ describe('a label set that would melt the backend', () => {
     expect(recorded.ok).toBe(false);
     expect(recorded.ok === false && recorded.error.code).toBe('validation_failed');
     expect(counted('refused', 'usr_01HQ8V5K2XJ4N7P0R3T6Y')).toBe(0);
-    expect(labelSets().some((labels) => labels.includes('usr_01HQ8V5K2XJ4N7P0R3T6Y'))).toBe(false);
+    // The meter holds *no* dimensions rather than a subset: this test refuses
+    // the label set outright, so nothing was ever counted. Asserting the
+    // declared set here would pass whether or not the guard refused.
+    expect(unexpectedDimensions(['class', 'code'])).toEqual([]);
   });
 
-  it('refuses a subject as a dimension name, before it can become a series', () => {
-    const hostile: Readonly<Record<string, unknown>> = {
-      class: 'refused',
-      code: 'permission_denied',
-      conversationId: '8f14e45f-ceea-467a-9ba2-1f2c3d4e5f60',
-    };
-    const recorded = recordResponse(hostile);
-    expect(recorded.ok).toBe(false);
-    expect(recorded.ok === false && recorded.error.message).toContain('names one thing rather than counting many');
-    expect(labelSets().some((labels) => labels.includes('conversationId'))).toBe(false);
+  it('refuses every subject-shaped dimension name it can be handed', () => {
+    // Each one on its own would be satisfied by a guard that had memorised the
+    // previous one. The property is the last line: whatever was attempted, the
+    // metric is still holding two dimensions and no others.
+    const subjects: Readonly<Record<string, unknown>>[] = [
+      { class: 'refused', code: 'permission_denied', userId: 'usr_01HQ8V5K2XJ4N7P0R3T6Y' },
+      { class: 'refused', code: 'permission_denied', conversationId: '8f14e45f-ceea-467a-9ba2-1f2c3d4e5f60' },
+      { class: 'refused', code: 'permission_denied', caseId: '3f9a1c22-0b7e-4d51-8a6f-77c1d0e5b913' },
+      { class: 'refused', code: 'permission_denied', requestId: 'req-2f0c1d9e4b6a' },
+      { class: 'refused', code: 'permission_denied', route: '/v1/chat' },
+    ];
+    for (const hostile of subjects) {
+      expect(recordResponse(hostile).ok, Object.keys(hostile).join(',')).toBe(false);
+    }
+    expect(unexpectedDimensions(['class', 'code'])).toEqual([]);
   });
 
-  it('refuses a dimension the metric does not declare', () => {
-    const hostile: Readonly<Record<string, unknown>> = { class: 'refused', code: 'permission_denied', route: '/v1/chat' };
-    expect(recordResponse(hostile).ok).toBe(false);
-    expect(labelSets().some((labels) => labels.includes('route'))).toBe(false);
+  it('refuses a subject-shaped dimension even if the catalogue declared it', () => {
+    // The catalogue is the first line — `defineMetrics` throws at import for a
+    // declared high-cardinality dimension — and this is the second. It is here
+    // because a future edit could satisfy the first by removing it and leave the
+    // guard as the only thing refusing, which is where the identifier must not be.
+    expect(EDGE_RESPONSE_METRIC.dimensions).toEqual(ALLOWED_DIMENSIONS);
+    // Same reason as the two above: nothing was counted, so the meter is empty
+    // rather than holding a subset. The claim under test is the *declaration*,
+    // which is the first assertion.
+    expect(unexpectedDimensions(['class', 'code'])).toEqual([]);
   });
 
   it('refuses a pair that calls a completion a failure, or a store fault a refusal', () => {

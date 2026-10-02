@@ -104,16 +104,16 @@ jobs:
           xcode-version: latest-stable
 
       - name: Test the client safety gate
-        working-directory: client/BeenThereKit
-        run: swift test
+        run: cd client/BeenThereKit && swift test
 
       # The package declares iOS 17 as a platform, so compiling for the simulator
       # is what proves the source is actually iOS-compatible rather than merely
       # building on the Mac.
       - name: Compile for the iOS simulator
+        env:
+          SDK: ${{ runner.temp }}/sdk
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
         run: |
-          SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
-          xcrun swiftc -sdk "$SDK" -target arm64-apple-ios17.0-simulator \
-            -emit-module -module-name BeenThereKit \
-            client/BeenThereKit/Sources/BeenThereKit/ClientGate.swift \
-            -o "$RUNNER_TEMP/BeenThereKit.swiftmodule"
+          export SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+          xcrun swiftc -sdk "$SDK" -target arm64-apple-ios17.0-simulator -emit-module -module-name BeenThereKit client/BeenThereKit/Sources/BeenThereKit/ClientGate.swift -o "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/BeenThereKit.swiftmodule"

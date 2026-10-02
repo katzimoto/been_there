@@ -61,7 +61,7 @@ docs: ## Check that documentation links resolve
 research-check: ## Check the research tool still runs
 	node scripts/research/search.mjs --help > /dev/null
 
-check: typecheck typecheck-tests test docs research-check stale-artifacts lockfile migrate parity ## Everything CI runs, in CI order
+check: typecheck typecheck-tests test docs research-check stale-artifacts lockfile migrate client-test client-ios parity ## Everything CI runs, in CI order
 ci: install check ## The whole CI sequence as one command
 
 lockfile: ## Assert the lockfile covers every workspace package
@@ -152,4 +152,5 @@ client-test: ## Test the client safety gate (needs Xcode)
 	cd client/BeenThereKit && swift test
 
 client-ios: ## Compile the client for the iOS simulator (needs Xcode)
-	cd client/BeenThereKit && swift build --triple arm64-apple-ios17.0-simulator
+	@export SDK=$$(xcrun --sdk iphonesimulator --show-sdk-path); xcrun swiftc -sdk "$$SDK" -target arm64-apple-ios17.0-simulator -emit-module -module-name BeenThereKit client/BeenThereKit/Sources/BeenThereKit/ClientGate.swift -o "$${RUNNER_TEMP:-$${TMPDIR:-/tmp}}/BeenThereKit.swiftmodule"
+
