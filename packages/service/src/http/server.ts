@@ -56,6 +56,20 @@ const stderrReporter: FailureReporter = {
 export interface ServerOptions {
   readonly routes: readonly Route[];
   readonly onFailure?: FailureReporter;
+  /**
+   * Reads the peer address from a *trusted* hop, for a deployment that
+   * terminates TLS or connections at a proxy. Absent in a direct deployment,
+   * where the socket address is the truth and is used.
+   *
+   * Installing this is a statement that the hop is trusted, and it should be
+   * read as one. With no proxy in front, whatever this returns is whatever a
+   * client chose to send, so `signup_per_ip` and `recovery_per_source` become
+   * decorative — every caller presents its own address and no limit ever trips.
+   * That is the same reason `X-Forwarded-For` is not read unconditionally
+   * below: not that headers are untrustworthy, but that *this* hop's header is
+   * only as trustworthy as the proxy that set it.
+   */
+  readonly peerAddressFrom?: (message: IncomingMessage) => string | null;
 }
 
 /**
@@ -83,9 +97,20 @@ export function createRequestHandler(
   options: ServerOptions,
 ): (message: IncomingMessage, response: ServerResponse) => void {
   const report = options.onFailure ?? stderrReporter;
+  // The socket address unless a trusted hop overrides it. Resolved once per
+  // request so every `RouteRequest` the dispatcher builds agrees on it.
+  const peerAddress = (message: IncomingMessage): string | null =>
+    options.peerAddressFrom?.(message) ?? message.socket.remoteAddress ?? null;
 
   return (message, response) => {
-    void handle(dependencies, options.routes, report, message, response).catch((error: unknown) => {
+    void handle(
+      dependencies,
+      options.routes,
+      report,
+      peerAddress(message),
+      message,
+      response,
+    ).catch((error: unknown) => {
       // The last line of defence. A throw that escaped every handler is a defect,
       // and a defect must not be reported to the client as a refusal.
       report.report({ status: 500, message: 'unhandled fault in the request pipeline', error });
@@ -134,6 +159,7 @@ async function handle(
   dependencies: ServiceDependencies,
   routes: readonly Route[],
   report: FailureReporter,
+  peer: string | null,
   message: IncomingMessage,
   response: ServerResponse,
 ): Promise<void> {
@@ -174,9 +200,10 @@ async function handle(
 
   const now = dependencies.now();
   const requestFor = (tx: Transaction): RouteRequest => ({
-    // The socket's peer address, never a header: a client-set X-Forwarded-For
-    // is not a rate-limit key, it is a suggestion.
-    clientAddress: message.socket.remoteAddress ?? null,
+    // The socket's peer address, unless a trusted proxy hop supplied one via
+    // `peerAddressFrom`. Never a client-set header: an X-Forwarded-For from an
+    // untrusted caller is not a rate-limit key, it is a suggestion.
+    clientAddress: peer,
     method: message.method ?? 'GET',
     path: url.pathname,
     params: match.params,

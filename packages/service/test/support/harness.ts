@@ -77,6 +77,18 @@ export interface Harness {
   readonly stores: Stores;
   readonly pool: pg.Pool;
   /**
+   * Presents the next request as coming from `address`, the way a trusted proxy
+   * hop would. Null restores the socket address.
+   *
+   * This is the harness's job and not a service option: every test request
+   * arrives from `127.0.0.1`, so without a seam every suite shares one
+   * `signup_per_ip` bucket and `profile.test.ts` alone would exhaust it. The
+   * service reads the address through `ServerOptions.peerAddressFrom` — the same
+   * hook a production proxy deployment installs — so the code under test is the
+   * code that ships rather than a test-only branch.
+   */
+  fromAddress(address: string | null): void;
+  /**
    * The service's own transaction runner, exposed so a suite can read the
    * records a request wrote — the audit trail in particular is only observable
    * through a store method, and a property that is only true in the response
@@ -238,7 +250,14 @@ export async function startHarness(callers: readonly Caller[]): Promise<Harness>
     },
     now: () => new Date(),
   };
-  const running = await startService(dependencies, { routes: serviceRoutes(dependencies) });
+  // The proxy seam, read per request rather than captured once, so a suite can
+  // change the presented address between calls. `null` falls through to the
+  // socket address, which is the direct-deployment path.
+  let presentedAddress: string | null = null;
+  const running = await startService(dependencies, {
+    routes: serviceRoutes(dependencies),
+    peerAddressFrom: (message) => presentedAddress ?? message.socket.remoteAddress ?? null,
+  });
   return {
     url: running.url,
     stores,
@@ -246,6 +265,10 @@ export async function startHarness(callers: readonly Caller[]): Promise<Harness>
     transaction,
     /** Every message the service tried to deliver, newest last. */
     messages,
+    /** Presents every subsequent request as arriving from `address`. */
+    fromAddress: (address) => {
+      presentedAddress = address;
+    },
     close: async () => {
       await running.close();
       await pool.end();

@@ -10,7 +10,7 @@ import { readString } from '../http/body.js';
 import { okResponse, publicRoute, type Route } from '../http/router.js';
 import type { ContactMessage, ServiceDependencies } from '../ports.js';
 import { appendAudit, correlationIdFrom, recordFunnel } from '../accounts/funnel.js';
-import { recordAttempt, withinLimit, WINDOW_MS } from '../accounts/rate-limit.js';
+import { WINDOW_MS, checkLimit, recordAttempt, sourceKey } from '../accounts/rate-limit.js';
 import {
   RECOVERY_ATTEMPTS_PER_SOURCE_PER_DAY,
   RECOVERY_NEUTRAL_RESPONSE,
@@ -77,6 +77,48 @@ export function accountRecoveryRoutes(dependencies: ServiceDependencies): readon
       if (!normalized.ok) {
         return neutralRecoveryResponse();
       }
+      // §10's per-source limit is counted against the caller's address and before
+      // the credential is read. Both halves matter. Counting it before the lookup
+      // is what makes it a limit on *this endpoint's* use rather than a limit on
+      // recovery for accounts that happen to exist: a caller spraying unknown
+      // addresses is the case the limit exists for, and a version that returned
+      // early for an unknown contact would count none of it.
+      //
+      // It was previously keyed on `request.actor.actorId`, which on a public
+      // route is the constant 'anonymous' — so every caller in the world shared
+      // one bucket, and the first five recovery requests from anywhere on the
+      // internet consumed it for everyone. The result was also discarded, so
+      // nothing was enforced at all.
+      const sourceAddress = sourceKey(request.clientAddress);
+      const bySource = await checkLimit(
+        dependencies.stores,
+        'recovery_per_source',
+        sourceAddress,
+        RECOVERY_ATTEMPTS_PER_SOURCE_PER_DAY,
+        WINDOW_MS.day,
+        request.now,
+        request.tx,
+      );
+      // Every attempt is logged, refused or not. A log holding only the allowed
+      // ones would let a caller whose sixth request was refused keep going, and
+      // each further attempt would itself have been allowed.
+      await recordAttempt(
+        dependencies.stores,
+        'recovery_per_source',
+        sourceAddress,
+        request.now,
+        request.tx,
+      );
+      if (!bySource.ok) {
+        // The neutral response, not the refusal. This endpoint has exactly one
+        // exit (§7.1.2): a rate limit that returned its own error here would be
+        // readable as a signal — and since it fires on a source-address budget
+        // rather than an account one, a caller could otherwise map how close a
+        // given address was to its budget by watching for the change. The refusal
+        // is enforced by not issuing anything, and `account.recovery_locked` is
+        // what makes it visible to an operator.
+        return neutralRecoveryResponse();
+      }
       const credential = await dependencies.stores.accounts.findCredentialByContact(
         normalized.value.identifier,
         request.tx,
@@ -92,17 +134,8 @@ export function accountRecoveryRoutes(dependencies: ServiceDependencies): readon
         now: request.now,
       };
 
-      // Both §7.1 limits are counted before anything is written, and neither one
-      // changes the response: the requester learns nothing either way.
-      await withinLimit(
-        dependencies.stores,
-        'recovery_per_source',
-        request.actor.actorId,
-        RECOVERY_ATTEMPTS_PER_SOURCE_PER_DAY,
-        WINDOW_MS.day,
-        request.now,
-        request.tx,
-      );
+      // §7.1's per-account limit. Counted before anything is written, and it does
+      // not change the response either: the requester learns nothing either way.
       const seen = await attemptsInWindow(
         (bucket, key, since) =>
           dependencies.stores.accounts.countRateLimitEvents(bucket, key, since, request.tx),

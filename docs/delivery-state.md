@@ -51,6 +51,40 @@ the file says so at the top. No issue in the current delivery can be *accepted* 
 the sense of "a person did the thing on a phone" until an iOS build exists, and
 that needs Xcode, which is not installed here.
 
+## What the service now answers about itself
+
+Issue [#43](https://github.com/katzimoto/been_there/issues/43) added the surface
+that lets the running build be *observed*, and three of its claims are now tested
+rather than asserted:
+
+| Endpoint | Session | Answers |
+|---|---|---|
+| `GET /v1/health/live` | none | The process is up. Deliberately never consults the store: a restart cannot fix a database, and a fleet that restarts on one turns a degradation into an outage. |
+| `GET /v1/health/ready` | none | The transactional store answered `SELECT 1`, and the process is still serving rather than draining. 200 or 503, with the failing check named and no driver text. |
+| `GET /v1/health/metrics` | **required** | The safety catalogue and the health catalogue, including the detection-before-report ratio. A request asking for a high-cardinality label is refused with `validation_failed`. |
+
+All three are non-transactional, which is what makes the first two answerable
+while the database is unreachable. `make check` proves this by starting real
+processes, not by calling a function: `packages/service/test/health-restart.test.ts`
+spawns child processes, `SIGKILL`s them, and reads the database from a process
+that never saw the writes.
+
+Two things a reader should not assume:
+
+- **The metrics endpoint is not anonymous on purpose.** A safety ratio is a
+  statement about the detection pipeline; any session can read it, an outsider
+  cannot. Liveness and readiness are public because a probe needs to be.
+- **There is no edge-wide response counter.** `readiness.probe` is the only
+  service-side metric. Counting every response and classifying it as a refusal or
+  an outage needs the health surface on `ServiceDependencies`, which is a change
+  to `src/ports.ts` and to every suite's harness; it is not built.
+
+**Committed work across a restart is now proved, not argued.** ADR 0001's claim
+that a like, its match and its conversation commit together has been through an
+actual process boundary: acknowledged in one process, `SIGKILL`ed, and read by a
+third that never saw either write. A transaction left open when a process is
+killed leaves nothing behind — asserted against the rows, not a count.
+
 ## What CI proves, and what it does not
 
 Nine steps, parity-checked against `make check` so a green local run and a green

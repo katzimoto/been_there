@@ -25,8 +25,11 @@ import {
 import { applySessionLimit, issueStoredSession } from '../accounts/sessions.js';
 import {
   SIGNUP_PER_CONTACT_PER_DAY,
+  SIGNUP_PER_IP_PER_HOUR,
   WINDOW_MS,
+  checkLimit,
   recordAttempt,
+  sourceKey,
   withinLimit,
 } from '../accounts/rate-limit.js';
 
@@ -94,6 +97,47 @@ export function accountRoutes(dependencies: ServiceDependencies): readonly Route
       }
       const signUp = validated.value;
       const correlationId = correlationIdFrom(signUp.journeyId);
+
+      // §10's per-address limit is counted before the duplicate read, and this
+      // ordering is the enforcement rather than a detail of it. `duplicateSignUp`
+      // answers 202 without ever reaching the per-contact limit, so a limit placed
+      // after it would leave a caller free to probe registered addresses from one
+      // connection all afternoon: every probe would look like a success. Counting
+      // the address first means the spray is bounded by requests, not by whether
+      // the addresses happen to be registered.
+      const addressKey = sourceKey(request.clientAddress);
+      const byAddress = await checkLimit(
+        dependencies.stores,
+        'signup_per_ip',
+        addressKey,
+        SIGNUP_PER_IP_PER_HOUR,
+        WINDOW_MS.hour,
+        request.now,
+        request.tx,
+      );
+      // Recorded before the answer is known, refused or not — see `recordAttempt`.
+      await recordAttempt(
+        dependencies.stores,
+        'signup_per_ip',
+        addressKey,
+        request.now,
+        request.tx,
+      );
+      if (!byAddress.ok) {
+        // Charged to the per-contact budget as well. The two limits are
+        // independent and neither refunds the other, and a caller who is out of
+        // address budget must not thereby get a free look at the contact budget:
+        // it would turn the per-contact limit into something a caller evades by
+        // spending the per-IP one first.
+        await recordAttempt(
+          dependencies.stores,
+          'signup_per_contact',
+          signUp.contact.identifier,
+          request.now,
+          request.tx,
+        );
+        return refusedSignUp(dependencies, request, byAddress.error, correlationId);
+      }
 
       // One verified contact identifier is one account. The lock is taken before
       // the duplicate read so two concurrent sign-ups on the same address cannot
