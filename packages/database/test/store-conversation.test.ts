@@ -14,9 +14,7 @@
  * nothing.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { databasePool, dropDatabase } from './support/database.js';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import type { PoolClient } from 'pg';
@@ -28,35 +26,14 @@ import { createTransaction } from '../src/transaction.js';
 import { PgConversationStore } from '../src/store-conversation.js';
 import { ConversationStoreError, StoreError } from '@been-there/contracts';
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const ENV_FILE = join(REPO_ROOT, '.env');
-if (existsSync(ENV_FILE)) {
-  for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
-    const matched = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
-    if (matched === null) {
-      continue;
-    }
-    const [, name, value] = matched;
-    if (name !== undefined && value !== undefined && process.env[name] === undefined) {
-      process.env[name] = value;
-    }
-  }
-}
-
-const connectionString = process.env.DATABASE_URL;
-const describeIfDb = connectionString === undefined ? describe.skip : describe;
-
-describeIfDb('ConversationStore, against Postgres', () => {
+describe('ConversationStore, against Postgres', () => {
   let pool: pg.Pool;
   let client: PoolClient;
   let transaction: Transaction;
   const store = new PgConversationStore();
 
   beforeAll(async () => {
-    if (connectionString === undefined) {
-      return;
-    }
-    pool = new pg.Pool({ connectionString });
+    pool = await databasePool('conversation');
     client = await pool.connect();
     transaction = createTransaction(pool);
     // Connecting is not the same as reaching the schema this store reads, and
@@ -69,10 +46,9 @@ describeIfDb('ConversationStore, against Postgres', () => {
   });
 
   afterAll(async () => {
-    if (pool !== undefined) {
-      client.release();
-      await pool.end();
-    }
+    client.release();
+    await pool.end();
+    await dropDatabase();
   });
 
   async function twoUsers(): Promise<readonly [UserId, UserId]> {

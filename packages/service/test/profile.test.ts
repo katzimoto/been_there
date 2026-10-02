@@ -600,11 +600,27 @@ describe('profile and preferences, over HTTP against real Postgres', () => {
  * used to ask whether somebody has an account — so a fixed address would make
  * this suite pass exactly once against a persistent database and fail forever
  * after.
+ *
+ * The presented address rotates per call. §10's `signup_per_ip` admits 5 per
+ * address per hour, and this suite creates eighteen accounts — every request
+ * arriving from `127.0.0.1` would spend one shared bucket and the sixth would be
+ * refused, which is the limit working rather than the suite being wrong. Eighteen
+ * sign-ups from one address is not a thing a person does either; each account
+ * here is its own connection, which is what eighteen accounts actually are. The
+ * address is presented through the trusted-hop seam, so the socket path this
+ * suite never exercises is unchanged.
  */
+
+/** A per-run octet, so two runs never share a `signup_per_ip` bucket. */
+const RUN_OCTET = Math.floor(Math.random() * 254) + 1;
+
+let signUpSubject = 0;
 async function signUp(
   label: string,
   contact: string,
 ): Promise<{ readonly userId: UserId; readonly token: string }> {
+  signUpSubject += 1;
+  harness.fromAddress(`198.${RUN_OCTET}.${Math.floor(Math.random() * 254) + 1}.${signUpSubject}`);
   const response = await call(harness, 'POST', '/v1/accounts', label, {
     contact: `${contact.split('@')[0]}-${RUN_ID}@example.test`,
     password: 'a-long-enough-password',

@@ -7,7 +7,7 @@ import {
   type ContactMessage,
   type ServiceDependencies,
 } from '@been-there/service';
-import { requireDatabase, type JsonResponse } from './support/harness.js';
+import { requireDatabaseReady, type JsonResponse } from './support/harness.js';
 import { createSessionActorResolver } from '../src/accounts/session-resolver.js';
 
 /**
@@ -38,6 +38,18 @@ let pool: pg.Pool;
 let url: string;
 const messages: ContactMessage[] = [];
 
+/**
+ * The peer address presented to the service, read per request.
+ *
+ * This suite builds its own service rather than using `startHarness`, so it also
+ * has to install the trusted hop itself: without `peerAddressFrom` every request
+ * arrives over one loopback socket and they all share one `signup_per_ip` bucket.
+ */
+let presentedAddress: string | null = null;
+
+/** Per-run octets, so two runs never share a bucket. */
+const ROTATION_A = Math.floor(Math.random() * 254) + 1;
+const ROTATION_B = Math.floor(Math.random() * 254) + 1;
 const harness = {
   get url() {
     return url;
@@ -59,7 +71,7 @@ let harnessTransaction: ReturnType<typeof createTransaction>;
 let harnessStores: ReturnType<typeof createStores>;
 
 beforeAll(async () => {
-  pool = new pg.Pool({ connectionString: requireDatabase() });
+  pool = new pg.Pool({ connectionString: await requireDatabaseReady() });
   await pool.query('SELECT 1');
   harnessStores = createStores(pool);
   harnessTransaction = createTransaction(pool);
@@ -78,7 +90,12 @@ beforeAll(async () => {
     },
     now: () => new Date(),
   };
-  url = (await startService(dependencies, { routes: serviceRoutes(dependencies) })).url;
+  url = (
+    await startService(dependencies, {
+      routes: serviceRoutes(dependencies),
+      peerAddressFrom: (message) => presentedAddress ?? message.socket.remoteAddress ?? null,
+    })
+  ).url;
 });
 
 afterAll(async () => {
@@ -110,8 +127,17 @@ function uniqueContact(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}@beenthere.dev`;
 }
 
+let signUpSubject = 0;
+
 async function signUp(prefix: string): Promise<{ contact: string; userId: string; token: string }> {
   const contact = uniqueContact(prefix);
+  // This suite creates more accounts than §10's `signup_per_ip` admits per address
+  // per hour, and every request here arrives over one socket, so without a
+  // distinct address per account the sixth is refused. Six sign-ups from one
+  // address is not a thing a person does — that is what the limit is for — so the
+  // fixture is the realistic shape: each account is its own connection.
+  signUpSubject += 1;
+  presentedAddress = `198.${ROTATION_A}.${ROTATION_B}.${signUpSubject}`;
   const response = await call(harness, 'POST', '/v1/accounts', 'x', {
     contact,
     password: PASSWORD,

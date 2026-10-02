@@ -7,65 +7,29 @@
  * provide. A test that only checked the shape of a row would prove nothing
  * about whether two simultaneous likes can produce two matches.
  *
- * Skipped, loudly, when `DATABASE_URL` is unset. A suite that silently passes
- * because it did nothing is worse than a failing one.
+ * Fails loudly rather than skipping, via `support/database.ts`: a suite that
+ * silently passes because it connected to nothing looks identical to a
+ * passing one in the output.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import type { PoolClient } from 'pg';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { databasePool, dropDatabase } from './support/database.js';
 
-// Load `.env` the way `scripts/migrate.mjs` does. Without this the suite read
-// `process.env.DATABASE_URL` before anything had exported it, and skipped
-// itself in every run outside a shell that had — nine tests that looked green
-// and ran nothing. A suite that silently skips is the same failure mode as one
-// running stale code.
-const connectionString = resolveDatabaseUrl();
-const describeIfDb = connectionString === undefined ? describe.skip : describe;
-
-/**
- * The connection, from the environment or from the repository's `.env`.
- *
- * Kept here rather than imported so the suite stays self-contained: a test
- * that cannot run because a helper is missing is a test that does not run.
- */
-function resolveDatabaseUrl(): string | undefined {
-  if (process.env.DATABASE_URL !== undefined) {
-    return process.env.DATABASE_URL;
-  }
-  const envFile = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '.env');
-  if (!existsSync(envFile)) {
-    return undefined;
-  }
-  for (const line of readFileSync(envFile, 'utf8').split('\n')) {
-    const match = /^\s*DATABASE_URL\s*=\s*(.*?)\s*$/.exec(line);
-    if (match !== null) {
-      return match[1];
-    }
-  }
-  return undefined;
-}
-
-describeIfDb('schema guarantees, against Postgres', () => {
+describe('schema guarantees, against Postgres', () => {
   let pool: pg.Pool;
   let client: PoolClient;
 
   beforeAll(async () => {
-    if (connectionString === undefined) {
-      return;
-    }
-    pool = new pg.Pool({ connectionString });
+    pool = await databasePool('schema');
     client = await pool.connect();
   });
 
   afterAll(async () => {
-    if (pool !== undefined) {
-      client.release();
-      await pool.end();
-    }
+    client.release();
+    await pool.end();
+    await dropDatabase();
   });
 
   /** Two users, so a like has somewhere to point. */

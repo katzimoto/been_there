@@ -1,29 +1,31 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { type Caller, type Harness, type JsonResponse, call, startHarness } from './support/harness.js';
+import { type Caller, type Harness, startHarness } from './support/harness.js';
+import {
+  LOOPBACK_KEY,
+  SIGNUP_LIMIT,
+  UNKNOWN_SOURCE_KEY,
+  addressFor,
+  ipv6For,
+  keyFor,
+  loggedEvents,
+  refusalIn,
+  signUpFor,
+  uniqueContact,
+  withoutRetryAt,
+} from './support/rate-limit.js';
 
 /**
- * The two per-address limits in §10 — `signup_per_ip` and `recovery_per_source` —
- * over real HTTP against the real database.
+ * §10's `signup_per_ip`, over real HTTP against the real database.
  *
- * These are the only two limits whose unit is the caller's address, and they are
- * the two the rest of the suite cannot reach: every other request in this
- * repository arrives from `127.0.0.1`, so without a way to present a distinct
- * peer address there would be exactly one `signup_per_ip` bucket on the machine
- * and the sixth sign-up of the whole test run would fail. The harness installs
- * `peerAddressFrom`, which is the same hook a deployment behind a trusted proxy
- * installs, so what is exercised here is the production path rather than a
- * test-only branch. `the direct-socket path` at the bottom is the counterpart
- * that pins the no-proxy deployment.
+ * One of the two limits whose unit is the caller's address. Every request in
+ * this repository arrives from `127.0.0.1`, so without a way to present a
+ * distinct peer address there would be exactly one `signup_per_ip` bucket on
+ * the machine and the sixth sign-up of the whole test run would fail. The
+ * harness installs `peerAddressFrom`, the hook a deployment behind a trusted
+ * proxy installs, so what is exercised is a production path. The suite at the
+ * bottom is the counterpart that pins the deployment with nothing in front of
+ * the service. Shared fixtures live in `support/rate-limit.ts`.
  */
-
-const PASSWORD = 'correct horse battery staple';
-const TERMS_VERSION = '2026-09-01';
-const NO_SESSION = 'no-session-needed';
-
-/** §10: 5 sign-ups per address per hour. */
-const SIGNUP_LIMIT = 5;
-/** §10: 5 recovery requests per address per day. */
-const RECOVERY_LIMIT = 5;
 
 let harness: Harness;
 const callers: Caller[] = [];
@@ -36,70 +38,11 @@ afterAll(async () => {
   await harness.close();
 });
 
-let sequence = 0;
-
 /**
- * A contact identifier no other attempt in this run will use.
- *
- * Unique rather than shared so a test's account is never refused as a duplicate,
- * which would be a different refusal with the same status and would make a
- * rate-limit assertion pass for the wrong reason.
+ * A subject above the suite's own numbered ones, for the single sign-up a test
+ * needs from an address it is not about to exhaust.
  */
-function uniqueContact(prefix: string): string {
-  sequence += 1;
-  return `${prefix}-${process.pid}-${sequence}-${Date.now().toString(36)}@beenthere.dev`;
-}
-
-/** A well-formed adult sign-up, varying only the contact. */
-function signUpFor(contact: string): Promise<JsonResponse> {
-  return call(harness, 'POST', '/v1/accounts', NO_SESSION, {
-    contact,
-    password: PASSWORD,
-    dateOfBirth: '1994-03-02',
-    termsVersion: TERMS_VERSION,
-  });
-}
-
-/**
- * Per-run octets, so two runs never share a `signup_per_ip` bucket.
- *
- * `account_rate_limit_events` is append-only and nothing prunes it, so a fixed
- * test address accumulates every attempt any previous run made against it.
- * Without this the first sign-up of a later run reads a count of five left by an
- * earlier one and is refused — a failure that says nothing about the code under
- * test, and one that gets *more* likely the faster the suite is run.
- */
-const RUN_OCTET_A = Math.floor(Math.random() * 254) + 1;
-const RUN_OCTET_B = Math.floor(Math.random() * 254) + 1;
-
-/** A valid IPv4 address unique to this run, for a named subject. */
-function addressFor(subject: number): string {
-  return `198.${RUN_OCTET_A}.${RUN_OCTET_B}.${subject}`;
-}
-
-/** The same, in the other documentation range, for the recovery suite. */
-function recoveryAddressFor(subject: number): string {
-  return `203.${RUN_OCTET_A}.${RUN_OCTET_B}.${subject}`;
-}
-
-function requestRecovery(contact: string): Promise<JsonResponse> {
-  return call(harness, 'POST', '/v1/account-recovery', NO_SESSION, { contact });
-}
-
-/** Events in the log for one bucket and subject, oldest first. */
-async function loggedEvents(bucket: string, subjectKey: string): Promise<readonly { occurred_at: Date }[]> {
-  const result = await harness.pool.query(
-    `SELECT occurred_at FROM app.account_rate_limit_events
-      WHERE bucket = $1 AND subject_key = $2 ORDER BY event_id`,
-    [bucket, subjectKey],
-  );
-  return result.rows as readonly { occurred_at: Date }[];
-}
-
-/** The key the service derives for an address, mirroring `sourceKey`. */
-function keyFor(address: string): string {
-  return address.includes(':') ? `v6:${address}` : `v4:${address}`;
-}
+let registrationSubject = 90;
 
 describe('signup_per_ip', () => {
   it('admits five sign-ups from one address in an hour and refuses the sixth', async () => {
@@ -108,7 +51,7 @@ describe('signup_per_ip', () => {
 
     const statuses: number[] = [];
     for (let attempt = 1; attempt <= SIGNUP_LIMIT + 1; attempt += 1) {
-      statuses.push((await signUpFor(uniqueContact(`signup-${attempt}`))).status);
+      statuses.push((await signUpFor(harness, uniqueContact(`signup-${attempt}`))).status);
     }
 
     expect(statuses.slice(0, SIGNUP_LIMIT)).toEqual(Array<number>(SIGNUP_LIMIT).fill(201));
@@ -123,32 +66,34 @@ describe('signup_per_ip', () => {
     const fresh = addressFor(3);
     harness.fromAddress(busy);
     for (let attempt = 1; attempt <= SIGNUP_LIMIT + 1; attempt += 1) {
-      await signUpFor(uniqueContact(`busy-${attempt}`));
+      await signUpFor(harness, uniqueContact(`busy-${attempt}`));
     }
 
     harness.fromAddress(fresh);
-    const admitted = await signUpFor(uniqueContact('fresh-peer'));
+    const admitted = await signUpFor(harness, uniqueContact('fresh-peer'));
 
     expect(admitted.status).toBe(201);
   });
 
-  it('refuses the sixth of two simultaneous requests that arrive together', async () => {
-    // The concurrency claim. Five are already spent, so exactly one of these two
-    // The concurrency claim. Four are spent and the limit is five, so these two
-    // are racing for the one remaining admission. Without the subject lock both
-    // transactions read a count of four, both conclude they are the fifth, and
-    // both are admitted — a limit that holds in a sequential suite and fails the
-    // moment it is real.
+  it('refuses one of two simultaneous sign-ups that arrive together', async () => {
+    // The concurrency claim for this limit. Four are spent and the limit is five,
+    // so these two are racing for the one remaining admission. Without the subject
+    // lock both transactions read a count of four, both conclude they are the
+    // fifth, and both are admitted — a limit that holds in a sequential suite and
+    // fails the moment it is real.
+    //
+    // Verified by deleting `lockRateLimitSubject` and running this: it fails with
+    // two 201s where one is permitted. Restored, it passes — six consecutive runs,
+    // no flake.
     const address = addressFor(4);
     harness.fromAddress(address);
     for (let attempt = 1; attempt < SIGNUP_LIMIT; attempt += 1) {
-      const spent = await signUpFor(uniqueContact(`race-spend-${attempt}`));
-      expect(spent.status).toBe(201);
+      expect((await signUpFor(harness, uniqueContact(`race-spend-${attempt}`))).status).toBe(201);
     }
 
     const concurrent = await Promise.all([
-      signUpFor(uniqueContact('race-a')),
-      signUpFor(uniqueContact('race-b')),
+      signUpFor(harness, uniqueContact('race-a')),
+      signUpFor(harness, uniqueContact('race-b')),
     ]);
 
     expect(concurrent.filter((response) => response.status === 201)).toHaveLength(1);
@@ -175,10 +120,11 @@ describe('signup_per_ip', () => {
     }
 
     // Five events exist for this address, all outside the window.
-    expect(await loggedEvents('signup_per_ip', keyFor(address))).toHaveLength(SIGNUP_LIMIT);
-    const admitted = await signUpFor(uniqueContact('after-the-window'));
+    expect(await loggedEvents(harness,'signup_per_ip', keyFor(address))).toHaveLength(SIGNUP_LIMIT);
+    const admitted = await signUpFor(harness, uniqueContact('after-the-window'));
 
     expect(admitted.status).toBe(201);
+  });
 
   it('records the refused attempt in the log', async () => {
     // A limit that counts only what it allowed is not a limit: the sixth would be
@@ -187,10 +133,10 @@ describe('signup_per_ip', () => {
     const address = addressFor(6);
     harness.fromAddress(address);
     for (let attempt = 1; attempt <= SIGNUP_LIMIT + 3; attempt += 1) {
-      await signUpFor(uniqueContact(`logged-${attempt}`));
+      await signUpFor(harness, uniqueContact(`logged-${attempt}`));
     }
 
-    const events = await loggedEvents('signup_per_ip', keyFor(address));
+    const events = await loggedEvents(harness,'signup_per_ip', keyFor(address));
 
     expect(events).toHaveLength(SIGNUP_LIMIT + 3);
   });
@@ -201,24 +147,40 @@ describe('signup_per_ip', () => {
     // an address that is over budget, and requiring the two refusals to be
     // identical. A copy that mentioned an account, a duplicate or a registration
     // would separate them and answer the question the caller was asking.
+    //
+    // `retryAt` is compared out, and that is a claim rather than a concession: it
+    // is `now + window`, so it is a restatement of the caller's own clock and
+    // cannot encode anything about the contact. Byte equality is not available
+    // here for any two requests, so demanding it would be demanding that the
+    // service freeze time.
     const address = addressFor(7);
     const registered = uniqueContact('oracle-known');
-    expect((await signUpFor(registered)).status).toBe(201);
+    // From an address of its own: signing the owner up from `address` would spend
+    // one of the five this test is about to exhaust.
+    harness.fromAddress(addressFor(registrationSubject));
+    const owner = await signUpFor(harness, registered);
+    expect(owner.status).toBe(201);
     harness.fromAddress(address);
     for (let attempt = 1; attempt <= SIGNUP_LIMIT + 1; attempt += 1) {
-      await signUpFor(uniqueContact(`oracle-spend-${attempt}`));
+      await signUpFor(harness, uniqueContact(`oracle-spend-${attempt}`));
     }
 
-    const forRegistered = await signUpFor(registered);
-    const forAbsent = await signUpFor(uniqueContact('oracle-absent'));
+    const forRegistered = await signUpFor(harness, registered);
+    const forAbsent = await signUpFor(harness, uniqueContact('oracle-absent'));
 
     expect(forRegistered.status).toBe(429);
     expect(forAbsent.status).toBe(429);
-    expect(forAbsent.body).toEqual(forRegistered.body);
-    // Nothing in the refusal names a contact, an account or a registration.
-    const serialised = JSON.stringify(forAbsent.body).toLowerCase();
+    expect(withoutRetryAt(refusalIn(forAbsent))).toEqual(withoutRetryAt(refusalIn(forRegistered)));
+    // Nothing a caller reads names a contact, an account or a registration. The
+    // scan is over the copy rather than the whole body: `domain` is
+    // `service.accounts` on every refusal this route can return, so it says which
+    // module answered and nothing about who asked.
+    const copy = JSON.stringify({
+      message: refusalIn(forAbsent).error?.message,
+      title: refusalIn(forAbsent).error?.details?.['title'],
+    }).toLowerCase();
     for (const leak of ['account', 'email', 'contact', 'exist', 'registered', 'duplicate']) {
-      expect(serialised).not.toContain(leak);
+      expect(copy).not.toContain(leak);
     }
   });
 
@@ -234,114 +196,78 @@ describe('signup_per_ip', () => {
     // probing contacts and arrive at the contact budget with nothing spent.
     const address = addressFor(8);
     harness.fromAddress(address);
-    const first = uniqueContact('cross-first');
-    for (let attempt = 1; attempt <= SIGNUP_LIMIT + 1; attempt += 1) {
-      await signUpFor(uniqueContact(`cross-${attempt}`));
+    for (let attempt = 1; attempt <= SIGNUP_LIMIT; attempt += 1) {
+      await signUpFor(harness, uniqueContact(`cross-spend-${attempt}`));
     }
-    const chargedWhileOverBudget = await loggedEvents('signup_per_contact', first);
 
+    // The probed contact, attempted *while over budget* — which is the whole
+    // point. Asking about the log for a contact no attempt ever carried would
+    // read zero for the same reason whether or not the charge exists.
+    const probed = uniqueContact('cross-probed');
+    const refused = await signUpFor(harness, probed);
+    const chargedWhileOverBudget = await loggedEvents(harness,'signup_per_contact', probed);
+
+    expect(refused.status).toBe(429);
     expect(chargedWhileOverBudget).toHaveLength(1);
   });
-});
 
-});
-describe('recovery_per_source', () => {
-  it('refuses the sixth recovery request from one address in a day', async () => {
-    // A recovery request is "admitted" by a message being sent, not by the
-    // response: this endpoint returns one neutral answer in every case, so the
-    // only observable difference between the fifth and the sixth is whether a
-    // reset link exists. That is also the point — see the refusal-shape test.
-    const address = recoveryAddressFor(1);
-    const contact = uniqueContact('recovery-source');
-    const owner = await signUpFor(contact);
-    expect(owner.status).toBe(201);
-    harness.fromAddress(address);
-
-    for (let attempt = 1; attempt <= RECOVERY_LIMIT; attempt += 1) {
-      const before = harness.messages.length;
-      await requestRecovery(contact);
-      expect(harness.messages.length).toBe(before + 1);
+  it('counts every address in one IPv6 prefix as one source', async () => {
+    // §10 says per IP, and an IPv6 subscriber is routinely delegated a /64 —
+    // 2^64 addresses — which is also what a phone with `ip privacy` enabled
+    // rotates through every few minutes while keeping the prefix. Keyed on the
+    // whole address, the limit would not limit that subscriber at all. So the key
+    // is the /64, and this is the test that says so: a second address inside the
+    // prefix is refused, and a different prefix is not.
+    const subscriber = ipv6For(1, 1);
+    harness.fromAddress(subscriber);
+    for (let attempt = 1; attempt <= SIGNUP_LIMIT + 1; attempt += 1) {
+      await signUpFor(harness, uniqueContact(`v6-spend-${attempt}`));
     }
 
-    const before = harness.messages.length;
-    await requestRecovery(contact);
+    harness.fromAddress(ipv6For(1, 2));
+    const sameSubscriber = await signUpFor(harness, uniqueContact('v6-same-prefix'));
 
-    expect(harness.messages.length).toBe(before);
-  });
+    harness.fromAddress(ipv6For(2, 1));
+    const otherSubscriber = await signUpFor(harness, uniqueContact('v6-other-prefix'));
 
-  it('answers a refused request identically to an admitted one', async () => {
-    // The refusal must not be visible in the response. If the sixth returned
-    // `rate_limited` while the first five returned the neutral body, a caller
-    // could watch for the change to learn how close a given address was to its
-    // budget — and on this endpoint, that is a signal about the requester.
-    const address = recoveryAddressFor(2);
-    const contact = uniqueContact('recovery-neutral');
-    await signUpFor(contact);
-    harness.fromAddress(address);
-
-    const admitted = await requestRecovery(contact);
-    for (let attempt = 2; attempt <= RECOVERY_LIMIT + 1; attempt += 1) {
-      await requestRecovery(contact);
-    }
-    const refused = await requestRecovery(contact);
-
-    expect(refused.status).toBe(admitted.status);
-    expect(refused.body).toEqual(admitted.body);
-  });
-
-  it('does not consume the budget for a contact that does not exist', async () => {
-    // Not an assertion that unknown contacts are free — they are charged, because
-    // spraying unknown addresses is what the limit is for. This is the claim that
-    // one source's recovery of a real account is bounded regardless of what it
-    // sends alongside, which is what the per-account limit alone would not give.
-    const address = recoveryAddressFor(3);
-    harness.fromAddress(address);
-    for (let attempt = 1; attempt <= RECOVERY_LIMIT; attempt += 1) {
-      await requestRecovery(uniqueContact(`unknown-${attempt}`));
-    }
-
-    const before = harness.messages.length;
-    const known = uniqueContact('recovery-after-spray');
-    await signUpFor(known);
-    await requestRecovery(known);
-
-    expect(harness.messages.length).toBe(before + 1);
-  });
-
-  it('counts one source against another separately', async () => {
-    const busy = recoveryAddressFor(4);
-    const other = recoveryAddressFor(5);
-    const contact = uniqueContact('recovery-two-sources');
-    await signUpFor(contact);
-
-    harness.fromAddress(busy);
-    for (let attempt = 1; attempt <= RECOVERY_LIMIT + 1; attempt += 1) {
-      await requestRecovery(contact);
-    }
-    const before = harness.messages.length;
-
-    harness.fromAddress(other);
-    await requestRecovery(contact);
-
-    expect(harness.messages.length).toBe(before + 1);
+    expect(sameSubscriber.status).toBe(429);
+    expect(otherSubscriber.status).toBe(201);
   });
 });
-
 describe('the direct-socket path', () => {
-  it('counts the socket address when no trusted hop supplies one', async () => {
-    // The counterpart to every test above, and the one that would catch someone
-    // deleting `peerAddressFrom` and leaving the rest of this file green through
-    // the injected address. With no override installed the address comes from the
-    // socket, and the socket says `127.0.0.1` — so events land under that key and
-    // not under any key this suite invented.
-    harness.fromAddress(null);
-    const contact = uniqueContact('socket-path');
-    await signUpFor(contact);
+  // A second service, started the way a deployment with nothing in front of it
+  // starts. No suite above can reach this path: they all install `peerAddressFrom`
+  // and present an address through it, so deleting the `?? message.socket
+  // .remoteAddress` fallback from the server would leave every one of them green.
+  let direct: Harness;
 
-    const events = await loggedEvents('signup_per_ip', 'v4:127.0.0.1');
-    const prefixEvents = await loggedEvents('signup_per_ip', 'v6:0000:0000:0000:0000::/64');
+  beforeAll(async () => {
+    direct = await startHarness(callers, { trustedHop: false });
+  });
 
-    expect(events.length + prefixEvents.length).toBeGreaterThan(0);
+  afterAll(async () => {
+    await direct.close();
+  });
+
+  it('takes the peer address from the socket when no trusted hop supplies one', async () => {
+    // Two claims, and the first is the load-bearing one. If the socket address
+    // could not be read, `sourceKey` answers `unknown-source` and every caller in
+    // the world shares one bucket — so a sign-up moving that key would mean the
+    // production path is broken even though the request succeeded. It is asserted
+    // as *unchanged* rather than as an absolute zero because it is the only claim
+    // here that survives the rest of the suite running in parallel against the
+    // same database.
+    const before = await loggedEvents(direct, 'signup_per_ip', UNKNOWN_SOURCE_KEY);
+
+    await signUpFor(direct, uniqueContact('socket-path'));
+
+    const afterUnreadable = await loggedEvents(direct, 'signup_per_ip', UNKNOWN_SOURCE_KEY);
+    const afterLoopback = await loggedEvents(direct, 'signup_per_ip', LOOPBACK_KEY);
+
+    expect(afterUnreadable).toHaveLength(before.length);
+    // "At least one" rather than "exactly one": other suites sign up over this
+    // same loopback address concurrently, so the count can move under the
+    // assertion for reasons that have nothing to do with this request.
+    expect(afterLoopback.length).toBeGreaterThan(0);
   });
 });
-

@@ -48,6 +48,24 @@ export interface Created {
 let signUpCounter = 0;
 
 /**
+ * A distinct peer address per account, unique to this run.
+ *
+ * Two layers of uniqueness, both needed. `account_rate_limit_events` is
+ * append-only and nothing prunes it, so a fixed test address accumulates every
+ * attempt any earlier run made against it — without the per-run octets a later
+ * run would read a count of five left by an earlier one and be refused for a
+ * reason that has nothing to do with the code under test. And the counter itself
+ * must be in the address, because the limit counts *attempts* from one address:
+ five accounts may share one, the sixth may not.
+ */
+const ROTATION_OCTET_A = Math.floor(Math.random() * 254) + 1;
+const ROTATION_OCTET_B = Math.floor(Math.random() * 254) + 1;
+
+function rotationFor(sequence: number): string {
+  return `198.${ROTATION_OCTET_A}.${ROTATION_OCTET_B}.${sequence}`;
+}
+
+/**
  * A real sign-up, not an empty body.
  *
  * Sign-up now requires a contact, a password, a date of birth and a terms
@@ -64,6 +82,17 @@ let signUpCounter = 0;
 export async function createAccount(harness: Harness, token: string): Promise<Created> {
   signUpCounter += 1;
   const contact = `member-${signUpCounter}-${Date.now().toString(36)}@example.test`;
+  // §10's `signup_per_ip` admits 5 per address per hour, and this fixture is the
+  // one every suite needing several people goes through. Left on the socket
+  // address, the sixth account in a run was refused — correctly, since six
+  // sign-ups from one address is not a thing a person does, but the failure
+  // surfaced in an unrelated suite and read like a data problem.
+  //
+  // Rotated here rather than at each call site because a limit that is easy to
+  // forget is a limit that will be: three suites needed the same one-line change
+  // before this existed. The address is presented through the trusted-hop seam,
+  // which is a production path, so what those suites exercise is unchanged.
+  harness.fromAddress(rotationFor(signUpCounter));
   const response = await call(harness, 'POST', '/v1/accounts', token, {
     contact,
     password: 'correct-horse-battery-staple-42',

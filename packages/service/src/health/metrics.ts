@@ -9,8 +9,8 @@ import {
   defineMetrics,
   isHighCardinalityDimension,
 } from '@been-there/platform';
+import { EDGE_RESPONSE_METRIC, edgeResponseMeter } from './edge-metrics.js';
 import { InMemoryMeter, type MetricSeries } from './meter.js';
-
 /**
  * The metrics this service records about itself, on top of the safety catalogue
  * it inherits from `packages/platform`.
@@ -30,6 +30,7 @@ export const HEALTH_METRICS = defineMetrics({
       'A readiness probe answered, by whether the transactional store was reachable. A rising count of `down` beside a flat count of `up` is the shape of a database fault, which is the one thing liveness deliberately does not report.',
     dimensions: ['result'],
   },
+  'edge.response': EDGE_RESPONSE_METRIC,
 } satisfies Readonly<Record<string, MetricDefinition>>);
 
 /** The two values `readiness.probe`'s only dimension can take. */
@@ -150,11 +151,16 @@ export class ServiceMetrics {
    * honest zero rather than a fabricated one.
    */
   snapshot(labels: readonly MetricLabel[] = []): readonly MetricSeries[] {
-    return this.#meter.collect().map((series) => ({
-      ...series,
-      samples: series.samples.filter((entry) =>
+    // The edge counter is a process-wide meter rather than a field on this
+    // instance, because it is written where the response is finalised and read
+    // here. Merging here rather than in the HTTP layer keeps one place that
+    // decides what this process serves.
+    const series = [...edgeResponseMeter.collect(), ...this.#meter.collect()];
+    return series.map((entry) => ({
+      ...entry,
+      samples: entry.samples.filter((sample) =>
         labels.every((label) => {
-          const actual = entry.attributes[label.dimension];
+          const actual = sample.attributes[label.dimension];
           return actual === undefined || actual === label.value;
         }),
       ),

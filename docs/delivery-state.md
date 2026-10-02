@@ -69,15 +69,36 @@ processes, not by calling a function: `packages/service/test/health-restart.test
 spawns child processes, `SIGKILL`s them, and reads the database from a process
 that never saw the writes.
 
-Two things a reader should not assume:
+One thing a reader should not assume:
 
 - **The metrics endpoint is not anonymous on purpose.** A safety ratio is a
   statement about the detection pipeline; any session can read it, an outsider
   cannot. Liveness and readiness are public because a probe needs to be.
-- **There is no edge-wide response counter.** `readiness.probe` is the only
-  service-side metric. Counting every response and classifying it as a refusal or
-  an outage needs the health surface on `ServiceDependencies`, which is a change
-  to `src/ports.ts` and to every suite's harness; it is not built.
+
+**The edge-wide response counter now exists.** `edge.response`, served at the
+metrics endpoint beside the rest, counts every response the edge finishes
+writing under two labels and no others: `class`, which is `completed`,
+`refused` or `outage`, and `code`, which is the domain code, `store_unavailable`,
+`store_failure`, or `none` for a completion. The two are kept apart because
+they are opposites — a refusal is the safety system working and an outage is the
+service failing — and a number that averages them cannot tell a rising refusal
+rate from a falling availability. The classification is applied once, in
+`http/server.ts`'s `finalise`, from the error rather than from the status, so a
+refusal decided in a domain function and a store fault raised inside the
+transaction wrapper land in the same place. `readiness.probe` was the only
+service-side metric; it is no longer the only one.
+
+The counter needed no change to `src/ports.ts`. It is a process-wide meter that
+the HTTP layer writes and `ServiceMetrics.snapshot` reads, because the layer
+that decides a response is the layer that knows whether it was refused, and it
+sits below the dependency seam. Two consequences worth stating rather than
+hiding: `edge.response` is therefore per process and not per
+`ServiceDependencies`, and a label set carrying an identifier is refused at the
+counter rather than in a review comment.
+
+No status code moved. The mapping was already right and is now asserted beside
+the metric it feeds — a domain refusal is a 4xx with the domain's own code, a
+retryable `StoreError` is 503, and a non-retryable one is 500.
 
 **Committed work across a restart is now proved, not argued.** ADR 0001's claim
 that a like, its match and its conversation commit together has been through an

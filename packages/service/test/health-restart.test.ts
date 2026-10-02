@@ -16,7 +16,15 @@ import {
   serviceRoutes,
   startService,
 } from '@been-there/service';
-import { type Caller, type Harness, call, member, requireDatabase, resolverFor } from './support/harness.js';
+import {
+  type Caller,
+  type Harness,
+  call,
+  member,
+  requireDatabaseReady,
+  resolverFor,
+  socketAddressOnly,
+} from './support/harness.js';
 import { COMPLETE_PROFILE, PASSING_RESULT, verify } from './support/fixtures.js';
 
 /**
@@ -203,12 +211,12 @@ function modulePath(request: string): string {
  * A waiter is resolved by a line rather than by a poll, so a test never waits
  * longer than the process takes and never observes a half-written line.
  */
-function startChild(steps: readonly ChildStep[], callers: readonly { token: string; userId: string }[]): RunningChild {
+async function startChild(steps: readonly ChildStep[], callers: readonly { token: string; userId: string }[]): Promise<RunningChild> {
   const configPath = join(workspace, `config-${randomUUID()}.json`);
   writeFileSync(
     configPath,
     JSON.stringify({
-      connectionString: requireDatabase(),
+      connectionString: await requireDatabaseReady(),
       pgModule: modulePath('pg'),
       databaseModule: modulePath('@been-there/database'),
       serviceModule: modulePath('@been-there/service'),
@@ -284,7 +292,7 @@ describe('committed work across a process restart', () => {
   let bobId = '';
 
   beforeAll(async () => {
-    const pool = new pg.Pool({ connectionString: requireDatabase() });
+    const pool = new pg.Pool({ connectionString: await requireDatabaseReady() });
     const stores = createStores(pool);
     const transaction = createTransaction(pool);
     const dependencies: ServiceDependencies = {
@@ -302,6 +310,9 @@ describe('committed work across a process restart', () => {
       stores,
       transaction,
       dependencies,
+      // No trusted hop is installed above, so every request takes its socket
+      // address and there is nothing to present a different one through.
+      fromAddress: socketAddressOnly,
       close: async () => {
         await running.close();
         await pool.end();
@@ -355,7 +366,7 @@ describe('committed work across a process restart', () => {
   it('keeps a like, the match it became and the conversation it opened, across a hard kill', async () => {
     // Process one: the first half of the match, acknowledged and then killed
     // without a chance to release anything.
-    const first = startChild(
+    const first = await startChild(
       [{ kind: 'request', name: 'like', method: 'POST', path: '/v1/interactions/likes', token: ALICE, body: { toUserId: bobId } }],
       childCallers(),
     );
@@ -368,7 +379,7 @@ describe('committed work across a process restart', () => {
     // Process two: the reciprocal like, which resolves into a match and opens a
     // conversation — all inside one request's transaction. Acknowledged, then
     // killed the same way.
-    const second = startChild(
+    const second = await startChild(
       [{ kind: 'request', name: 'like', method: 'POST', path: '/v1/interactions/likes', token: BOB, body: { toUserId: aliceId } }],
       childCallers(),
     );
@@ -383,7 +394,7 @@ describe('committed work across a process restart', () => {
     // Process three: never saw either of the writes. It reads the match over
     // HTTP and the conversation through the store, so the assertion is about
     // what survived rather than about what a response body claimed.
-    const third = startChild(
+    const third = await startChild(
       [
         { kind: 'request', name: 'matches', method: 'GET', path: '/v1/matches', token: ALICE },
         { kind: 'conversation', name: 'conversation', matchId, userId: aliceId },
@@ -409,7 +420,7 @@ describe('committed work across a process restart', () => {
     const daveId = String(callers.find((caller) => caller.token === DAVE)?.userId);
     const likeId = randomUUID();
 
-    const child = startChild([{ kind: 'openTransaction', name: 'uncommitted', likeId, from: carolId, to: daveId }], childCallers());
+    const child = await startChild([{ kind: 'openTransaction', name: 'uncommitted', likeId, from: carolId, to: daveId }], childCallers());
     await child.expect('OPEN', 'uncommitted');
     // The row is written inside the transaction and has never been committed.
     child.signal('SIGKILL');
@@ -424,7 +435,7 @@ describe('committed work across a process restart', () => {
   }, 60_000);
 
   it('reports ready on a fresh start and drains in order when told to stop', async () => {
-    const child = startChild(
+    const child = await startChild(
       [{ kind: 'request', name: 'ready', method: 'GET', path: '/v1/health/ready', token: ALICE }],
       childCallers(),
     );

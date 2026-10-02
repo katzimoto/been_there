@@ -15,9 +15,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { databasePool, dropDatabase } from './support/database.js';
 import pg from 'pg';
 import type { PoolClient } from 'pg';
 import { castId, type UserId } from '@been-there/core';
@@ -28,20 +26,6 @@ import {
   VerificationAttemptStoreError,
   type AttemptRecord,
 } from '../src/store-verification-attempts.js';
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const ENV_FILE = resolve(HERE, '..', '..', '..', '.env');
-if (existsSync(ENV_FILE)) {
-  for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
-    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
-    if (match !== null && process.env[match[1]!] === undefined) {
-      process.env[match[1]!] = match[2]!;
-    }
-  }
-}
-
-const connectionString = process.env.DATABASE_URL;
-const describeIfDb = connectionString === undefined ? describe.skip : describe;
 
 /** The table exactly as the schema declares it: seven columns, no payload column. */
 const EXPECTED_COLUMNS = [
@@ -68,14 +52,14 @@ const VALID_ENVELOPE = `jsonb_build_object(
   'submittedAt', NULL, 'completedChecks', '[]', 'evidence', '[]', 'confidence', NULL,
   'decision', NULL, 'reviewerId', NULL)`;
 
-describeIfDb('VerificationAttemptStore, against Postgres', () => {
+describe('VerificationAttemptStore, against Postgres', () => {
   let pool: pg.Pool;
   let raw: PoolClient;
   let transaction: Transaction;
   const store = new PgVerificationAttemptStore();
 
   beforeAll(async () => {
-    pool = new pg.Pool({ connectionString });
+    pool = await databasePool('verif_attempts');
     raw = await pool.connect();
     transaction = createTransaction(pool);
     const columns = await raw.query<{ readonly column_name: string }>(
@@ -93,10 +77,9 @@ describeIfDb('VerificationAttemptStore, against Postgres', () => {
   });
 
   afterAll(async () => {
-    if (pool !== undefined) {
-      raw.release();
-      await pool.end();
-    }
+    raw.release();
+    await pool.end();
+    await dropDatabase();
   });
 
   /** A user the attempts table can point at: the foreign key demands one. */

@@ -13,9 +13,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { databasePool, dropDatabase } from './support/database.js';
 import pg from 'pg';
 import type { MatchId, UserId } from '@been-there/core';
 import type { Transaction } from '@been-there/contracts';
@@ -23,43 +21,23 @@ import { StoreError } from '@been-there/contracts';
 import { clientOf, createTransaction } from '../src/transaction.js';
 import { InteractionConflictError, PostgresInteractionStore } from '../src/store-interaction.js';
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const ENV_FILE = join(REPO_ROOT, '.env');
-if (existsSync(ENV_FILE)) {
-  for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
-    const parsed = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
-    const name = parsed?.[1];
-    const value = parsed?.[2];
-    if (name !== undefined && value !== undefined && process.env[name] === undefined) {
-      process.env[name] = value;
-    }
-  }
-}
-
-const connectionString = process.env.DATABASE_URL;
-const describeIfDb = connectionString === undefined ? describe.skip : describe;
-
 const DAY_ONE = new Date('2026-03-01T10:00:00.000Z');
 const DAY_TWO = new Date('2026-03-02T10:00:00.000Z');
 const DAY_THREE = new Date('2026-03-03T10:00:00.000Z');
 
-describeIfDb('InteractionStore, against Postgres', () => {
+describe('InteractionStore, against Postgres', () => {
   let pool: pg.Pool;
   let transaction: Transaction;
   const store = new PostgresInteractionStore();
 
-  beforeAll(() => {
-    if (connectionString === undefined) {
-      return;
-    }
-    pool = new pg.Pool({ connectionString });
+  beforeAll(async () => {
+    pool = await databasePool('interaction');
     transaction = createTransaction(pool);
   });
 
   afterAll(async () => {
-    if (pool !== undefined) {
-      await pool.end();
-    }
+    await pool.end();
+    await dropDatabase();
   });
 
   /** One unit of work, the way a request gets one. */

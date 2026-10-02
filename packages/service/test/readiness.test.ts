@@ -12,7 +12,7 @@ import {
   readinessRoutes,
   startService,
 } from '@been-there/service';
-import { requireDatabase } from './support/harness.js';
+import { requireDatabaseReady } from './support/harness.js';
 
 /**
  * Readiness and liveness, over HTTP, against a real Postgres — and against a
@@ -75,7 +75,7 @@ describe('readiness and liveness, over real HTTP', () => {
   let unreachableService: RunningService | undefined;
 
   beforeAll(async () => {
-    const healthy = serviceOver(requireDatabase());
+    const healthy = serviceOver(await requireDatabaseReady());
     const broken = serviceOver(UNREACHABLE);
     reachable = healthy.dependencies;
     unreachable = broken.dependencies;

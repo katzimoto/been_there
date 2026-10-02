@@ -2,12 +2,13 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { StoreError, type Transaction } from '@been-there/contracts';
 import { type DomainError, type Err, type Result, castId, ok } from '@been-there/core';
+import { classifyResponse, recordResponse } from '../health/edge-metrics.js';
 import { createServiceHealth } from '../health/service.js';
 import { readBody } from './body.js';
 import {
-  type FailureBody,
   METHOD_NOT_ALLOWED,
   ROUTE_NOT_FOUND,
+  UNHANDLED_FAULT,
   failureBodyFromDomain,
   failureBodyFromStore,
   statusForDomainError,
@@ -113,16 +114,11 @@ export function createRequestHandler(
     ).catch((error: unknown) => {
       // The last line of defence. A throw that escaped every handler is a defect,
       // and a defect must not be reported to the client as a refusal.
-      report.report({ status: 500, message: 'unhandled fault in the request pipeline', error });
+      const fault = UNHANDLED_FAULT();
+      const status = statusForDomainError(fault.error);
+      report.report({ status, message: 'unhandled fault in the request pipeline', error });
       if (!response.headersSent) {
-        writeJson(response, 500, {
-          error: {
-            code: 'internal',
-            domain: 'service',
-            message: 'the request could not be completed',
-            retryable: false,
-          },
-        } satisfies FailureBody);
+        finalise(report, response, status, failureBodyFromDomain(fault.error), fault.error);
       } else {
         response.end();
       }
@@ -168,7 +164,7 @@ async function handle(
 
   const body = await readBody(message);
   if (!body.ok) {
-    writeFailure(response, body);
+    writeFailure(report, response, body);
     return;
   }
 
@@ -185,16 +181,16 @@ async function handle(
     ? Promise.resolve(ok(ANONYMOUS_ACTOR))
     : dependencies.actors.resolve(message.headers.authorization));
   if (!actor.ok) {
-    writeFailure(response, actor);
+    writeFailure(report, response, actor);
     return;
   }
 
   if (match.kind === 'no_such_route') {
-    writeFailure(response, ROUTE_NOT_FOUND());
+    writeFailure(report, response, ROUTE_NOT_FOUND());
     return;
   }
   if (match.kind === 'method_not_allowed') {
-    writeFailure(response, METHOD_NOT_ALLOWED(message.method ?? 'GET'));
+    writeFailure(report, response, METHOD_NOT_ALLOWED(message.method ?? 'GET'));
     return;
   }
 
@@ -231,19 +227,58 @@ async function handle(
       throw thrown;
     }
     report.report({ status: statusForStoreError(thrown), message: thrown.message, error: thrown });
-    writeJson(response, statusForStoreError(thrown), failureBodyFromStore(thrown));
+    finalise(report, response, statusForStoreError(thrown), failureBodyFromStore(thrown), thrown);
     return;
   }
 
   if (outcome.ok) {
-    writeJson(response, outcome.value.status, outcome.value.body);
+    finalise(report, response, outcome.value.status, outcome.value.body, undefined);
     return;
   }
-  writeFailure(response, outcome);
+  writeFailure(report, response, outcome);
 }
 
-function writeFailure(response: ServerResponse, refusal: Err<DomainError>): void {
-  writeJson(response, statusForDomainError(refusal.error), failureBodyFromDomain(refusal.error));
+/**
+ * The one place a response is finished, and therefore the one place it is
+ * counted.
+ *
+ * The classification is taken from the failure rather than from the status, and
+ * it is taken here rather than in the handlers, for the reason the metric exists
+ * at all: a refusal decided in a domain function and a store fault raised inside
+ * the transaction wrapper have to land in the same place, or the number answers
+ * the question for some requests and not others. A handler that never learned
+ * about metrics cannot forget to report one.
+ *
+ * `undefined` is a completion. A `StoreError` and a domain `Err` are both
+ * failures, and which of the two arrives is not this function's business — it
+ * hands the error to `classifyResponse` and lets the taxonomy decide.
+ *
+ * A rejected label set is reported and not thrown: the response is already
+ * decided, and a metric that cannot be labelled must not become the client's
+ * problem. It is reported rather than dropped because a dropped count is an
+ * outage total that stays flat while the outage is happening.
+ */
+function finalise(
+  report: FailureReporter,
+  response: ServerResponse,
+  status: number,
+  body: unknown,
+  failure: DomainError | StoreError | undefined,
+): void {
+  const counted = recordResponse(classifyResponse(failure));
+  if (!counted.ok) {
+    report.report({
+      status,
+      message: 'a response was not counted because its metric labels were refused',
+      error: counted.error,
+    });
+  }
+  writeJson(response, status, body);
+}
+
+/** A refusal the edge decided on, counted through the same finaliser as a fault. */
+function writeFailure(report: FailureReporter, response: ServerResponse, refusal: Err<DomainError>): void {
+  finalise(report, response, statusForDomainError(refusal.error), failureBodyFromDomain(refusal.error), refusal.error);
 }
 
 export function writeJson(response: ServerResponse, status: number, body: unknown): void {

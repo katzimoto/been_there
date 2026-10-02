@@ -13,7 +13,15 @@ import {
   serviceRoutes,
   startService,
 } from '@been-there/service';
-import { type Caller, type Harness, call, member, requireDatabase, resolverFor } from './support/harness.js';
+import {
+  type Caller,
+  type Harness,
+  call,
+  member,
+  requireDatabaseReady,
+  resolverFor,
+  socketAddressOnly,
+} from './support/harness.js';
 import { type Created, COMPLETE_PROFILE, PASSING_RESULT, verify } from './support/fixtures.js';
 
 /**
@@ -50,7 +58,7 @@ interface ServiceHarness extends Harness {
  * status table and the response body are all the real ones.
  */
 async function startHarnessWith(callers: readonly Caller[], fault?: Partial<InteractionStore>): Promise<ServiceHarness> {
-  const pool = new pg.Pool({ connectionString: requireDatabase() });
+  const pool = new pg.Pool({ connectionString: await requireDatabaseReady() });
   await pool.query('SELECT 1');
   const stores: Stores = createStores(pool);
   const dependencies: ServiceDependencies = {
@@ -69,6 +77,9 @@ async function startHarnessWith(callers: readonly Caller[], fault?: Partial<Inte
     transaction: dependencies.transaction,
     dependencies,
     health: createServiceHealth(dependencies),
+    // No trusted hop is installed above, so every request takes its socket
+    // address and there is nothing to present a different one through.
+    fromAddress: socketAddressOnly,
     close: async () => {
       await running.close();
       await pool.end();
@@ -388,7 +399,7 @@ describe('a route that takes no transaction', () => {
     // the store is unreachable. A handler on such a route that reaches for the
     // store must get a `StoreError`, not a silent no-op — a write that quietly
     // disappears is worse than one that fails.
-    const pool = new pg.Pool({ connectionString: requireDatabase() });
+    const pool = new pg.Pool({ connectionString: await requireDatabaseReady() });
     const stores = createStores(pool);
     const dependencies: ServiceDependencies = {
       stores,

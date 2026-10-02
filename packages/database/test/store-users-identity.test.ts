@@ -12,9 +12,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { databasePool, dropDatabase } from './support/database.js';
 import pg from 'pg';
 import type { IdentityRecordRow, Transaction, UserRecord } from '@been-there/contracts';
 import { StoreError } from '@been-there/contracts';
@@ -24,43 +22,23 @@ import { isConflict } from '../src/errors.js';
 import { createTransaction } from '../src/transaction.js';
 import { PostgresIdentityStore, PostgresUserStore, StoreConflictError } from '../src/store-users-identity.js';
 
-// Same loading the migration runner does, so a developer who has run `make up`
-// runs the real database rather than a suite that quietly did nothing.
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const ENV_FILE = join(REPO_ROOT, '.env');
-if (process.env.DATABASE_URL === undefined && existsSync(ENV_FILE)) {
-  for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
-    const [, name, value] = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line) ?? [];
-    if (name !== undefined && value !== undefined && process.env[name] === undefined) {
-      process.env[name] = value;
-    }
-  }
-}
-
-const connectionString = process.env.DATABASE_URL;
-const describeIfDb = connectionString === undefined ? describe.skip : describe;
-
 /** The OID pg uses for `timestamptz`; the only way to mis-read a row's clock. */
 const TIMESTAMPTZ_OID = 1184;
 
-describeIfDb('users and identity stores, against Postgres', () => {
+describe('users and identity stores, against Postgres', () => {
   const users = new PostgresUserStore();
   const identity = new PostgresIdentityStore();
   let pool: pg.Pool;
   let transaction: Transaction;
 
   beforeAll(async () => {
-    if (connectionString === undefined) {
-      return;
-    }
-    pool = new pg.Pool({ connectionString });
+    pool = await databasePool('users');
     transaction = createTransaction(pool);
   });
 
   afterAll(async () => {
-    if (pool !== undefined) {
-      await pool.end();
-    }
+    await pool.end();
+    await dropDatabase();
   });
 
   /** Every test owns fresh ids, so nothing is ever cleaned up and nothing collides. */

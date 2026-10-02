@@ -13,9 +13,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { databasePool, dropDatabase } from './support/database.js';
 import pg from 'pg';
 import type { PoolClient } from 'pg';
 import { castId, type RiskAssessmentId, type SubjectId } from '@been-there/core';
@@ -23,39 +21,24 @@ import { StoreError, type Transaction } from '@been-there/contracts';
 import { createTransaction } from '../src/transaction.js';
 import { PgRiskStore, type RiskSignalInput } from '../src/store-risk.js';
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const ENV_FILE = resolve(HERE, '..', '..', '..', '.env');
-if (existsSync(ENV_FILE)) {
-  for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
-    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
-    if (match !== null && process.env[match[1]!] === undefined) {
-      process.env[match[1]!] = match[2]!;
-    }
-  }
-}
-
-const connectionString = process.env.DATABASE_URL;
-const describeIfDb = connectionString === undefined ? describe.skip : describe;
-
 const MINUTE = 60_000;
 
-describeIfDb('RiskStore, against Postgres', () => {
+describe('RiskStore, against Postgres', () => {
   let pool: pg.Pool;
   let raw: PoolClient;
   let transaction: Transaction;
   const store = new PgRiskStore();
 
   beforeAll(async () => {
-    pool = new pg.Pool({ connectionString });
+    pool = await databasePool('risk');
     raw = await pool.connect();
     transaction = createTransaction(pool);
   });
 
   afterAll(async () => {
-    if (pool !== undefined) {
-      raw.release();
-      await pool.end();
-    }
+    raw.release();
+    await pool.end();
+    await dropDatabase();
   });
 
   /** A subject the risk tables can point at: the FK demands a real user. */

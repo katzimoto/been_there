@@ -114,3 +114,15 @@ export const METHOD_NOT_ALLOWED = (method: string): Err<DomainError> =>
   domainError('validation_failed', 'service.http', 'that method is not allowed on this endpoint', {
     method,
   });
+
+/**
+ * The answer when a fault escaped every handler.
+ *
+ * A `domainError` rather than a hand-written body literal, so the last line of
+ * defence reaches the client through the same status table and the same body
+ * builder as every other refusal — and so the edge counter, which reads the
+ * error rather than the status, files it as the `internal` it is instead of
+ * under whatever code a hand-written body happened to carry.
+ */
+export const UNHANDLED_FAULT = (): Err<DomainError> =>
+  domainError('internal', 'service', 'the request could not be completed');
