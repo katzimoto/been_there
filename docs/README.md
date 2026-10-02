@@ -50,6 +50,11 @@ One specification per MVP feature issue, in `features/`:
 
 | Document | Covers |
 |----------|--------|
+| [Event chat safety model](./architecture/event-chat-safety.md) —
+  event messaging without a prior match: the new risks, the rules, and the two
+  open questions decided before implementation
+| [Detector escalation policy](./architecture/detector-escalation-policy.md) —
+  which detectors may escalate a subject alone, and which require corroboration
 | [Baseline review findings](./architecture/review-findings.md) | Independent review of the eight commitments, the domain boundaries, and doc/code agreement, with a runnable reproduction per finding |
 | [Fix verification](./architecture/fix-verification.md) | Adversarial pass over the fixes: which claimed fixes hold, which are cosmetic, and what the fix pass introduced |
 
@@ -80,6 +85,11 @@ lasting check rather than a note.
   dependencies, seed a dataset, and observe the safety model from a REPL
 - [`AGENTS.md`](../AGENTS.md) — the working agreement, and [`skills/`](../skills/)
   for the procedures it points to
+
+## Where the build stands
+
+- [Delivery state](./delivery-state.md) — what exists, what is proven, what is
+  decided but not built, and the two things nobody should assume are true
 
 ## Document conventions
 

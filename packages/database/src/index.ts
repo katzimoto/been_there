@@ -12,3 +12,4 @@ export { createModerationStore, ModerationStoreError } from './store-moderation.
 export type { ModerationConflictReason } from './store-moderation.js';
 export { PgAccountStandingStore } from './store-account-standing.js';
 export { PgVerificationAttemptStore } from './store-verification-attempts.js';
+export { PgAccountPlatformStore } from './store-accounts.js';

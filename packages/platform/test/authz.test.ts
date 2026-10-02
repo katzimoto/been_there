@@ -10,9 +10,11 @@ import {
   type UserId,
 } from '@been-there/core';
 import {
+  APPOINTMENT_BY_ROLE,
   authorize,
   capabilityGrantFor,
   isCapabilityGranted,
+  protectedActionForAccountEvent,
   requireCapability,
   type ActiveRestriction,
   type Principal,
@@ -108,6 +110,74 @@ describe('role boundaries', () => {
     expect(succeeded(authorize(senior, 'account.enforce.ban', { caseId: CASE, moderatorId: MODERATOR })).action).toBe(
       'account.enforce.ban',
     );
+  });
+
+  it('lets a plain moderator work a case, and reserves only the audit trail and the ban lift', () => {
+    const moderator = principalFor('moderator');
+    const context = { caseId: CASE, moderatorId: MODERATOR };
+
+    // `platform.md` §3 gives a moderator the case work — open, read, decide,
+    // restrict, suspend, ban — and withholds exactly two things: lifting a ban
+    // and the restricted audit trail. A clearance that stopped the role before
+    // the permission did would have made the "cannot" column true for the wrong
+    // reason and the "can" column false.
+    expect(succeeded(authorize(moderator, 'case.open', context)).action).toBe('case.open');
+    expect(succeeded(authorize(moderator, 'case.read')).action).toBe('case.read');
+    expect(succeeded(authorize(moderator, 'case.decide', context)).action).toBe('case.decide');
+    expect(succeeded(authorize(moderator, 'account.enforce.ban', context)).action).toBe('account.enforce.ban');
+    // Lifting a restriction is not a senior act; lifting a ban is.
+    expect(succeeded(authorize(moderator, 'account.enforce.restrict', context)).action).toBe(
+      'account.enforce.restrict',
+    );
+    expect(rejected(authorize(moderator, 'account.enforce.lift_ban', context)).code).toBe('permission_denied');
+    expect(rejected(authorize(moderator, 'audit.read')).code).toBe('permission_denied');
+  });
+
+  it('reads the queue on its own authority, which needs neither a case nor a moderator', () => {
+    // Seeing the queue and acting on a case are different authorities. The queue
+    // gate is the only one that names neither a case nor a person, because a
+    // moderator with nothing assigned still has to be able to see the queue.
+    expect(succeeded(authorize(principalFor('moderator'), 'case.read')).clearance).toEqual({ upTo: 'sensitive' });
+    expect(rejected(authorize(principalFor('support'), 'case.read')).code).toBe('permission_denied');
+    expect(rejected(authorize(principalFor('user'), 'case.read')).code).toBe('permission_denied');
+    expect(rejected(authorize(principalFor('system'), 'case.read')).code).toBe('permission_denied');
+  });
+
+  it('gives the identity privacy officer the identity read and no judgement at all', () => {
+    const officer = principalFor('identity_privacy_officer');
+    const context = { caseId: CASE, moderatorId: MODERATOR };
+
+    // The appointment is in the identity domain and is not a promotion of a
+    // moderator, so it can read a case's evidence and nothing else about it.
+    expect(succeeded(authorize(officer, 'identity.read_evidence')).action).toBe('identity.read_evidence');
+    expect(succeeded(authorize(officer, 'case.read_evidence', context)).action).toBe('case.read_evidence');
+    expect(rejected(authorize(officer, 'case.decide', context)).code).toBe('permission_denied');
+    expect(rejected(authorize(officer, 'account.enforce.ban', context)).code).toBe('permission_denied');
+    // Nor is it a lead: the evidence ladder is computed from the appointment, and
+    // an officer is not one.
+    expect(APPOINTMENT_BY_ROLE.identity_privacy_officer.isLead).toBe(false);
+    expect(APPOINTMENT_BY_ROLE.senior_moderator.isLead).toBe(true);
+    // And the clearance stops at `sensitive`, so the restricted audit trail is
+    // still the single cell `platform.md` §4 reserves for senior moderation.
+    expect(rejected(authorize(officer, 'audit.read')).code).toBe('permission_denied');
+  });
+
+  it('authorises a reversal by the lift it performs, not by the sanction it answers', () => {
+    // The mapping a reversal endpoint depends on: `lift_ban` is the senior-only
+    // authority and nothing else is, so a reversal of a ban is refused to a plain
+    // moderator while a reversal of a restriction is not.
+    expect(protectedActionForAccountEvent('lift_ban')).toBe('account.enforce.lift_ban');
+    expect(protectedActionForAccountEvent('lift_restriction')).toBe('account.enforce.restrict');
+    expect(protectedActionForAccountEvent('reinstate')).toBe('account.enforce.suspend');
+    expect(protectedActionForAccountEvent('ban')).toBe('account.enforce.ban');
+
+    const context = { caseId: CASE, moderatorId: MODERATOR };
+    expect(rejected(authorize(principalFor('moderator'), protectedActionForAccountEvent('lift_ban'), context)).code).toBe(
+      'permission_denied',
+    );
+    expect(
+      succeeded(authorize(principalFor('moderator'), protectedActionForAccountEvent('reinstate'), context)).action,
+    ).toBe('account.enforce.suspend');
   });
 });
 

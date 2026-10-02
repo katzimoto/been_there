@@ -1,11 +1,14 @@
 import type { Route } from './http/router.js';
 import type { ServiceDependencies } from './ports.js';
-import { accountRoutes } from './routes/accounts.js';
+import { accountRoutes, accountSessionRoutes } from './routes/accounts.js';
+import { healthRoutes } from './routes/health.js';
+import { readinessRoutes } from './routes/readiness.js';
 import { conversationRoutes } from './routes/conversations.js';
 import { discoveryRoutes } from './routes/discovery.js';
 import { interactionRoutes } from './routes/interactions.js';
 import { matchRoutes } from './routes/matches.js';
 import { moderationRoutes } from './routes/moderation.js';
+import { moderatorWorkspaceRoutes } from './routes/moderation-workspace.js';
 import { reportRoutes } from './routes/reports.js';
 import { profileRoutes } from './routes/profile.js';
 import { verificationRoutes } from './routes/verification.js';
@@ -31,7 +34,10 @@ export * from './wiring/standing.js';
  */
 export function serviceRoutes(dependencies: ServiceDependencies): readonly Route[] {
   return [
+    ...healthRoutes(dependencies),
+    ...readinessRoutes(dependencies),
     ...accountRoutes(dependencies),
+    ...accountSessionRoutes(dependencies),
     ...verificationRoutes(dependencies),
     ...profileRoutes(dependencies),
     ...discoveryRoutes(dependencies),
@@ -40,5 +46,14 @@ export function serviceRoutes(dependencies: ServiceDependencies): readonly Route
     ...conversationRoutes(dependencies),
     ...reportRoutes(dependencies),
     ...moderationRoutes(dependencies),
+    ...moderatorWorkspaceRoutes(dependencies),
   ];
 }
+export * from './health/meter.js';
+export * from './health/metrics.js';
+export * from './health/readiness.js';
+export * from './health/lifecycle.js';
+export * from './health/service.js';
+export * from './routes/health.js';
+export * from './routes/readiness.js';
+export * from './accounts/session-resolver.js';

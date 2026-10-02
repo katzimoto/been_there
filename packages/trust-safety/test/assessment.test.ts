@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { NOW, assessmentContext, at, makeSignal, recordAt, subject, succeeded } from './support.js';
+import { NOW, assessmentContext, at, makeSignal, recordAt, selfEscalating, subject, succeeded } from './support.js';
 import {
   EMPTY_LEDGER,
   type ReversibleFriction,
@@ -38,7 +38,7 @@ const dispute = (): RiskDispute => ({
 
 describe('applySignal', () => {
   it('records the detector, the clock and a risk.changed event when the state moves', () => {
-    const transition = succeeded(applySignal(recordAt('normal', null), makeSignal({ weight: 0.6 }), EMPTY_LEDGER, context));
+    const transition = succeeded(applySignal(recordAt('normal', null), selfEscalating({ weight: 0.6 }), EMPTY_LEDGER, context));
     expect(transition.record.assessment.state).toBe('elevated');
     expect(transition.record.assessment.contributingDetectors).toEqual(['interaction.unmatch_report']);
     expect(transition.record.assessment.lastSignalAt?.toISOString()).toBe(NOW.toISOString());
@@ -65,7 +65,7 @@ describe('applySignal', () => {
 
   it('publishes nothing but internal, system-actor events', () => {
     const transition = succeeded(
-      applySignal(recordAt('normal', null), makeSignal({ weight: 0.95 }), EMPTY_LEDGER, context),
+      applySignal(recordAt('normal', null), selfEscalating({ weight: 0.95 }), EMPTY_LEDGER, context),
     );
     expect(transition.events.length).toBeGreaterThan(0);
     for (const event of transition.events) {
@@ -76,14 +76,14 @@ describe('applySignal', () => {
 
   it('opens a review candidate exactly when the subject reaches high', () => {
     const escalated = succeeded(
-      applySignal(recordAt('elevated', at(1)), makeSignal({ weight: 0.9 }), EMPTY_LEDGER, context),
+      applySignal(recordAt('elevated', at(1)), selfEscalating({ weight: 0.9 }), EMPTY_LEDGER, context),
     );
     expect(escalated.record.assessment.state).toBe('high');
     expect(escalated.record.candidate?.origin).toBe('detection');
     expect(escalated.events.map((event) => event.type)).toContain('review_candidate.raised');
 
     const later = succeeded(
-      applySignal(escalated.record, makeSignal({ weight: 0.95 }), escalated.ledger ?? EMPTY_LEDGER, context),
+      applySignal(escalated.record, selfEscalating({ weight: 0.95 }), escalated.ledger ?? EMPTY_LEDGER, context),
     );
     expect(later.events.map((event) => event.type)).not.toContain('review_candidate.raised');
     expect(later.record.candidate?.raisedAt).toBe(escalated.record.candidate?.raisedAt);
@@ -94,7 +94,7 @@ describe('applySignal', () => {
       activeFriction('rate_limit'),
       activeFriction('reverification_request'),
     ]);
-    const transition = succeeded(applySignal(record, makeSignal({ weight: 0.8 }), EMPTY_LEDGER, context));
+    const transition = succeeded(applySignal(record, selfEscalating({ weight: 0.8 }), EMPTY_LEDGER, context));
     expect(transition.record.friction.map((entry) => entry.kind)).toEqual([
       'rate_limit',
       'human_review_candidate',
@@ -197,7 +197,7 @@ describe('decay releases what the raised state justified', () => {
 describe('dispute handling', () => {
   const frictioned = (): RiskRecord => {
     const escalated = succeeded(
-      applySignal(recordAt('elevated', at(1)), makeSignal({ weight: 0.9 }), EMPTY_LEDGER, context),
+      applySignal(recordAt('elevated', at(1)), selfEscalating({ weight: 0.9 }), EMPTY_LEDGER, context),
     );
     return escalated.record;
   };
@@ -214,7 +214,7 @@ describe('dispute handling', () => {
 
   it('suppresses new friction for as long as the dispute is open', () => {
     const disputed = applyDispute(frictioned(), dispute(), context);
-    const after = succeeded(applySignal(disputed.record, makeSignal({ weight: 0.9 }), EMPTY_LEDGER, context));
+    const after = succeeded(applySignal(disputed.record, selfEscalating({ weight: 0.9 }), EMPTY_LEDGER, context));
     expect(after.record.friction).toEqual([]);
   });
 
@@ -222,7 +222,7 @@ describe('dispute handling', () => {
     const disputed = applyDispute(frictioned(), dispute(), context);
     const settled = succeeded(reassessByHuman(disputed.record, 'mod-3', context));
     expect(settled.record.disputes.every((entry) => entry.resolvedAt !== null)).toBe(true);
-    const after = succeeded(applySignal(settled.record, makeSignal({ weight: 0.9 }), EMPTY_LEDGER, context));
+    const after = succeeded(applySignal(settled.record, selfEscalating({ weight: 0.9 }), EMPTY_LEDGER, context));
     expect(after.record.friction.length).toBeGreaterThan(0);
   });
 });

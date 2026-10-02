@@ -116,6 +116,10 @@ async function submitReportFor(
     capturedAt: request.now,
     conversationId: match?.conversationId ?? null,
     messageRange: null,
+    // The pairing join the safety layer needs, and nothing more: it is not
+    // evidence and it is not published, so a report from a pair that never
+    // matched correctly carries no match at all.
+    matchId: match === null ? null : String(match.matchId),
   };
   const { context, pending } = requestModerationContext(request.now);
   const submitted = submitReport(context, {

@@ -68,12 +68,6 @@ jobs:
             echo "::endgroup::"
           done
 
-      # Before Test, deliberately. The database suites probe the schema and
-      # fail loudly when a table is absent, which is the behaviour we want -
-      # but only if the schema was meant to be there.
-      - name: Migrate
-        run: node packages/database/scripts/migrate.mjs
-
       - name: Test
         run: npm test
 
@@ -90,3 +84,36 @@ jobs:
 
       - name: Check the lockfile covers every workspace package
         run: node scripts/dev/check-workspace-lockfile.mjs
+
+      # The schema has to exist before the suites run, or every database test
+      # skips on a missing table and the job is green for the wrong reason.
+      - name: Migrate
+        run: node packages/database/scripts/migrate.mjs
+
+  # The client mirrors rules the server enforces, and a mirror that drifts is
+  # worse than no mirror: the client offers an action the server refuses. These
+  # tests are the only thing keeping the two in step.
+  client:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Test the client safety gate
+        working-directory: client/BeenThereKit
+        run: swift test
+
+      # The package declares iOS 17 as a platform, so compiling for the simulator
+      # is what proves the source is actually iOS-compatible rather than merely
+      # building on the Mac.
+      - name: Compile for the iOS simulator
+        run: |
+          SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+          xcrun swiftc -sdk "$SDK" -target arm64-apple-ios17.0-simulator \
+            -emit-module -module-name BeenThereKit \
+            client/BeenThereKit/Sources/BeenThereKit/ClientGate.swift \
+            -o "$RUNNER_TEMP/BeenThereKit.swiftmodule"

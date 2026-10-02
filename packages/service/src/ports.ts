@@ -22,6 +22,22 @@ import type { Principal, Role } from '@been-there/platform';
  * its own, so it is a port — an authentication layer that resolved a session can
  * state it, and nothing else can.
  */
+export interface ContactMessage {
+  readonly userId: UserId;
+  readonly channel: 'email' | 'sms';
+  /** The address or number, already normalised. */
+  readonly address: string;
+  readonly subject: string;
+  readonly body: string;
+  /** Correlates the message with the verification or recovery row it belongs to. */
+  readonly referenceId: string;
+  readonly secret: string;
+}
+
+export interface ContactDelivery {
+  deliver(message: ContactMessage): Promise<void>;
+}
+
 export interface RequestActor {
   /** `null` for a staff route reached without a member session. */
   readonly userId: UserId | null;
@@ -33,9 +49,28 @@ export interface RequestActor {
    * the two would disagree about exactly the case that matters.
    */
   readonly principal: Principal;
+  /**
+   * Whether this caller is a service rather than a person. The flag is
+   * self-declared and is the weaker half of commitment 2's enforcement; the
+   * stronger half is that enforcement transitions require a human actor id
+   * nobody but a person-facing entry point can mint.
+   */
   readonly automated: boolean;
   readonly actorId: ActorId;
 }
+
+/**
+ * A message that carries a credential, and the seam that sends it.
+ *
+ * A verification code and a reset link are the two messages in the product
+ * whose whole content is a secret. They are composed here and handed to the
+ * edge, because the service knows what the message must say and the edge is
+ * the only place that knows which relay, which sandbox and which retry policy
+ * are in play. The secret crosses this boundary exactly once and is never
+ * stored: `secretHash` goes to the database, `secret` goes to the relay, and
+ * nothing in this process holds both for longer than the request.
+ */
+
 
 export interface ActorResolver {
   /**
@@ -43,13 +78,30 @@ export interface ActorResolver {
    * reaches the client through the same status table every other refusal uses,
    * rather than through a second, private one.
    */
-  resolve(authorization: string | undefined): Result<RequestActor, DomainError>;
+  /**
+   * Resolves the `Authorization` header.
+   *
+   * Async because a real session cannot be resolved any other way: the only
+   * thing that maps a bearer token to a caller is a database read. An in-memory
+   * session cache would be a second source of truth for authentication, and the
+   * two would disagree about exactly the case that matters — a session revoked a
+   * millisecond ago. A resolver that trusted a caller-supplied user id would be
+   * the thing the `automated` and `principal` fields exist to prevent.
+   */
+  resolve(authorization: string | undefined): Promise<Result<RequestActor, DomainError>>;
 }
 
 export interface ServiceDependencies {
   readonly stores: Stores;
   readonly transaction: Transaction;
   readonly actors: ActorResolver;
+  /**
+   * The relay for the two messages that carry a credential. Injected rather
+   * than constructed because which SMTP host, which SMS gateway, and whether
+   * the environment is a sandbox are decisions the edge makes, and a service
+   * that opened its own connection would be a second answer to them.
+   */
+  readonly contacts: ContactDelivery;
   /** One clock per request, so a handler's `now` and the domain's `now` agree. */
   readonly now: () => Date;
 }

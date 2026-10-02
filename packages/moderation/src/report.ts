@@ -18,8 +18,9 @@ import {
   type EvidenceSourceDomain,
   captureEvidence,
 } from './evidence.js';
-import type { ModerationContext } from './events.js';
+import { type ModerationContext, REPORT_PAIRING_EVENT, type ReportPairingPayload } from './events.js';
 import { type CasePriority, highestPriority } from './queue.js';
+import { pairingToken } from './pairing.js';
 
 /**
  * Reports (issue #7).
@@ -151,6 +152,15 @@ export interface RelationshipSnapshot {
   readonly capturedAt: Date;
   readonly conversationId: ConversationId | null;
   readonly messageRange: { readonly from: string; readonly to: string } | null;
+  /**
+   * The match this report is about, when there was one. It is not evidence and
+   * it is not published: it exists so `submitReport` can key a pairing token
+   * over (report, match, subject) and hand the safety layer a join it cannot
+   * reverse. A report from someone who was never matched has no match, no
+   * token, and no pairing event — the detector has nothing to pair, and a
+   * `never_matched` report is exactly the case where it should have nothing.
+   */
+  readonly matchId: string | null;
 }
 
 export interface Report {
@@ -280,6 +290,33 @@ export function submitReport(
     sensitivity: 'restricted',
     payload: { reportId: command.reportId, reason: command.reason, anonymous: command.reporterId === null },
   });
+
+  // The join, published separately from the record and at a clearance that
+  // names nobody. `actorId` is `system` rather than the reporter: this event
+  // exists so a detector can prove that two facts describe one pair, and
+  // putting the reporter's id in the envelope would hand over the very fact the
+  // `restricted` event above withholds. Its subject is the reported account,
+  // because that is the account the pairing is about and therefore the one a
+  // detector runs for. Nothing here is written to the audit log below: a join
+  // key on the durable record is a join key forever.
+  const { matchId } = command.relationship;
+  if (matchId !== null && ctx.pairingKey !== null) {
+    ctx.events.emit<ReportPairingPayload>({
+      type: REPORT_PAIRING_EVENT,
+      actorId: 'system',
+      subjectId: command.subjectId,
+      correlationId: command.correlationId,
+      sensitivity: 'user',
+      payload: {
+        reportId: command.reportId,
+        pairingToken: pairingToken(ctx.pairingKey, {
+          reportId: command.reportId,
+          matchId,
+          subjectId: command.subjectId,
+        }),
+      },
+    });
+  }
 
   ctx.audit.append({
     occurredAt: submittedAt,

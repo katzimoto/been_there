@@ -137,8 +137,8 @@ function deliver(overrides: {
   );
 }
 
-/** A well-formed behavioural signal about BOB, from one detector. */
-function signalAboutBob(weight = 0.8) {
+/** A well-formed behavioural signal about BOB, from one named detector. */
+function signalFrom(detector: string, weight = 0.8) {
   return succeeded(
     createSignal(
       {
@@ -148,10 +148,57 @@ function signalAboutBob(weight = 0.8) {
         occurredAt: AT,
         weight,
       },
-      { detector: 'interaction.unmatch_report', reliability: 'high', category: 'interaction' },
+      {
+        detector,
+        reliability: 'high',
+        category: 'interaction',
+        // No behavioural detector may escalate a subject on its own, at any
+        // weight or repetition count. See docs/architecture/detector-escalation-policy.md.
+        escalation: 'corroboration_only',
+      },
     ),
   );
 }
+
+/**
+ * One detector, applied to a subject at `normal`.
+ *
+ * Exposed separately from `raised()` because the policy has two halves and the
+ * more valuable one is this: a single loud behavioural signal must leave the
+ * subject exactly where it was. A fixture that only asserted the eventual
+ * escalation would pass whether or not corroboration was required at all.
+ */
+function singleSignal() {
+  return succeeded(
+    applySignal(
+      emptyRiskRecord(bobSubject, castId<'RiskAssessmentId'>('risk-1'), AT),
+      signalFrom('interaction.unmatch_report'),
+      { entries: [] },
+      assess(AT),
+    ),
+  );
+}
+
+/** Two independent detectors about the same subject, which is what escalates. */
+const raised = () => {
+  const first = signalFrom('interaction.unmatch_report');
+  const firstPass = succeeded(
+    applySignal(
+      emptyRiskRecord(bobSubject, castId<'RiskAssessmentId'>('risk-1'), AT),
+      first,
+      { entries: [] },
+      assess(AT),
+    ),
+  );
+  return succeeded(
+    applySignal(
+      firstPass.record,
+      signalFrom('identity.reuse'),
+      firstPass.ledger ?? { entries: [first] },
+      assess(AT),
+    ),
+  );
+};
 
 function assess(now: Date) {
   return {
@@ -161,15 +208,6 @@ function assess(now: Date) {
   };
 }
 
-const raised = () =>
-  succeeded(
-    applySignal(
-      emptyRiskRecord(bobSubject, castId<'RiskAssessmentId'>('risk-1'), AT),
-      signalAboutBob(),
-      { entries: [] },
-      assess(AT),
-    ),
-  );
 
 /** A case opened from a trust & safety review candidate, as automation would. */
 function caseFromRisk() {
@@ -295,9 +333,29 @@ describe('commitment 3 — risk decays', () => {
     const soonState = soon.ok ? soon.value.record.assessment.state : record.assessment.state;
     expect(soonState).not.toBe('normal');
 
-    // A month of quiet behaviour does.
-    const later = applyDecay(record, assess(new Date('2026-04-01T12:00:00Z')));
-    expect(succeeded(later).record.assessment.state).toBe('normal');
+    // Decay moves at most one step per window, and a window is per step: 30 days
+    // off critical, 14 off high, 7 off elevated. So a month is not one call, and
+    // a test that assumed it was would be asserting a jump the machine refuses
+    // to make — which is the property commitment 3 actually promises.
+    // The corroborating pair lands at `high`, so two windows are needed and
+    // each is a separate call. A single `applyDecay` that jumped to `normal`
+    // would be a step the machine refuses to make, which is the property
+    // commitment 3 actually promises: at most one level, per window.
+    const windows = [
+      new Date('2026-03-15T12:00:00Z'), // 14 days: high -> elevated
+      new Date('2026-03-22T12:00:00Z'), // 7 days: elevated -> normal
+    ];
+    let state = record;
+    const seen: string[] = [];
+    for (const at of windows) {
+      const step = applyDecay(state, assess(at));
+      const next = step.ok ? step.value.record : state;
+      seen.push(next.assessment.state);
+      state = next;
+    }
+    // Every step was exactly one level, and the last is `normal`.
+    expect(seen).toEqual(['elevated', 'normal']);
+    expect(state.assessment.state).toBe('normal');
   });
 });
 
@@ -368,6 +426,10 @@ describe('commitment 4 — the right to report outlives the match', () => {
           capturedAt: AT,
           conversationId: castId<'ConversationId'>('conversation-1'),
           messageRange: { from: 'message-1', to: 'message-1' },
+          // The match this report is about. Never published — it is what the
+          // pairing token is keyed over, so the safety layer can join a report
+          // to a match without learning either party.
+          matchId: castId<'MatchId'>('match:user-alice|user-bob'),
         },
         evidence: [
           {

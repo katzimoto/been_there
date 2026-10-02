@@ -9,3 +9,4 @@ export * from './interaction.js';
 export * from './read-models.js';
 export * from './discovery.js';
 export * from './events.js';
+export * from './goal.js';

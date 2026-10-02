@@ -24,3 +24,9 @@ packages/*/src/**/*.d.ts.map
 /vitest.config.d.ts
 /vitest.config.js.map
 /vitest.config.d.ts.map
+
+# Swift build output. Committed once by accident; the .build directory is
+# generated and would otherwise churn every commit.
+client/**/.build/
+.swiftpm/
+*.swiftmodule

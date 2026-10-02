@@ -1,5 +1,6 @@
 import { type Detector, MAX_SIGNALS_PER_RUN, type SignalDraft } from './detector.js';
 import { type Observation, type ObservationKind } from './observation.js';
+import type { PairingMatcher } from './pairing.js';
 
 /**
  * The detectors that exist, as code rather than as a table in a document.
@@ -70,6 +71,7 @@ const likeBurst: Detector = {
   detector: 'velocity.like_burst',
   reliability: 'low',
   category: 'velocity',
+  escalation: 'corroboration_only',
   detect: (input, context) => {
     const outbound = withinWindow(
       context.observations,
@@ -102,6 +104,7 @@ const messageBurst: Detector = {
   detector: 'velocity.message_burst',
   reliability: 'medium',
   category: 'velocity',
+  escalation: 'corroboration_only',
   detect: (input, context) => {
     const bursts = withinWindow(
       context.observations,
@@ -137,6 +140,7 @@ const profileChurn: Detector = {
   detector: 'dating.profile_churn',
   reliability: 'low',
   category: 'velocity',
+  escalation: 'corroboration_only',
   detect: (input, context) => {
     const edits = withinWindow(
       context.observations,
@@ -183,6 +187,7 @@ const unmatchByCounterparty: Detector = {
   detector: 'interaction.unmatch_by_counterparty',
   reliability: 'low',
   category: 'interaction',
+  escalation: 'corroboration_only',
   detect: (input, context) => {
     const received = withinWindow(
       context.observations,
@@ -217,6 +222,7 @@ const identityReuse: Detector = {
   detector: 'identity.reuse',
   reliability: 'medium',
   category: 'identity',
+  escalation: 'corroboration_only',
   detect: (input, context) => {
     const attempts = withinWindow(
       context.observations,
@@ -272,3 +278,112 @@ export const SAFETY_DETECTORS: readonly Detector[] = [
   unmatchByCounterparty,
   identityReuse,
 ];
+
+/**
+ * Unmatch, then a report about the same account, on the same match.
+ *
+ * This is the one pattern in the catalogue a person can only produce
+ * deliberately: nobody unmatches a stranger and then files a report against
+ * them by accident. It was also, until issue #45, the one detector with no
+ * producer at all — the report leg is `restricted` and named no match, so the
+ * pairing was not derivable at any clearance. It is now a join on a keyed
+ * token, and the detector is built around one rule: **an unmatch pairs with a
+ * report only when the token on the report is the token derived from that
+ * unmatch's match.** Every other fact is already in hand, so a detector that
+ * paired on "an unmatch and a report exist" would answer once per pair
+ * regardless of whether the two describe the same two accounts — which is the
+ * failure a wider clearance would have invited, and the reason the join is a
+ * token and not the report.
+ *
+ * The unmatch must come first. A report filed while the match was still live is
+ * the ordinary case of a user reporting someone they are talking to, and
+ * reading it as retaliation is exactly the false positive §5 records.
+ *
+ * `corroboration_only` at 0.6 and `high`: the loudest evidence in the
+ * catalogue, and still not allowed to move a subject on its own. Two accounts
+ * behaving like this is a pattern; one is an anecdote.
+ */
+function unmatchReport(pairing: PairingMatcher): Detector {
+  return {
+    detector: 'interaction.unmatch_report',
+    reliability: 'high',
+    category: 'interaction',
+    escalation: 'corroboration_only',
+    detect: (input, context) => {
+      const reports = withinWindow(
+        context.observations,
+        'moderation.report_pairing',
+        input.subjectId,
+        input.now,
+        WIDE_WINDOW_MINUTES,
+      );
+      if (reports.length === 0) {
+        return [];
+      }
+      // The account that was unmatched has to be the subject, and the account
+      // that did the unmatching has to be somebody else. A producer that put
+      // the performer in the envelope's place produces an observation that
+      // fails both, and this detector stays silent about an unmatch it cannot
+      // place — the same answer `unmatch_by_counterparty` gives.
+      const unmatchs = withinWindow(
+        context.observations,
+        'unmatch.performed',
+        input.subjectId,
+        input.now,
+        WIDE_WINDOW_MINUTES,
+      ).filter((entry) => entry.subjectId === input.subjectId && entry.actorId !== input.subjectId);
+
+      const drafts: SignalDraft[] = [];
+      for (const report of reports) {
+        const { pairingToken, entityId: reportId } = report;
+        if (pairingToken === undefined || reportId === undefined) {
+          continue;
+        }
+        for (const unmatch of unmatchs) {
+          const matchId = unmatch.entityId;
+          if (matchId === undefined || unmatch.occurredAt.getTime() > report.occurredAt.getTime()) {
+            continue;
+          }
+          const paired = pairing.matches(pairingToken, {
+            reportId,
+            matchId,
+            subjectId: input.subjectId,
+          });
+          if (!paired) {
+            continue;
+          }
+          drafts.push({
+            subjectId: input.subjectId,
+            // The reported account. A token cannot name who reported, so this
+            // signal cannot either, and the alternative — attributing the
+            // behaviour to a reporter the reduction never carried — is a
+            // subject a detector may not implicate.
+            actorId: input.subjectId,
+            behaviour: { kind: 'unmatch_then_report', entityId: matchId },
+            occurredAt: report.occurredAt,
+            weight: 0.6,
+            facts: { occurrences: 1, windowMinutes: WIDE_WINDOW_MINUTES, direction: 'inbound' },
+          });
+          if (drafts.length === MAX_SIGNALS_PER_RUN) {
+            return drafts;
+          }
+        }
+      }
+      return drafts;
+    },
+  };
+}
+
+/**
+ * The full catalogue, for a deployment that has a pairing secret.
+ *
+ * The pairing detector is not in `SAFETY_DETECTORS` because it cannot exist
+ * without a secret, and a detector that cannot verify a token must not be
+ * constructible — a seam that silently ran a detector which could never fire
+ * would report a healthy cycle and produce nothing. Bringing your own detector
+ * list is the other way to say what you are running; `createSafetySeam` accepts
+ * one or the other, never neither.
+ */
+export function createSafetyDetectors(pairing: PairingMatcher): readonly Detector[] {
+  return [...SAFETY_DETECTORS, unmatchReport(pairing)];
+}

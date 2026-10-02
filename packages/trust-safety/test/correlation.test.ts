@@ -74,6 +74,19 @@ describe('corroboration', () => {
     expect(corroboration.independentDetectors).toBe(1);
   });
 
+  it('counts a repeat as no support at all, however many arrive', () => {
+    let ledger = EMPTY_LEDGER;
+    for (let index = 0; index < 30; index += 1) {
+      ledger = appendSignal(ledger, makeSignal({ occurredAt: new Date(NOW.getTime() - index * 60_000) }));
+    }
+    const corroboration = corroborate(ledger, makeSignal({ occurredAt: NOW }));
+    // Two axes, counted separately: 30 signals from one detector is one
+    // detector. A detector that repeats itself cannot supply the second
+    // independent detector that corroboration is supposed to mean.
+    expect(corroboration.independentDetectors).toBe(1);
+    expect(corroboration.repetitions).toBe(30);
+  });
+
   it('ignores anything outside the corroboration window, or dated in the future', () => {
     const incoming = makeSignal({ occurredAt: NOW });
     const tooOld = makeSignal({

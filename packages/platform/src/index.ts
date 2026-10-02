@@ -1,4 +1,7 @@
 export * from './ids.js';
+export * from './age.js';
+export * from './credentials.js';
+export * from './notification-copy.js';
 export * from './redaction.js';
 export * from './audit.js';
 export * from './analytics.js';

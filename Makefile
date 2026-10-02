@@ -141,3 +141,15 @@ seed-verify: seed-build ## Assert the dataset's invariants; non-zero exit on vio
 
 audit-log: seed-build ## Read the seeded audit log as a role. AUDIT_AS=senior_moderator|moderator|support|system
 	node scripts/seed/development-seed.mjs --audit --as "$(AUDIT_AS)"
+
+# --- The iOS client. ------------------------------------------------------
+#
+# The client mirrors rules the server enforces. These tests are the only thing
+# keeping the two in step, so they run with everything else rather than on
+# demand.
+
+client-test: ## Test the client safety gate (needs Xcode)
+	cd client/BeenThereKit && swift test
+
+client-ios: ## Compile the client for the iOS simulator (needs Xcode)
+	cd client/BeenThereKit && swift build --triple arm64-apple-ios17.0-simulator

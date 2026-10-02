@@ -1,16 +1,19 @@
-import { randomUUID } from 'node:crypto';
-import { type DomainError, type PhotoId, type Result, castId, ok } from '@been-there/core';
-import { MISSING_FIELD, NOT_FOUND, UNKNOWN_FIELD_VALUE } from '../http/failure.js';
-import { readString, readStringArray } from '../http/body.js';
-import { okResponse, route, type Route } from '../http/router.js';
-import type { ServiceDependencies } from '../ports.js';
+import {
+  type DomainError,
+  type PhotoId,
+  type Result,
+  type UserId,
+  castId,
+  domainError,
+  ok,
+} from '@been-there/core';
 import {
   type DatingPreferences,
   type DistanceBand,
   type GenderIdentity,
-  type PhotoApproval,
   type ProfileContent,
   type ProfileState,
+  type PromptAnswer,
   DISTANCE_LIMIT_KM,
   PLATFORM_DEFAULT_LOCATION_PRECISION,
   UNSET_PREFERENCES,
@@ -18,30 +21,46 @@ import {
   profileMachine,
   validatePreferences,
 } from '@been-there/dating';
-import { userIdOf } from './accounts.js';
+import { readOptionalString, readString, readStringArray } from '../http/body.js';
+import { MISSING_FIELD, NOT_FOUND, UNKNOWN_FIELD_VALUE } from '../http/failure.js';
+import { okResponse, route, type Route, type RouteRequest } from '../http/router.js';
+import type { ServiceDependencies } from '../ports.js';
+import { profileContentOf, profileStateOf } from '../wiring/standing.js';
+import { claimedOwner, preferencesFromRequest, profileFieldsFrom } from './profile-body.js';
+import { legacyProfileRoutes } from './profile-legacy.js';
+import { profilePhotoRoutes } from './profile-photos.js';
+import { saveProfile } from './profile-sync.js';
 
 /**
  * Profile and preferences.
  *
- * Neither endpoint stores what the client sent. Both evaluate it and store the
- * *result*: a profile is written with the state `evaluateProfileCompleteness` and
- * the profile machine produced, never the state the client claimed, and
- * preferences are written only after `validatePreferences` has accepted them —
- * a set that could never be satisfied is rejected at save time rather than
- * remembered as an empty page.
+ * Two surfaces, and the difference between them is the point of this file.
  *
- * ## Why these two endpoints exist at all
+ * `/v1/profiles/me` addresses the owner through the **session**. There is no
+ * identifier in the path, so there is nothing for one member to change in order
+ * to reach another's profile, and the question "may this caller write this
+ * body?" never has to be answered again on each new route.
  *
- * The issue's scope does not name them, and the service is incomplete without
- * them. `evaluateEligibility` refuses a viewer whose profile is not `complete`,
- * and `recordLike` refuses an actor whose profile is not `complete` — so without
- * a way to write a profile, discovery can only ever return an empty page and a
- * like can only ever be refused, and neither flow is reachable. They are here
- * because the flow needs them, not because they were asked for.
+ * `/v1/accounts/:userId/profile` and `/v1/accounts/:userId/preferences` are the
+ * older shape, kept because existing clients and suites use them. They take the
+ * user id from the path, so they must check it against the session — and the
+ * check they now carry is the one they were missing. Without it, any
+ * authenticated member could write any other member's profile by putting their
+ * id in the path, which is not a theoretical hole: it is the difference between
+ * "your profile" and "somebody else's profile, chosen by you".
+ *
+ * ## Completeness is never declared
+ *
+ * A write stores the *result* of `evaluateProfileCompleteness` and the state
+ * `profileMachine` produced from it — see `saveProfile`. A body carrying
+ * `state: 'complete'` changes nothing, because the event is chosen from the
+ * evaluation and the machine's guard re-checks the requirement. The photo list
+ * is the other half: on the `/me` surface it is read from the photo table, so a
+ * client cannot assert `approval: 'approved'` for a photo nobody has screened.
  */
 
 const GENDER_IDENTITIES: readonly GenderIdentity[] = ['woman', 'man', 'non_binary', 'self_described'];
-const PHOTO_APPROVALS: readonly PhotoApproval[] = ['pending', 'approved', 'rejected'];
+
 const DISTANCE_BANDS: readonly DistanceBand[] = [
   'lt_5_km',
   '5_25_km',
@@ -51,256 +70,132 @@ const DISTANCE_BANDS: readonly DistanceBand[] = [
   'unknown',
 ];
 
+/** What a profile has before anything has been written to it. */
+const EMPTY_CONTENT: ProfileContent = {
+  displayName: '',
+  bio: '',
+  photos: [],
+  prompts: [],
+  genderIdentities: [],
+  birthdate: null,
+  location: null,
+};
+
+/**
+ * The owner behind a session.
+ *
+ * One refusal for every route here, because "this endpoint needs a member
+ * session" is the same fact on all of them, and a per-route wording would make
+ * the status a function of which route was hit.
+ */
+function ownerOf(request: RouteRequest): Result<UserId, DomainError> {
+  const userId = request.actor.userId;
+  if (userId === null) {
+    return domainError('permission_denied', 'service.http', 'this endpoint is for a member session', {
+      reason: 'no_member_session',
+    });
+  }
+  return ok(userId);
+}
+
 export function profileRoutes(dependencies: ServiceDependencies): readonly Route[] {
   return [
-    route('PUT', '/v1/accounts/:userId/profile', async (request) => {
-      const userId = userIdOf(request.params['userId']);
-      if (!userId.ok) {
-        return userId;
+    // ------------------------------------------------------------------ profile --
+
+    route('PUT', '/v1/profiles/me', async (request) => {
+      const owner = ownerOf(request);
+      if (!owner.ok) {
+        return owner;
       }
-      const content = profileContentFromRequest(request.body);
-      if (!content.ok) {
-        return content;
+      const fields = await profileFieldsFrom(dependencies, owner.value, request);
+      if (!fields.ok) {
+        return fields;
       }
-      const completeness = evaluateProfileCompleteness(content.value, request.now);
-      const existing = await dependencies.stores.interaction.findProfile(userId.value, request.tx);
-      const current: ProfileState =
-        existing === null ? profileMachine.initial : (existing.state as ProfileState);
-      // Completeness is evaluated, never declared: the client cannot send
-      // `state: 'complete'` and have it believed, because the event is chosen
-      // from the evaluation and the machine's guard re-checks the requirement.
-      const event = completeness.complete ? 'mark_complete' : 'mark_incomplete';
-      const next = profileMachine.next(current, event, { requirementsMet: completeness.complete });
-      if (!next.ok) {
-        return next;
+      const saved = await saveProfile(dependencies, owner.value, fields.value, request.now, request.tx);
+      if (!saved.ok) {
+        return saved;
       }
-      await dependencies.stores.interaction.upsertProfile(
-        {
-          profileId: existing?.profileId ?? `profile:${userId.value}`,
-          userId: userId.value,
-          state: next.value,
-          content: content.value as unknown as Readonly<Record<string, unknown>>,
-          updatedAt: request.now,
-        },
-        request.tx,
-      );
       return okResponse(200, {
-        userId: userId.value,
-        state: next.value,
+        profileId: saved.value.row.profileId,
+        state: saved.value.row.state,
+        // A boolean and the unmet rules. There is no score in this response and
+        // no field one could be added to: the shape is closed on purpose,
+        // because a completeness percentage is a ranking signal wearing a
+        // progress bar's clothes.
+        complete: saved.value.completeness.complete,
+        missing: saved.value.completeness.missing,
+      });
+    }),
+
+    route('GET', '/v1/profiles/me', async (request) => {
+      const owner = ownerOf(request);
+      if (!owner.ok) {
+        return owner;
+      }
+      const row = await dependencies.stores.interaction.findProfile(owner.value, request.tx);
+      if (row === null) {
+        // Not a 404. "You have not written a profile yet" and "that profile does
+        // not exist" are different facts, and collapsing them would turn a new
+        // member's first screen into a dead end.
+        return okResponse(200, {
+          profileId: `profile:${owner.value}`,
+          state: 'draft',
+          complete: false,
+          missing: evaluateProfileCompleteness(EMPTY_CONTENT, request.now).missing,
+        });
+      }
+      const content = profileContentOf(row.content, owner.value);
+      // Recomputed rather than read off the row. A stored state of `incomplete`
+      // says *that* a rule is unmet, never *which*, and answering "which" from
+      // anywhere but the domain's own evaluation would be a second completeness
+      // rule free to disagree with the first.
+      const completeness = evaluateProfileCompleteness(content, request.now);
+      return okResponse(200, {
+        profileId: row.profileId,
+        state: profileStateOf(row.state, owner.value),
         complete: completeness.complete,
         missing: completeness.missing,
       });
     }),
 
-    route('PUT', '/v1/accounts/:userId/preferences', async (request) => {
-      const userId = userIdOf(request.params['userId']);
-      if (!userId.ok) {
-        return userId;
+    // -------------------------------------------------------------- preferences --
+
+    route('PUT', '/v1/profiles/me/preferences', async (request) => {
+      const owner = ownerOf(request);
+      if (!owner.ok) {
+        return owner;
       }
       const preferences = preferencesFromRequest(request.body);
       if (!preferences.ok) {
         return preferences;
       }
-      const validated = validatePreferences(preferences.value);
-      if (!validated.ok) {
-        return validated;
-      }
       await dependencies.stores.interaction.upsertPreferences(
-        userId.value,
-        validated.value as unknown as Readonly<Record<string, unknown>>,
+        owner.value,
+        preferences.value as unknown as Readonly<Record<string, unknown>>,
         request.tx,
       );
-      return okResponse(200, { userId: userId.value, preferences: validated.value });
+      return okResponse(200, { preferences: preferences.value });
     }),
 
-    route('GET', '/v1/accounts/:userId/preferences', async (request) => {
-      const userId = userIdOf(request.params['userId']);
-      if (!userId.ok) {
-        return userId;
+    route('GET', '/v1/profiles/me/preferences', async (request) => {
+      const owner = ownerOf(request);
+      if (!owner.ok) {
+        return owner;
       }
-      const stored = await dependencies.stores.interaction.findPreferences(userId.value, request.tx);
-      if (stored === null) {
-        return NOT_FOUND('preferences');
-      }
-      return okResponse(200, { userId: userId.value, preferences: stored });
+      const stored = await dependencies.stores.interaction.findPreferences(owner.value, request.tx);
+      // Absent is not an empty filter. A user who has expressed nothing is
+      // served `UNSET_PREFERENCES`, whose every axis is `null` and therefore
+      // unbounded — the distinction the preferences spec's unset rule turns on,
+      // and the one a `404` would hide from the very client that needs it.
+      return okResponse(200, { preferences: stored ?? UNSET_PREFERENCES });
     }),
+
+    // -------------------------------------------------------------------- photos --
+
+    ...profilePhotoRoutes(dependencies),
+
+    // ------------------------------------------------ the older id-in-path shape --
+
+    ...legacyProfileRoutes(dependencies),
   ];
 }
-
-/**
- * The profile body as domain values.
- *
- * This deliberately re-implements the checks `profileContentOf` makes on the way
- * *out* of the store, and the duplication is the point: a malformed stored row is
- * a `StoreError` and a 500, because it means the database is wrong, while a
- * malformed request body is a `validation_failed` and a 400, because the client
- * is wrong. Sharing one function would mean one of those two is reported as the
- * other, and a client that has been told "internal error" learns nothing.
- */
-function profileContentFromRequest(
-  body: Readonly<Record<string, unknown>>,
-): Result<ProfileContent, DomainError> {
-  const displayName = readString(body, 'displayName');
-  if (!displayName.ok) {
-    return displayName;
-  }
-  const bio = readString(body, 'bio');
-  if (!bio.ok) {
-    return bio;
-  }
-  const birthdateRaw = body['birthdate'];
-  const birthdate =
-    birthdateRaw === null || birthdateRaw === undefined
-      ? null
-      : typeof birthdateRaw === 'string'
-        ? birthdateRaw
-        : null;
-  if (birthdateRaw !== null && birthdateRaw !== undefined && birthdate === null) {
-    return MISSING_FIELD('birthdate');
-  }
-  const locationRaw = body['location'];
-  let location: DistanceBand | null = null;
-  if (locationRaw !== null && locationRaw !== undefined) {
-    const band = DISTANCE_BANDS.find((candidate) => candidate === locationRaw);
-    if (band === undefined) {
-      return UNKNOWN_FIELD_VALUE('location', DISTANCE_BANDS);
-    }
-    location = band;
-  }
-  const photosRaw = body['photos'] ?? [];
-  if (!Array.isArray(photosRaw)) {
-    return MISSING_FIELD('photos');
-  }
-  const photos: { photoId: PhotoId; approval: PhotoApproval }[] = [];
-  for (const entry of photosRaw) {
-    if (typeof entry !== 'object' || entry === null) {
-      return MISSING_FIELD('photos');
-    }
-    const photo = entry as { photoId?: unknown; approval?: unknown };
-    if (typeof photo.photoId !== 'string') {
-      return MISSING_FIELD('photos.photoId');
-    }
-    const approval = PHOTO_APPROVALS.find((candidate) => candidate === photo.approval);
-    if (approval === undefined) {
-      return UNKNOWN_FIELD_VALUE('photos.approval', PHOTO_APPROVALS);
-    }
-    photos.push({ photoId: castId<'PhotoId'>(photo.photoId), approval });
-  }
-  const promptsRaw = body['prompts'] ?? [];
-  if (!Array.isArray(promptsRaw)) {
-    return MISSING_FIELD('prompts');
-  }
-  const prompts: { promptId: string; text: string }[] = [];
-  for (const entry of promptsRaw) {
-    if (typeof entry !== 'object' || entry === null) {
-      return MISSING_FIELD('prompts');
-    }
-    const prompt = entry as { promptId?: unknown; text?: unknown };
-    if (typeof prompt.promptId !== 'string' || typeof prompt.text !== 'string') {
-      return MISSING_FIELD('prompts');
-    }
-    prompts.push({ promptId: prompt.promptId, text: prompt.text });
-  }
-  const gendersRaw = readStringArray({ genderIdentities: body['genderIdentities'] ?? [] }, 'genderIdentities');
-  if (!gendersRaw.ok) {
-    return gendersRaw;
-  }
-  const genderIdentities: GenderIdentity[] = [];
-  for (const entry of gendersRaw.value) {
-    const identity = GENDER_IDENTITIES.find((candidate) => candidate === entry);
-    if (identity === undefined) {
-      return UNKNOWN_FIELD_VALUE('genderIdentities', GENDER_IDENTITIES);
-    }
-    genderIdentities.push(identity);
-  }
-  return ok({
-    displayName: displayName.value,
-    bio: bio.value,
-    photos,
-    prompts,
-    genderIdentities,
-    birthdate,
-    location,
-  });
-}
-
-function preferencesFromRequest(
-  body: Readonly<Record<string, unknown>>,
-): Result<DatingPreferences, DomainError> {
-  const ageRangeRaw = body['ageRange'];
-  if (ageRangeRaw === undefined || ageRangeRaw === null) {
-    return ok({ ...UNSET_PREFERENCES });
-  }
-  if (typeof ageRangeRaw !== 'object') {
-    return MISSING_FIELD('ageRange');
-  }
-  const bounds = ageRangeRaw as { min?: unknown; max?: unknown };
-  if (typeof bounds.min !== 'number' || typeof bounds.max !== 'number') {
-    return MISSING_FIELD('ageRange');
-  }
-  const maxDistanceKmRaw = body['maxDistanceKm'];
-  if (
-    maxDistanceKmRaw !== undefined &&
-    maxDistanceKmRaw !== null &&
-    typeof maxDistanceKmRaw !== 'number'
-  ) {
-    return MISSING_FIELD('maxDistanceKm');
-  }
-  const seeking = await1(body, 'seekingGenders');
-  if (!seeking.ok) {
-    return seeking;
-  }
-  const openTo = await1(body, 'openTo');
-  if (!openTo.ok) {
-    return openTo;
-  }
-  const precisionRaw = body['locationPrecision'];
-  if (precisionRaw !== undefined && precisionRaw !== null && typeof precisionRaw !== 'string') {
-    return MISSING_FIELD('locationPrecision');
-  }
-  if (typeof precisionRaw === 'string') {
-    const band = DISTANCE_BANDS.find((candidate) => candidate === precisionRaw);
-    if (band === undefined) {
-      return UNKNOWN_FIELD_VALUE('locationPrecision', DISTANCE_BANDS);
-    }
-    if (band !== 'unknown' && DISTANCE_BANDS.indexOf(band) < DISTANCE_BANDS.indexOf(PLATFORM_DEFAULT_LOCATION_PRECISION)) {
-      return UNKNOWN_FIELD_VALUE('locationPrecision', [PLATFORM_DEFAULT_LOCATION_PRECISION]);
-    }
-  }
-  return ok({
-    ageRange: { min: bounds.min, max: bounds.max },
-    maxDistanceKm: (maxDistanceKmRaw ?? null) as number | null,
-    seekingGenders: seeking.value,
-    openTo: openTo.value,
-    locationPrecision: (precisionRaw ?? null) as DistanceBand | null,
-  });
-}
-
-function await1(
-  body: Readonly<Record<string, unknown>>,
-  field: 'seekingGenders' | 'openTo',
-): Result<readonly GenderIdentity[], DomainError> {
-  const raw = body[field];
-  if (raw === undefined || raw === null) {
-    return ok([]);
-  }
-  const names = readStringArray(body, field);
-  if (!names.ok) {
-    return names;
-  }
-  const identities: GenderIdentity[] = [];
-  for (const entry of names.value) {
-    const identity = GENDER_IDENTITIES.find((candidate) => candidate === entry);
-    if (identity === undefined) {
-      return UNKNOWN_FIELD_VALUE(field, GENDER_IDENTITIES);
-    }
-    identities.push(identity);
-  }
-  return ok(identities);
-}
-
-/** Unused import guard: `randomUUID` and `DISTANCE_LIMIT_KM` are re-exported by the barrel. */
-export const PROFILE_ID_PREFIX = 'profile:';
-
-export type { DistanceBand };
-export { randomUUID, DISTANCE_LIMIT_KM };

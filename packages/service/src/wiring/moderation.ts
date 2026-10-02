@@ -1,6 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { type CaseId, type ReportId, castId } from '@been-there/core';
-import { StoreError, type CaseRow, type Transaction } from '@been-there/contracts';
+import {
+  type AccountEvent,
+  type AccountState,
+  type ActorId,
+  type CaseId,
+  type DataSensitivity,
+  type ReportId,
+  type UserId,
+  castId,
+} from '@been-there/core';
+import { StoreError, type CaseRow, type ModerationStore, type Transaction } from '@been-there/contracts';
 import {
   type AuditEntry,
   type AuditLog,
@@ -10,14 +19,19 @@ import {
   type CaseQueue,
   type CaseState,
   type Decision,
+  type DecisionId,
+  type EvidenceCapture,
   type EvidenceId,
+  type EvidenceKind,
   type EvidenceRecord,
+  type EvidenceSourceDomain,
   type IdSource,
   type ModerationContext,
   type NewAuditEntry,
   type Report,
   type ReportReason,
   REPORT_REASON_POLICY,
+  EVIDENCE_POLICY,
   SLA_HOURS_BY_PRIORITY,
   caseMachine,
   createAuditLog,
@@ -132,7 +146,7 @@ export async function flushAudit(
   }
 }
 
-function corrupt(detail: string): StoreError {
+export function corrupt(detail: string): StoreError {
   return new StoreError(`stored moderation row is malformed: ${detail}`, { retryable: false });
 }
 
@@ -272,7 +286,6 @@ export function evidenceIdsOf(records: readonly EvidenceRecord[]): readonly Evid
   return records.map((record) => record.evidenceId);
 }
 
-
 /**
  * The report as `findReport` returns it, rebuilt into the aggregate
  * `triageReport` and `openCase` take.
@@ -330,7 +343,13 @@ export function auditAppender(append: (
   return append;
 }
 
-function textOf(row: Readonly<Record<string, unknown>>, field: string): string {
+/**
+ * The row readers, exported because `moderation-decisions.ts` and
+ * `moderation-evidence.ts` decode the same rows and must refuse them the same
+ * way. A second copy of "a column that is not a string is a corrupt row" is a
+ * second answer to the question of whether a store is lying.
+ */
+export function textOf(row: Readonly<Record<string, unknown>>, field: string): string {
   const value = row[field];
   if (typeof value !== 'string' || value.length === 0) {
     throw corrupt(`'${field}' is not a non-empty string`);
@@ -338,7 +357,7 @@ function textOf(row: Readonly<Record<string, unknown>>, field: string): string {
   return value;
 }
 
-function dateOf(row: Readonly<Record<string, unknown>>, field: string, reportId: ReportId): Date {
+export function dateOf(row: Readonly<Record<string, unknown>>, field: string, subject: string): Date {
   const value = row[field];
   if (value instanceof Date) {
     return value;
@@ -349,5 +368,5 @@ function dateOf(row: Readonly<Record<string, unknown>>, field: string, reportId:
       return parsed;
     }
   }
-  throw corrupt(`'${field}' is not an instant (report ${reportId})`);
+  throw corrupt(`'${field}' is not an instant (${subject})`);
 }

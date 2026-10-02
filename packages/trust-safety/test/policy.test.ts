@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { NOW, at, makeSignal, subject } from './support.js';
+import { NOW, at, makeSignal, selfEscalating, subject } from './support.js';
 import type { RiskState } from '@been-there/core';
 import {
   type Corroboration,
@@ -23,28 +23,27 @@ const decide = (current: RiskState, signal: Signal, overrides: Partial<Corrobora
   assessSignal({ current, signal, corroboration: corroboration(overrides), disputeOpen }, NOW);
 
 describe('escalation thresholds', () => {
-  it('ignores a single weak signal from normal', () => {
-    const decision = decide('normal', makeSignal({ weight: 0.49 }));
-    expect(decision.next).toBe('normal');
-    expect(decision.reason).toBe('below_threshold');
-    expect(decision.changed).toBe(false);
-  });
-
-  it('takes a normal subject to elevated on a first signal worth half', () => {
-    const decision = decide('normal', makeSignal({ weight: 0.5 }));
+  it('takes a normal subject to elevated on a first self_escalating signal worth half', () => {
+    // The 0.5 gate is no longer reachable by arithmetic alone: a
+    // `corroboration_only` signal is held whatever it weighs, and a
+    // `self_escalating` one is refused at construction below half, so half is
+    // the boundary rather than a threshold a weaker signal slips under. What a
+    // lone corroboration-only signal is worth is `escalation.test.ts`.
+    const decision = decide('normal', selfEscalating({ weight: 0.5 }));
     expect(decision.next).toBe('elevated');
     expect(decision.reason).toBe('escalated_by_signal');
+    expect(decision.changed).toBe(true);
   });
 
   it('requires a stronger signal to climb from elevated to high', () => {
-    expect(decide('elevated', makeSignal({ weight: 0.69 })).next).toBe('elevated');
-    expect(decide('elevated', makeSignal({ weight: 0.7 })).next).toBe('high');
+    expect(decide('elevated', selfEscalating({ weight: 0.69 })).next).toBe('elevated');
+    expect(decide('elevated', selfEscalating({ weight: 0.7 })).next).toBe('high');
   });
 
-  it('discounts a low reliability detector instead of silencing it', () => {
-    const low = decide('normal', makeSignal({ weight: 0.8, reliability: 'low' }));
+  it('discounts a low reliability detector in the score it reports', () => {
+    const low = decide('normal', selfEscalating({ weight: 0.8, reliability: 'low' }));
     expect(low.effectiveScore).toBeCloseTo(0.56, 5);
-    const high = decide('normal', makeSignal({ weight: 0.8, reliability: 'high' }));
+    const high = decide('normal', selfEscalating({ weight: 0.8, reliability: 'high' }));
     expect(high.effectiveScore).toBeCloseTo(0.8, 5);
   });
 });
@@ -53,7 +52,7 @@ describe('corroboration is required for the highest escalation', () => {
   it('holds a single detector below critical however loudly it repeats itself', () => {
     const decision = decide(
       'high',
-      makeSignal({ weight: 1 }),
+      selfEscalating({ weight: 1 }),
       corroboration({ repetitions: 40 }),
     );
     expect(decision.effectiveScore).toBe(SINGLE_DETECTOR_SCORE_CEILING);
@@ -110,13 +109,17 @@ describe('corroboration is required for the highest escalation', () => {
 describe('repetition', () => {
   it('adds a little to each repeat and then stops paying', () => {
     const scoreAt = (repetitions: number) =>
-      decide('elevated', makeSignal({ weight: 0.6 }), corroboration({ repetitions })).effectiveScore;
+      decide('elevated', selfEscalating({ weight: 0.6 }), corroboration({ repetitions })).effectiveScore;
     expect(scoreAt(0)).toBeCloseTo(0.6, 5);
     expect(scoreAt(4)).toBeCloseTo(0.72, 5);
     expect(scoreAt(20)).toBeCloseTo(0.75, 5);
   });
 
-  it('cannot be moved by a hundred unrelated matchers, however they are weighted', () => {
+  it('cannot be moved by a hundred accounts unmatching one subject', () => {
+    // `interaction.unmatch_by_counterparty`: 0.5 at `low` reliability, and
+    // each unmatch is a different match, so the repeat counter never even
+    // accumulates. Two independent reasons it cannot move anybody, either of
+    // which would be enough on its own.
     const score = decide(
       'normal',
       makeSignal({ weight: 0.5, reliability: 'low', category: 'interaction' }),
@@ -131,17 +134,22 @@ describe('repetition', () => {
     );
     expect(evenAsRepeats.effectiveScore).toBeLessThan(0.5);
     expect(evenAsRepeats.next).toBe('normal');
+    expect(evenAsRepeats.reason).toBe('corroboration_required');
   });
 });
 
 describe('friction follows the risk state', () => {
   const kindsAt = (state: RiskState, weight = 0.6, disputeOpen = false) =>
-    decide(state, makeSignal({ weight }), corroboration({ repetitions: 0 }), disputeOpen).friction.map(
+    decide(state, selfEscalating({ weight }), corroboration({ repetitions: 0 }), disputeOpen).friction.map(
       (entry) => entry.kind,
     );
 
   it('proposes nothing while the subject stays at normal', () => {
-    expect(kindsAt('normal', 0.4)).toEqual([]);
+    // A held corroboration_only signal leaves the state where it found it, and
+    // friction follows the state, so there is nothing to propose. A
+    // self_escalating signal cannot be a substitute for this case: it is
+    // refused below the gate, so it never leaves a subject at normal at all.
+    expect(decide('normal', makeSignal({ weight: 0.4 }), corroboration()).friction).toEqual([]);
   });
 
   it('friction follows the state the signal leaves behind, not the one it found', () => {
@@ -154,14 +162,14 @@ describe('friction follows the risk state', () => {
   });
 
   it('gives every proposal an expiry and marks it reversible', () => {
-    for (const entry of decide('critical', makeSignal({ weight: 0.6 })).friction) {
+    for (const entry of decide('critical', selfEscalating({ weight: 0.6 })).friction) {
       expect(entry.reversible).toBe(true);
       expect(entry.expiresAt.getTime()).toBeGreaterThan(NOW.getTime());
     }
   });
 
   it('proposes no friction while a dispute is open, but still moves the risk state', () => {
-    const decision = decide('elevated', makeSignal({ weight: 0.9 }), corroboration(), true);
+    const decision = decide('elevated', selfEscalating({ weight: 0.9 }), corroboration(), true);
     expect(decision.friction).toEqual([]);
     expect(decision.next).toBe('high');
   });

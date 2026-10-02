@@ -1,6 +1,6 @@
 import { castId, type CorrelationId, type Result, type RiskState, type SubjectId } from '@been-there/core';
 import { type AssessmentContext, type RiskRecord, emptyRiskRecord } from '../src/index.js';
-import { type DetectorReliability, type Signal, type SignalAuthor, type SignalCategory, type SignalInput, createSignal } from '../src/index.js';
+import { type DetectorReliability, type EscalationStatus, type Signal, type SignalAuthor, type SignalCategory, type SignalInput, createSignal } from '../src/index.js';
 import { sequentialIdFactory } from '../src/index.js';
 
 /** Fixed clock. Every test states its own dates rather than reading the system. */
@@ -34,21 +34,35 @@ export const DEFAULT_AUTHOR: SignalAuthor = {
   detector: 'interaction.unmatch_report',
   reliability: 'high',
   category: 'interaction',
+  escalation: 'corroboration_only',
 };
 
 export interface SignalOverrides extends Partial<SignalInput> {
   readonly detector?: string;
   readonly reliability?: DetectorReliability;
   readonly category?: SignalCategory;
+  readonly escalation?: EscalationStatus;
+}
+
+/**
+ * A signal from a detector that declares it may act on its own evidence.
+ *
+ * The default author is `corroboration_only`, because that is what every
+ * detector in the implemented catalogue declares; a test about one signal
+ * moving a subject has to say that it is testing a self_escalating one.
+ */
+export function selfEscalating(overrides: SignalOverrides = {}): Signal {
+  return makeSignal({ ...overrides, escalation: 'self_escalating' });
 }
 
 /** A well-formed signal; tests override exactly the field under examination. */
 export function makeSignal(overrides: SignalOverrides = {}): Signal {
-  const { detector, reliability, category, ...input } = overrides;
+  const { detector, reliability, category, escalation, ...input } = overrides;
   const author: SignalAuthor = {
     detector: detector ?? DEFAULT_AUTHOR.detector,
     reliability: reliability ?? DEFAULT_AUTHOR.reliability,
     category: category ?? DEFAULT_AUTHOR.category,
+    escalation: escalation ?? DEFAULT_AUTHOR.escalation,
   };
   const subjectId = input.subjectId ?? subject('s-1');
   return succeeded(

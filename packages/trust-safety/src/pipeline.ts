@@ -5,8 +5,9 @@ import {
   type Unsubscribe,
 } from '@been-there/core';
 import { type Detector, runDetector } from './detector.js';
-import { SAFETY_DETECTORS } from './detectors.js';
+import { createSafetyDetectors } from './detectors.js';
 import { type Observation, REDUCTION_CLEARANCE, toObservation } from './observation.js';
+import type { PairingMatcher } from './pairing.js';
 import type { Signal } from './signal.js';
 
 /**
@@ -31,12 +32,28 @@ export const OBSERVATIONS_PER_SUBJECT = 256;
 /** How many refusals are retained for inspection. The oldest are dropped. */
 export const REFUSALS_RETAINED = 64;
 
-export interface SafetySeamOptions {
-  /** The one clock. Every `occurredAt` and every window is measured against it. */
-  readonly now: () => Date;
-  /** Defaults to the implemented catalogue; a test may pass one detector. */
-  readonly detectors?: readonly Detector[];
-}
+/**
+ * A seam is built with a detector list or with a pairing secret, and the type
+ * says so. Passing neither used to be the default — the catalogue, silently,
+ * with no pairing detector in it — and the failure that produced was invisible
+ * for the same reason every other one in this package has been: a decision made
+ * by what somebody did not pass. Passing both is a compile error, because a
+ * hand-built list that silently omits the pairing detector is the same mistake
+ * wearing a different hat.
+ */
+export type SafetySeamOptions =
+  | {
+      readonly now: () => Date;
+      /** The detectors to run. The full catalogue is not implied. */
+      readonly detectors: readonly Detector[];
+      readonly pairing?: never;
+    }
+  | {
+      readonly now: () => Date;
+      /** Builds the full catalogue, pairing detector included. */
+      readonly pairing: PairingMatcher;
+      readonly detectors?: never;
+    };
 
 export interface DetectionRun {
   readonly signals: readonly Signal[];
@@ -67,7 +84,7 @@ export interface SafetySeam {
 }
 
 export function createSafetySeam(options: SafetySeamOptions): SafetySeam {
-  const detectors = options.detectors ?? SAFETY_DETECTORS;
+  const detectors = 'pairing' in options ? createSafetyDetectors(options.pairing) : options.detectors;
   const bySubject = new Map<SubjectId, readonly Observation[]>();
   const refused: DomainError[] = [];
 

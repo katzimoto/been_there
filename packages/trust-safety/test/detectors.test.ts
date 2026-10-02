@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   type Observation,
   type ObservationKind,
-  type Signal,
   SAFETY_DETECTORS,
+  type Signal,
+  assessSignal,
   runDetector,
 } from '../src/index.js';
+import type { RiskState } from '@been-there/core';
 import { NOW, at, subject } from './support.js';
 
 /**
@@ -37,6 +39,31 @@ function cycle(subjectId: Observation['subjectId'], observations: readonly Obser
 
 const repeats = (count: number, entry: (index: number) => Observation): readonly Observation[] =>
   Array.from({ length: count }, entry);
+
+const unmatched = (matcher: string, matchId: string): Observation =>
+  observation('unmatch.performed', {
+    occurredAt: at(0, 2),
+    actorId: subject(matcher),
+    subjectId: subject('u-1'),
+    entityId: matchId,
+  });
+
+const attempt = (occurredAt: Date): Observation =>
+  observation('verification.attempt.started', { occurredAt, entityId: 'ver-1' });
+const stateChange = (occurredAt: Date): Observation =>
+  observation('identity.status_changed', { occurredAt });
+
+/**
+ * The evidence each implemented detector needs before it says anything, so the
+ * escalation tests below can drive the real catalogue rather than a fixture of it.
+ */
+const EVIDENCE: Readonly<Record<string, readonly Observation[]>> = {
+  'velocity.like_burst': repeats(25, (index) => observation('like.recorded', { counterpartyId: subject(`u-${index}`) })),
+  'velocity.message_burst': [observation('communication.message_sent', { entityId: 'conv-1', count: 30 })],
+  'dating.profile_churn': repeats(10, () => observation('profile.state_changed')),
+  'interaction.unmatch_by_counterparty': [unmatched('u-9', 'match-1')],
+  'identity.reuse': [attempt(at(0, 5)), stateChange(at(0, 1))],
+};
 
 describe('velocity detectors', () => {
   it('reads a burst of outbound likes as one signal, not one per like', () => {
@@ -94,13 +121,6 @@ describe('velocity detectors', () => {
 });
 
 describe('interaction.unmatch_by_counterparty', () => {
-  const unmatched = (matcher: string, matchId: string): Observation =>
-    observation('unmatch.performed', {
-      occurredAt: at(0, 2),
-      actorId: subject(matcher),
-      subjectId: subject('u-1'),
-      entityId: matchId,
-    });
 
   it('is evidence about the account that was unmatched, keyed on the match', () => {
     const signals = cycle(subject('u-1'), [unmatched('u-9', 'match-1')]);
@@ -126,11 +146,6 @@ describe('interaction.unmatch_by_counterparty', () => {
 });
 
 describe('identity.reuse', () => {
-  const attempt = (occurredAt: Date): Observation =>
-    observation('verification.attempt.started', { occurredAt, entityId: 'ver-1' });
-  const stateChange = (occurredAt: Date): Observation =>
-    observation('identity.status_changed', { occurredAt });
-
   it('is an attempt with a state change behind it, keyed on the attempt', () => {
     const signals = cycle(subject('u-1'), [attempt(at(0, 5)), stateChange(at(0, 1))]);
 
@@ -146,5 +161,96 @@ describe('identity.reuse', () => {
     expect(cycle(subject('u-1'), [stateChange(at(0, 1))])).toEqual([]);
     // The state change has to come after the attempt, not before it.
     expect(cycle(subject('u-1'), [attempt(at(0, 1)), stateChange(at(0, 5))])).toEqual([]);
+  });
+});
+
+/**
+ * Issue #44: escalation is a two-key system, and every detector in the
+ * implemented catalogue holds only the corroboration key. The declaration is on
+ * the detector, and the policy reads it — nothing here is a list of names.
+ */
+describe('what the catalogue declares about escalating', () => {
+  /** The real signals a detector emits from the evidence registered for it. */
+  function speaks(detector: string): readonly Signal[] {
+    const found = SAFETY_DETECTORS.find((entry) => entry.detector === detector);
+    if (found === undefined) {
+      throw new Error(`no detector called ${detector} in the catalogue`);
+    }
+    const run = runDetector(found, { subjectId: subject('u-1'), now: NOW, observations: EVIDENCE[detector] ?? [] }, []);
+    if (!run.ok) {
+      throw new Error(`${detector} failed its own run: ${run.error.code}`);
+    }
+    return run.value;
+  }
+
+  it('declares every implemented detector corroboration_only', () => {
+    const escalating = SAFETY_DETECTORS.filter((detector) => detector.escalation !== 'corroboration_only');
+    expect(escalating.map((detector) => detector.detector)).toEqual([]);
+    // Not vacuous: the catalogue is not empty, and it is not empty by accident.
+    expect(SAFETY_DETECTORS.length).toBe(Object.keys(EVIDENCE).length);
+  });
+
+  it('carries the declaration onto the signal, which is what the policy reads', () => {
+    for (const name of Object.keys(EVIDENCE)) {
+      for (const signal of speaks(name)) {
+        expect({ detector: signal.detector, escalation: signal.escalation }).toEqual({
+          detector: name,
+          escalation: 'corroboration_only',
+        });
+      }
+    }
+  });
+
+  it('leaves the state where it found it at 40 repeats, from every state it could start in', () => {
+    for (const name of Object.keys(EVIDENCE)) {
+      const [signal] = speaks(name);
+      if (signal === undefined) {
+        throw new Error(`${name} emitted nothing from the evidence registered for it`);
+      }
+      for (const current of ['normal', 'elevated', 'high'] as const satisfies readonly RiskState[]) {
+        const decision = assessSignal(
+          {
+            current,
+            signal,
+            corroboration: { detectors: [name], independentDetectors: 1, repetitions: 40, massReport: null },
+            disputeOpen: false,
+          },
+          NOW,
+        );
+        expect({ detector: name, current, next: decision.next, reason: decision.reason }).toEqual({
+          detector: name,
+          current,
+          next: current,
+          reason: 'corroboration_required',
+        });
+      }
+    }
+  });
+
+  it('reads the declaration rather than a list of names', () => {
+    const [unmatch] = speaks('interaction.unmatch_by_counterparty');
+    if (unmatch === undefined) {
+      throw new Error('interaction.unmatch_by_counterparty emitted nothing');
+    }
+    // The same detector, the same evidence, the same weight, promoted to `high`
+    // reliability so that its own weight clears the gate. The only thing that
+    // then differs between the two is what it declared, so the policy cannot be
+    // reading a name.
+    const promoted: Signal = { ...unmatch, reliability: 'high', escalation: 'self_escalating' };
+    const held: Signal = { ...promoted, escalation: 'corroboration_only' };
+    const decide = (signal: Signal) =>
+      assessSignal(
+        {
+          current: 'normal',
+          signal,
+          corroboration: { detectors: [signal.detector], independentDetectors: 1, repetitions: 0, massReport: null },
+          disputeOpen: false,
+        },
+        NOW,
+      );
+
+    expect(decide(promoted).next).toBe('elevated');
+    expect(decide(held).next).toBe('normal');
+    expect(decide(held).reason).toBe('corroboration_required');
   });
 });

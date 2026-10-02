@@ -14,6 +14,7 @@
  * rather than passing on nothing.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { databasePool, dropDatabase } from './support/database.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,8 +37,7 @@ if (existsSync(ENV_FILE)) {
   }
 }
 
-const connectionString = process.env['DATABASE_URL'];
-const describeIfDb = connectionString === undefined ? describe.skip : describe;
+const describeIfDb = describe;
 
 const HOUR = 60 * 60 * 1000;
 const OPENED_AT = new Date('2026-01-01T09:00:00.000Z');
@@ -51,13 +51,16 @@ describeIfDb('ModerationStore, against Postgres', () => {
   let store: ModerationStore;
 
   beforeAll(async () => {
-    pool = new pg.Pool({ connectionString });
+    pool = await databasePool('moderation');
     transaction = createTransaction(pool);
     store = createModerationStore();
   });
 
   afterAll(async () => {
     await pool.end();
+    // Without this the database survives the run: 161 of them leaked during
+    // development, invisible until someone runs out of connections or disk.
+    await dropDatabase();
   });
 
   /** The unit of work every statement runs in, and the only one there is. */

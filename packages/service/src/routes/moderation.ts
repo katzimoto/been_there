@@ -30,7 +30,7 @@ import {
   submitReport,
   triageReport,
 } from '@been-there/moderation';
-import { authorize } from '@been-there/platform';
+import { APPOINTMENT_BY_ROLE, authorize } from '@been-there/platform';
 import { MISSING_FIELD, NOT_FOUND } from '../http/failure.js';
 import { readEnum, readString, readStringArray } from '../http/body.js';
 import { okResponse, route, type HttpResponse, type Route, type RouteRequest } from '../http/router.js';
@@ -100,16 +100,11 @@ const CASE_PAGE_LIMIT = 50;
 export function moderationRoutes(dependencies: ServiceDependencies): readonly Route[] {
   return [
     route('GET', '/v1/moderation/cases', async (request) => {
-      // `case.read` is a `Permission` but not a `ProtectedAction`, so `authorize`
-      // has no member for "see the queue" — the closest is `case.open`, which is
-      // also `moderatorRequired` and therefore still refuses a caller with no named
-      // moderator. Reported rather than papered over: adding
-      // `'case.read': { permission: 'case.read', requiredClearance: 'restricted', ... }`
-      // to `PROTECTED_ACTIONS` is the exact fix, and it matters because seeing the
-      // queue and acting on a case are different authorities.
-      const gate = authorize(request.actor.principal, 'case.open', {
-        moderatorId: request.actor.actorId,
-      });
+      // `case.read` is its own protected action rather than a stand-in for
+      // `case.open`: seeing the queue is not the authority to act on a case, and
+      // it is the one gate that needs neither a case nor a named moderator,
+      // because a moderator with nothing assigned still reads it.
+      const gate = authorize(request.actor.principal, 'case.read');
       if (!gate.ok) {
         return gate;
       }
@@ -289,10 +284,13 @@ async function recordDecision(
     return NOT_FOUND('case');
   }
   const moderationCase = caseOf(row);
+  // `isLead` and `identityPrivacyRole` come from the role the actor resolver
+  // authenticated, never from the request body. They are what the moderation
+  // package's clearance ladder is computed from, so a body-supplied `isLead`
+  // would be a caller promoting itself to lead on a case it has been refused.
   const actor: ModeratorActor = {
     actorId: moderatorId,
-    isLead: request.body['isLead'] === true,
-    identityPrivacyRole: request.body['identityPrivacyRole'] === true,
+    ...APPOINTMENT_BY_ROLE[request.actor.principal.role],
     automated: request.actor.automated,
   };
   const subjectStanding = await subjectStandingFor(

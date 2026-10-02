@@ -33,6 +33,22 @@ export interface RouteRequest {
    * transactions — the unit of work is the request, not the method.
    */
   readonly tx: Transaction;
+  /**
+   * The peer's address, for the per-address rate limits the account spec
+   * requires (`signup_per_ip`, `recovery_per_source`).
+   *
+   * Taken from the socket, never from a header a client can set: an
+   * `X-Forwarded-For` a caller controls is not a rate-limit key, it is a
+   * suggestion. A deployment behind a proxy that does not terminate the
+   * connection sees the proxy's address, which fails *closed* — everyone
+   * shares one bucket — rather than open, which is the failure that matters
+   * for an abuse control.
+   *
+   * Optional because a non-transactional route has no connection to read it
+   * from; a handler that needs it should treat its absence as "no key", which
+   * the rate-limit code decides.
+   */
+  readonly clientAddress: string | null;
 }
 
 export interface HttpResponse {
@@ -47,10 +63,77 @@ export interface Route {
   /** Literal segments, or `:name` for a captured one. */
   readonly pattern: readonly string[];
   readonly handle: RouteHandler;
+  /**
+   * Reached without a session. Sign-up, sign-in and recovery are the three
+   * routes a caller cannot present a session to, because holding one is the
+   * thing they are trying to get, or to get back.
+   *
+   * It is a property of the route rather than something a request can claim, so
+   * no client can opt itself out of authentication: the only way to reach a
+   * protected handler without a session is for that handler to be declared
+   * public in this table, which is a reviewed line rather than a header.
+   */
+  readonly public: boolean;
+  /**
+   * Whether the request runs inside `transaction.run`.
+   *
+   * False exists for exactly one reason: readiness has to be answerable *while*
+   * the database is unreachable. With a dead pool, `transaction.run` throws
+   * before a handler is reached, so a readiness probe that took a transaction
+   * would answer 503 on a transient database fault and every replica would be
+   * restarted — turning a degradation into an outage.
+   *
+   * A non-transactional route is handed `PASSIVE_TRANSACTION`, whose client is
+   * `undefined`, so a store call from one throws rather than silently doing
+   * nothing. The flag is opt-out and defaults true: a new route is transactional
+   * unless someone deliberately decides otherwise, which is a reviewed line.
+   */
+  readonly transactional: boolean;
 }
 
-export function route(method: string, pattern: string, handle: RouteHandler): Route {
-  return { method, pattern: pattern.split('/').filter((segment) => segment.length > 0), handle };
+export interface RouteOptions {
+  readonly transactional?: boolean;
+}
+
+function routeOf(
+  method: string,
+  pattern: string,
+  handle: RouteHandler,
+  isPublic: boolean,
+  transactional: boolean,
+): Route {
+  return {
+    method,
+    pattern: pattern.split('/').filter((segment) => segment.length > 0),
+    handle,
+    public: isPublic,
+    transactional,
+  };
+}
+
+export function route(
+  method: string,
+  pattern: string,
+  handle: RouteHandler,
+  options: RouteOptions = {},
+): Route {
+  return routeOf(method, pattern, handle, false, options.transactional ?? true);
+}
+
+/**
+ * A route reached without a session.
+ *
+ * Separate from `route` rather than a fourth argument, because "this endpoint is
+ * deliberately unauthenticated" is the fact a reviewer needs to see at the call
+ * site and an optional boolean is the fact they will not.
+ */
+export function publicRoute(
+  method: string,
+  pattern: string,
+  handle: RouteHandler,
+  options: RouteOptions = {},
+): Route {
+  return routeOf(method, pattern, handle, true, options.transactional ?? true);
 }
 
 export type RouteMatch =

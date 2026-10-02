@@ -31,8 +31,11 @@
 import type { MatchId, UserId } from '@been-there/core';
 import type {
   InteractionStore,
+  LocationAnchorRow,
   Page,
   PageResult,
+  ProfilePhotoRow,
+  ProfilePhotoState,
   ProfileRow,
   Transaction,
 } from '@been-there/contracts';
@@ -52,28 +55,41 @@ import {
 } from './store-support.js';
 
 import {
+  APPLY_PHOTO_DECISION,
   blockView,
   CURRENT_LIKE_STATES,
+  DELETE_PROFILE_PHOTO,
+  FINALISE_PROFILE_PHOTO_ORDER,
+  FIND_LOCATION_ANCHOR,
+  FIND_PROFILE_PHOTO,
+  FIND_PROFILE_PHOTOS_FOR,
   INSERT_BLOCK,
   INSERT_LIKE,
   INSERT_PASS,
+  INSERT_PROFILE_PHOTO,
   LIVE_PASS_OWNED,
   likeView,
   matchView,
   PATCH_COLUMNS,
   passView,
   patchValue,
+  photoView,
+  PUBLISHED_PROFILE_PHOTOS,
+  REORDER_PROFILE_PHOTOS,
   SUPERSEDE_PASS_BY_ID,
   SUPERSEDE_PASS_BY_PAIR,
+  UPSERT_LOCATION_ANCHOR,
   UPSERT_MATCH,
 } from './store-interaction-rows.js';
 import type {
   BlockDbRow,
   CountRow,
   LikeDbRow,
+  LocationAnchorDbRow,
   MatchDbRow,
   PassDbRow,
   ProfileDbRow,
+  ProfilePhotoDbRow,
 } from './store-interaction-rows.js';
 /**
  * A duplicate the caller must resolve, kept distinct from a fault so a caller
@@ -166,6 +182,156 @@ export class PostgresInteractionStore implements InteractionStore {
     );
     const row = found.rows[0];
     return row === undefined ? null : jsonObject(row.value, `preferences.value for user ${userId}`);
+  }
+
+  // ----------------------------------------------------------- profile photos --
+
+  /**
+   * Every photo the owner holds, oldest first.
+   *
+   * Deliberately not the published set: a photo whose verdict has not arrived
+   * is the owner's too, and a read that filtered by approval would make "being
+   * checked" indistinguishable from "never arrived" — which is precisely the
+   * message the owner is owed.
+   */
+  async listProfilePhotos(userId: UserId, tx: Transaction): Promise<readonly ProfilePhotoRow[]> {
+    const client = clientOf(tx);
+    const found = await query<ProfilePhotoDbRow>(client, FIND_PROFILE_PHOTOS_FOR, [userId]);
+    return found.rows.map(photoView);
+  }
+
+  async insertProfilePhoto(
+    row: Omit<ProfilePhotoRow, 'createdAt'>,
+    tx: Transaction,
+  ): Promise<void> {
+    const client = clientOf(tx);
+    const inserted = await query<ProfilePhotoDbRow>(client, INSERT_PROFILE_PHOTO, [
+      row.photoId,
+      row.userId,
+      row.mediaAssetId,
+      row.altText,
+      row.state,
+      row.position,
+      row.reasonCode,
+      new Date(),
+    ]);
+    if (inserted.rowCount !== 1) {
+      throw fault(`insertProfilePhoto: ${row.photoId} was not stored`);
+    }
+  }
+
+  /**
+   * The verdict, as one write.
+   *
+   * State and position move together because the schema's CHECK ties them: a
+   * photo is in the ordered set exactly when it is approved. A store that let a
+   * caller write them apart could create an approved photo with no place in
+   * the set, or a published position belonging to a photo nobody approved.
+   */
+  async applyPhotoDecision(
+    photoId: string,
+    decision: {
+      readonly state: ProfilePhotoState;
+      readonly position: number | null;
+      readonly reasonCode: string | null;
+    },
+    at: Date,
+    tx: Transaction,
+  ): Promise<boolean> {
+    const client = clientOf(tx);
+    const applied = await query<ProfilePhotoDbRow>(client, APPLY_PHOTO_DECISION, [
+      photoId,
+      decision.state,
+      decision.position,
+      decision.reasonCode,
+      at,
+    ]);
+    return applied.rowCount > 0;
+  }
+
+  /**
+   * Renumbers the published set into the given order.
+   *
+   * Refuses a list that is not exactly the set: a reorder that quietly dropped
+   * a photo would close up the order without the owner asking, and a photo
+   * silently leaving the set is the one photo operation that is hard to notice
+   * and easy to regret.
+   */
+  async reorderProfilePhotos(
+    userId: UserId,
+    orderedPhotoIds: readonly string[],
+    at: Date,
+    tx: Transaction,
+  ): Promise<number> {
+    const client = clientOf(tx);
+    const published = await query<ProfilePhotoDbRow>(client, PUBLISHED_PROFILE_PHOTOS, [userId]);
+    const current = published.rows.map((row) => row.photo_id);
+    const wanted = [...orderedPhotoIds].sort();
+    if (
+      wanted.length !== current.length ||
+      current.slice().sort().some((photoId, index) => photoId !== wanted[index])
+    ) {
+      throw fault(
+        `reorderProfilePhotos: the given order is not exactly the published set for user ${userId}`,
+      );
+    }
+    const positions = orderedPhotoIds.map((_, index) => index);
+    const staged = await query<{ photo_id: string }>(client, REORDER_PROFILE_PHOTOS, [
+      userId,
+      [...orderedPhotoIds],
+      at,
+      positions,
+    ]);
+    await query(client, FINALISE_PROFILE_PHOTO_ORDER, [userId]);
+    return staged.rowCount;
+  }
+
+  async deleteProfilePhoto(photoId: string, userId: UserId, tx: Transaction): Promise<boolean> {
+    const client = clientOf(tx);
+    const deleted = await query<{ photo_id: string }>(client, DELETE_PROFILE_PHOTO, [photoId, userId]);
+    return deleted.rowCount > 0;
+  }
+
+  // ---------------------------------------------------------------- location --
+
+  /**
+   * The precise anchor, classified `sensitive`.
+   *
+   * The `sensitivity` value is written as the literal in the statement rather
+   * than taken from the caller's row: the classification is a fact about the
+   * column, not a request, and a route that could pass `public` would hand the
+   * only coordinate in the system to a reader that has no reason to hold it.
+   */
+  async upsertLocationAnchor(row: LocationAnchorRow, tx: Transaction): Promise<void> {
+    const client = clientOf(tx);
+    await query<LocationAnchorDbRow>(client, UPSERT_LOCATION_ANCHOR, [
+      row.userId,
+      row.latitude,
+      row.longitude,
+      row.observedAt,
+    ]);
+  }
+
+  async findLocationAnchor(userId: UserId, tx: Transaction): Promise<LocationAnchorRow | null> {
+    const client = clientOf(tx);
+    const found = await query<LocationAnchorDbRow>(client, FIND_LOCATION_ANCHOR, [userId]);
+    const row = found.rows[0];
+    if (row === undefined) {
+      return null;
+    }
+    if (row.sensitivity !== 'sensitive') {
+      // The column is CHECKed to this one value, so a different reading means
+      // the constraint is gone — which is a migration defect, not a data value
+      // to coerce to the nearest legal classification.
+      throw fault(`location_anchors.sensitivity for user ${userId} is '${row.sensitivity}'`);
+    }
+    return {
+      userId: row.user_id as UserId,
+      latitude: row.latitude,
+      longitude: row.longitude,
+      sensitivity: 'sensitive',
+      observedAt: row.observed_at,
+    };
   }
 
   // ----------------------------------------------------------------- likes --

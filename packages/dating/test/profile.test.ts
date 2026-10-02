@@ -66,11 +66,15 @@ describe('profile completeness', () => {
   });
 
   it('does not count a photo that is still in media review', () => {
-    const pending = [photo('p1'), photo('p2'), photo('p3')].map((photoId, index) => ({
+    // The property is that *approval* is what counts, not the photo's presence.
+    // With `minPhotos: 1` this is the only thing left that can withhold a
+    // photo, so the test is now about one pending photo rather than three.
+    const pending = [photo('p1')].map((photoId) => ({
       photoId,
-      approval: index === 2 ? ('pending' as const) : ('approved' as const),
+      approval: 'pending' as const,
     }));
     expect(missingOf({ photos: pending })).toEqual<MissingProfileField[]>(['photos']);
+    expect(missingOf({ photos: [{ photoId: photo('p1'), approval: 'approved' }] })).not.toContain('photos');
   });
 
   it('requires at least one answered prompt and a usable bio length', () => {

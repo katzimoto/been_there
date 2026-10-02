@@ -6,6 +6,7 @@ import {
   type DataSensitivity,
   type DomainEvent,
   type EventId,
+  type ReportId,
   type UserId,
   castId,
   type SubjectId,
@@ -13,6 +14,7 @@ import {
 import { type AuditLog, createAuditLog } from './audit.js';
 import type { CaseState } from './case.js';
 import type { DecisionId } from './ids.js';
+import type { PairingKey } from './pairing.js';
 
 /**
  * Every event this domain publishes. The split is by *audience*, not by
@@ -31,6 +33,15 @@ import type { DecisionId } from './ids.js';
     a case id on a bus any visitor can read publishes the existence of an open
     case about an identifiable person, which is the first fact a `restricted`
     clearance exists to withhold. Two events, two clearances, one decision.
+ *
+ *  - `moderation.report_pairing` is the second half of that arrangement for a
+    fact no product domain may hold. It is `user` and carries a keyed join
+    token, never an identity: a detector can prove that an unmatch and a report
+    describe the same pair, and cannot learn which account reported which
+ * because the token is not reversible. The `restricted` event above is
+    unchanged by its existence — no counterparty id, no reason, no match — so
+    the clearance a `restricted` class exists to hold is not weakened. See
+    `pairing.ts` for the derivation, its properties and its residual.
  */
 /**
  * A runtime array, not only a type union, so a cross-domain check can
@@ -41,6 +52,7 @@ import type { DecisionId } from './ids.js';
  */
 export const MODERATION_EVENT_TYPES = [
   'moderation.report_submitted',
+  'moderation.report_pairing',
   'moderation.report_status_changed',
   'moderation.case_opened',
   'moderation.case_assigned',
@@ -59,6 +71,29 @@ export const MODERATION_EVENT_TYPES = [
 ] as const;
 
 export type ModerationEventType = (typeof MODERATION_EVENT_TYPES)[number];
+
+
+/** The only event that publishes a join key rather than an id. */
+export const REPORT_PAIRING_EVENT: ModerationEventType = 'moderation.report_pairing';
+
+/**
+ * Two fields, and the second is the whole point.
+ *
+ * `reportId` is an opaque id a reduction needs to name the triple it is
+ * testing. `pairingToken` is a keyed hash of that report, the match it came
+ * from and the account it is about. Neither names a reporter, a counterparty, a
+ * match or a conversation, and no field here can be read back into one: the
+ * token is verified, never decoded.
+ *
+ * The token is deliberately absent from `moderation.report_submitted`, from
+ * the audit log, from every error this domain can return and from any field a
+ * log line or a span is built from. A join key on a durable record is a join
+ * key forever, and the only place that needs it is the one place it is.
+ */
+export interface ReportPairingPayload extends Readonly<Record<string, unknown>> {
+  readonly reportId: ReportId;
+  readonly pairingToken: string;
+}
 
 export const OUTWARD_ENFORCEMENT_EVENT: ModerationEventType = 'account_state.changed';
 
@@ -150,12 +185,21 @@ export interface ModerationContext {
   readonly ids: IdSource;
   readonly now: () => Date;
   readonly events: EventEmitter;
+  /**
+   * The deployment secret the pairing token is keyed with, or `null` when the
+   * deployment has not configured one. A context without it publishes no
+   * pairing event, so the join simply does not exist there — which is the
+   * honest outcome, and not a token derived from a default anyone could guess.
+   */
+  readonly pairingKey: PairingKey | null;
 }
 
 export interface ContextOptions {
   readonly audit?: AuditLog;
   readonly ids?: IdSource;
   readonly now?: () => Date;
+  /** See `ModerationContext.pairingKey`. Absent means no pairing event. */
+  readonly pairingKey?: PairingKey;
   /**
    * Where published events go. Injectable because the default is a *builder*,
    * not a publisher: `decide` hands its events back to the caller, but
@@ -187,11 +231,13 @@ export function createContext(options: ContextOptions = {}): ModerationContext {
     },
   };
 
+
   return {
     audit,
     ids,
     now,
     events,
+    pairingKey: options.pairingKey ?? null,
   };
 }
 

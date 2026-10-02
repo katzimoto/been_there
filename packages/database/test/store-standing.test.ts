@@ -14,9 +14,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { databasePool, dropDatabase } from './support/database.js';
 import pg from 'pg';
 import type { PoolClient } from 'pg';
 import { castId } from '@been-there/core';
@@ -26,34 +24,14 @@ import type { AccountStandingRow, Transaction } from '@been-there/contracts';
 import { clientOf, createTransaction } from '../src/transaction.js';
 import { PgAccountStandingStore } from '../src/store-account-standing.js';
 
-// Same loading the migration runner does, so a developer who has run `make up`
-// runs the real database rather than a suite that quietly did nothing.
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const ENV_FILE = join(REPO_ROOT, '.env');
-if (existsSync(ENV_FILE)) {
-  for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
-    const matched = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
-    if (matched === null) {
-      continue;
-    }
-    const [, name, value] = matched;
-    if (name !== undefined && value !== undefined && process.env[name] === undefined) {
-      process.env[name] = value;
-    }
-  }
-}
-
-const connectionString = process.env.DATABASE_URL;
-const describeIfDb = connectionString === undefined ? describe.skip : describe;
-
-describeIfDb('AccountStandingStore, against Postgres', () => {
+describe('AccountStandingStore, against Postgres', () => {
   const store = new PgAccountStandingStore();
   let pool: pg.Pool;
   let raw: PoolClient;
   let transaction: Transaction;
 
   beforeAll(async () => {
-    pool = new pg.Pool({ connectionString });
+    pool = await databasePool('standing');
     raw = await pool.connect();
     transaction = createTransaction(pool);
     // Connecting is not the same as reaching the schema this store reads.
@@ -75,10 +53,9 @@ describeIfDb('AccountStandingStore, against Postgres', () => {
   });
 
   afterAll(async () => {
-    if (pool !== undefined) {
-      raw.release();
-      await pool.end();
-    }
+    raw.release();
+    await pool.end();
+    await dropDatabase();
   });
 
   /** The FK to `app.users` demands a real user, so every test starts with one. */
@@ -254,7 +231,7 @@ describeIfDb('AccountStandingStore, against Postgres', () => {
     // new store instance, holding nothing the writer held. If the standing were
     // only in memory — or if a read defaulted to `active` — this is where every
     // banned account would come back into the product.
-    const restartedPool = new pg.Pool({ connectionString });
+    const restartedPool = new pg.Pool({ ...pool.options });
     try {
       const restartedTransaction = createTransaction(restartedPool);
       const found = await restartedTransaction.run((tx) =>

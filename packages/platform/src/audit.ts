@@ -40,6 +40,7 @@ export type AuditAction =
   | 'auth.recovery_requested'
   | 'auth.recovery_completed'
   | 'auth.recovery_failed'
+  | 'auth.recovery_abuse_suspected'
   | 'auth.credential_changed'
   | 'authz.capability_denied'
   | 'authz.permission_denied'
@@ -104,6 +105,7 @@ export const AUDIT_ACTIONS: Readonly<Record<AuditAction, AuditPolicy>> = {
   'auth.recovery_completed': { sensitivity: 'user', readsAreIndividuallyLogged: false, complete: true, rationale: 'Recovery invalidates every prior session, so the takeover point is recorded.' },
   'auth.recovery_failed': { sensitivity: 'user', readsAreIndividuallyLogged: false, complete: true, rationale: 'Failed attempts are the signal that an account is being probed.' },
   'auth.credential_changed': { sensitivity: 'user', readsAreIndividuallyLogged: false, complete: true, rationale: 'Password or passkey changes revoke trust in every other factor.' },
+  'auth.recovery_abuse_suspected': { sensitivity: 'user', readsAreIndividuallyLogged: false, complete: true, rationale: 'A burst of recovery attempts against one account is a claim about the security posture of a real person, so it reaches Trust & Safety and a moderator and never becomes a chart.' },
   'authz.capability_denied': { sensitivity: 'internal', readsAreIndividuallyLogged: false, complete: true, rationale: 'A denied product capability is evidence of a routing bug or an enforcement leak.' },
   'authz.permission_denied': { sensitivity: 'internal', readsAreIndividuallyLogged: false, complete: true, rationale: 'A denied role permission is an attempted privilege boundary crossing.' },
   'authz.sensitive_read': { sensitivity: 'sensitive', readsAreIndividuallyLogged: true, complete: true, rationale: 'Every read of identity evidence or an exact coordinate is individually recorded.' },
