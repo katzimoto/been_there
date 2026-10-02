@@ -4,6 +4,11 @@
 > Authority: [`docs/architecture/00-overview.md`](../architecture/00-overview.md). If this document contradicts it, that document wins.
 > Related design: Dating Core ([#4](https://github.com/katzimoto/been_there/issues/4)); identity evidence belongs to Identity & Verification ([#3](https://github.com/katzimoto/been_there/issues/3)), media handling to Platform ([#8](https://github.com/katzimoto/been_there/issues/8)).
 > Adjacent feature specs: [Account & Onboarding](./account-and-onboarding.md) ([#9](https://github.com/katzimoto/been_there/issues/9)), [Preferences & Discovery](./preferences-and-discovery.md) ([#11](https://github.com/katzimoto/been_there/issues/11)), [Likes & Matching](./likes-and-matching.md) ([#12](https://github.com/katzimoto/been_there/issues/12)), [User Safety Controls](./user-safety-controls.md) ([#14](https://github.com/katzimoto/been_there/issues/14)).
+> Also specifies the dating goal and the completed-date counter:
+> [#48](https://github.com/katzimoto/been_there/issues/48) and
+> [#49](https://github.com/katzimoto/been_there/issues/49) (§9). The aggregates
+> behind them are [Dating Core §12](../architecture/dating-core.md); where the
+> two documents could be read as disagreeing, this one is the contract.
 
 ## 1. Goal and done-when
 
@@ -18,6 +23,12 @@ onboarding, costs every card space, and creates one more thing to moderate. The
 field list in §3 is the shortest list that still lets another user answer "is this
 worth a like?" without messaging first.
 
+Two owner-only numbers live here too, because a profile is where they are set
+and where the person who set them sees them: the **dating goal** (§9.1, §9.2) and
+the **completed-date counter** (§9.3–§9.7). Neither is on the card, neither is a
+completeness rule, and reaching the goal changes no capability anywhere in the
+product — the counter is a record of what somebody did, not a measure of them.
+
 ## 2. Boundary
 
 | Piece of state | Owning domain | This feature reads | This feature never owns |
@@ -31,6 +42,7 @@ worth a like?" without messaging first.
 | Date of birth, age band derivation | Platform ([#9](./account-and-onboarding.md)) | `ageBand` on the card projection | A birth date, an exact age, or an age field |
 | Coarse location bucket | Platform | `location.resolved` + bucket band | A coordinate, an address, or a free-text location |
 | Discovery preferences and candidate ordering | Dating Core ([#11](./preferences-and-discovery.md)) | — | Anything a viewer sees about another's preferences |
+| Dating goal and completed-date counter | **Dating Core** ([#48](https://github.com/katzimoto/been_there/issues/48), [#49](https://github.com/katzimoto/been_there/issues/49)) | the owner's own goal, count and the progress derived from them | A target or a count on a card, a percentage, a completeness rule, or a gate on discovery, matching or messaging |
 | Risk, detectors, cases, evidence | Trust & Safety / Moderation | never read by product surfaces | A risk level, a report count, a case reason |
 
 Two structural rules this feature inherits and must not soften:
@@ -74,6 +86,15 @@ match-only per field, and `occupation`/`education` are not v0.1 fields.
 | `isDiscoverablePref` | no | boolean | owner toggle only; defaults to `true` once complete | `user` | owner-only (the control), affects §7 visibility |
 | `profileHiddenReason` | derived | internal code | set only by moderation-driven flows, never by the user | `internal` | never rendered to another user |
 | `dateOfBirth` | — | — | **not a profile field.** Owned by [Account & Onboarding §4](./account-and-onboarding.md); no profile API exposes it | `user` | owner-only, never displayed |
+| `datingGoal` | no | a whole number of dates, 1–100,000; **default 1,000** | must be a whole number in range; it is not a completeness rule and it gates nothing (§9.2) | `user` | **owner-only** — never on a card, never to a match |
+| `completedDateCount` | derived | an integer ≥ 0 — a raw count, never a ratio or a percentage | not editable as a number: it is folded from the owner's records and their corrections (§9.4, §9.5) | `user` | **owner-only**, and keyed to the **user** rather than to the profile (§9.1) |
+
+Two rows that are owner-only by construction, and the reason §4.2's no-score
+rule needs no exception for them. Neither is in `ProfileContent`, neither is in
+`CandidateCardProjection`, and neither is read by the completeness rules: the
+goal is a setting the owner makes on their own profile, and the count is a fact
+about their life that no other user is ever shown. §9 specifies both;
+[Dating Core §12](../architecture/dating-core.md) is the aggregate behind them.
 
 Deliberately **excluded**, with the reason each one is not here:
 
@@ -154,6 +175,51 @@ interface CandidateCardProjection {
 	readonly photoCount: number;
 }
 ```
+<!-- contract sketch: illustrative shape, not an implemented API -->
+```ts
+/**
+ * CONTRACT SKETCH — not an implemented API, and deliberately NOT inside
+ * `Profile`: the goal is a setting on a publication and the count is a fact
+ * about a person, so they are two records with two different keys. See §9.
+ */
+interface DatingGoal {
+	readonly profileId: string;
+	readonly target: number; // whole, 1–100,000; default 1,000
+	readonly updatedAt: Date; // no count field, on purpose
+}
+
+interface CompletedDateLedger {
+	readonly ownerId: string; // the user — not the profile
+	readonly records: readonly CompletedDateRecord[];
+}
+
+interface CompletedDateRecord {
+	/** The owner's retry key. Not an id of any person or date. */
+	readonly entryId: string;
+	/** `null` — someone met outside the product is still a date. */
+	readonly counterpartId: string | null;
+	readonly occurredOn: string; // ISO YYYY-MM-DD
+	readonly recordedAt: Date;
+	readonly corrections: readonly DateCorrection[]; // appended, never edited
+}
+
+type DateCorrection =
+	| { readonly kind: 'withdrawn'; readonly key: string; readonly at: Date }
+	| {
+				readonly kind: 'restated';
+				readonly key: string;
+				readonly at: Date;
+				readonly occurredOn: string;
+			};
+
+/** Owner-only. Two integers and a boolean — nothing that fits in a ring. */
+interface GoalProgress {
+	readonly completed: number;
+	readonly target: number;
+	readonly goalReached: boolean;
+	readonly beyondGoal: number;
+}
+```
 
 ## 4. Dating intentions
 
@@ -192,6 +258,12 @@ architectural constraint, not a UI preference:
   behind.
 - **No score is implied.** A progress bar, a ring, a "fit" meter, an A–F grade, or
   a star rating is a score with different pixels. None of them ship.
+- **A progress figure is not a score either.** The owner's dating goal shows
+  two integers and a boolean, never a ratio (§9.7). A completion percentage is
+  a compatibility number with a ring drawn around it, and the cheapest way to
+  refuse one is never to publish a value that fits in a ring. It is also
+  owner-only, so unlike the fields above it has no plausible route to becoming a
+  comparison between two people.
 
 ### 4.3 How "we might work" is communicated instead
 
@@ -337,7 +409,7 @@ Pipeline, in order, per photo:
    rule" has no such warrant. Leaving `needs_human` in either direction requires
    a named reviewer, on the same rule as requeueing a rejection: a decision about
    a person is made by a person. Which verdicts count as inconclusive is an open
-   question in §12 — today only an explicit `inconclusive` verdict reaches the
+   question in §13 — today only an explicit `inconclusive` verdict reaches the
    state, and promoting, say, `sexual_content` into a human queue is a
    queue-cost decision with user-facing consequences, not a mechanical one.
 4. **Likeness check** — the photo's face is compared with the face in the user's
@@ -369,7 +441,7 @@ This is the common case and it must not be a cliff.
 | The primary photo is rejected and others are approved | The next approved photo is promoted to index 0 automatically; the profile stays `live`; `profile.photo_set_updated` is published with the new count. | "We changed your main photo — here's why the old one wasn't approved." |
 | The primary photo is rejected and **no** approved photo remains | The profile moves `live` → `incomplete`, leaves discovery, and stays in existing matches with a placeholder card. The user is asked for one more photo. | "You're not appearing in discovery until you add a photo we can approve. Your matches are still there." |
 | A photo goes to `needs_human` | It is held out of the live set as if rejected, and the user is told it is "being checked" — not that it failed. `profile.photo_rejected` is **not** counted: a hold is a queue, not a refusal, and sharing the counter would make a screening regression and a moderator backlog look like one number. | "One photo is being checked. It'll appear if it's approved." |
-| A photo is removed by a moderator from an open case | The photo is withdrawn everywhere, including in existing matches and conversations already delivered. This is the one case of retroactive removal (see §9.1). | The photo disappears; the user is told it was removed without the case detail. |
+| A photo is removed by a moderator from an open case | The photo is withdrawn everywhere, including in existing matches and conversations already delivered. This is the one case of retroactive removal (see §10.1). | The photo disappears; the user is told it was removed without the case detail. |
 
 Removal never cascades to a punishment: a rejected photo does not hide the
 profile, does not count toward risk by itself, and does not require a human.
@@ -478,16 +550,230 @@ look" instead of "your profile is 80% complete".
   direction ([#1](https://github.com/katzimoto/been_there/issues/1): no
   artificial match limits).
 
-## 9. Editing
+## 9. The dating goal and the completed-date counter
 
-### 9.1 What is editable once a match exists
+> Issues [#48](https://github.com/katzimoto/been_there/issues/48) and
+> [#49](https://github.com/katzimoto/been_there/issues/49). The aggregate shapes
+> and the reason each one is shaped that way are
+> [Dating Core §12](../architecture/dating-core.md); this section is the
+> product decision and does not restate the implementation.
+
+Two numbers the owner keeps about their own life: a **target** for how many
+dates they want to go on, and a **count** of how many they have recorded. Both
+are set on a profile and shown to the person who set them, and neither is
+readable by anyone else. There is a temptation to read this section as a
+scoreboard, and the whole of §4.2 applies to it: it is not one.
+
+### 9.1 Two records, keyed differently, on purpose
+
+The goal is **per profile**; the counter is **per user**. This is the only
+place the two disagree about scope, and it is deliberate.
+
+| | The goal | The counter |
+|---|---|---|
+| Keyed by | `ProfileId` | `UserId` |
+| Holds | a target | the dates the owner recorded |
+| Default | 1,000 dates | 0 |
+| Set by | the profile owner | the profile owner |
+| Survives profile deletion | no — a new profile starts at 1,000 | **yes** |
+
+A `ProfileId` names a card, and a card has a lifecycle that ends in `deleted`.
+Deleting a profile is an ordinary act of privacy — take yourself off the
+marketplace for a while — and it must not take a life behind it. So the target,
+which is a setting on the publication, goes with the publication; the count,
+which is a fact about the person, does not. The consequence a product person
+should hold onto: **deleting and recreating a profile does not reset the
+count**, and the person sees the same number afterwards with a fresh target to
+set.
+
+The alternative — keying both to the profile — makes deletion the natural
+moment to lose the count, and losing it is silent: the user comes back, sees
+zero, and has no way to tell a reset from a mistake.
+
+### 9.2 The target is a target, not a gate
+
+| Rule | Value |
+|---|---|
+| Default | **1,000** dates until the owner names another |
+| Accepted | a whole number, 1 to 100,000 |
+| Refused | 0, negatives, fractions, and anything above the ceiling, with the reason named |
+| Effect on discovery, matching, messaging | **none** |
+| Effect on profile completeness | **none** — the goal is not a completeness rule (§8.1) |
+| Past the target | recording continues; the count is allowed to exceed it |
+
+**Reaching the goal changes nothing about what the person can do.** Liking,
+matching, messaging and discovery eligibility do not read the goal or the count,
+and a user at 1,000 of 1,000 dates is in exactly the position they were at 12.
+This is [#48](https://github.com/katzimoto/been_there/issues/48)'s explicit
+requirement and it is enforced by absence rather than by a check: nothing in
+the discovery, matching or messaging paths takes a goal or a ledger as an
+input, so there is no rule to forget and no future refactor that can quietly
+add the gate back.
+
+**The count may pass the target.** A progress figure that stops at 100% is a
+grade, and a person who has been on more dates than they set out to go on has
+not failed at anything. The owner is told how far past they are.
+
+**Zero is refused rather than treated as "no goal".** The default already
+covers a person who has not chosen, and a stored `0` would then be
+indistinguishable from a person who deliberately chose to aim at nothing.
+
+**The ceiling of 100,000 is not in the issue.** It exists because a target past
+it is not a number any progress view can render, and storing one would record a
+claim the product cannot show back to the person who made it.
+
+### 9.3 Only a date the owner explicitly records counts
+
+A like is not a date. A match is not a date. A message is not a date. None of
+them is an input to the counter, and there is no path from an interaction to an
+increment — recording a date reads nothing but what the owner supplied.
+
+The reason is not fussiness. A counter that moved because two people had
+exchanged messages would be a statement, published to nobody but the owner, that
+those two people had met in person. It would be wrong often enough to be
+worthless (a conversation that goes nowhere is still a conversation), and it
+would make the owner's own record something the product inferred rather than
+something they said.
+
+### 9.4 Corrections are appended, never edited
+
+The owner's right to correct a mistake is [#49](https://github.com/katzimoto/been_there/issues/49)'s
+requirement, and it is the reason the counter is derived rather than stored.
+"I typed the wrong day" and "I never went on that date" are two different
+mistakes, and only one of them should cost the person a date:
+
+| Correction | The owner means | Effect on the count |
+|---|---|---|
+| `withdrawn` | the date did not happen | decrements; the record is **retained** |
+| `restated` | it happened on a different day | unchanged; the day moves to the corrected one |
+| `restated` on a **withdrawn** date | — | **refused**; a withdrawal is not undone by redacting the day again |
+
+**Corrections accumulate and never resurrect.** Once a date is withdrawn it
+stays withdrawn, however many times its day is restated. There is no path back,
+and that is the point: a correction that could resurrect would let a mistake in
+the correction path restore a date the owner said did not happen.
+
+The same rule the like ledger already follows: a retraction is a state change
+on a retained row, never a deletion
+([Dating Core §3.2](../architecture/dating-core.md)).
+
+**A correction preserves what was there.** A withdrawal is never a deletion:
+the record stays on the ledger with the withdrawal attached, so the owner can
+always be shown what they recorded and why the count dropped from 13 to 12. An
+editable counter row cannot answer that — after a single bad write the number
+and the truth are the same value.
+
+**A restatement does not preserve what was there, and that is a gap.** The
+day a restatement replaces is overwritten, so the originally claimed day is
+not recoverable afterwards: only *that* the day was restated, when, and to
+what. The product promise this section is written to make — the owner can be
+told what they claimed and what it was corrected to — is therefore only half
+kept by the current shape. The correction log grows; it does not preserve the
+prior value. Either the record keeps a `supersededOccurredOn` per restatement,
+or this document stops promising it. Recorded in §13; **not** a decision this
+section makes on the implementer's behalf, because the fix belongs in
+`packages/dating`, which this document does not own.
+
+### 9.5 The count is derived, and a retry counts once
+
+**The count is never stored as a number.** It is the number of recorded dates
+that carry no withdrawal, computed from the ledger on every read. A stored
+counter has to be reconciled after a reload, and a reconciliation that runs
+wrong is invisible; a derived one cannot drift, because there is nothing to
+drift from. The same reasoning makes a negative count impossible rather than
+merely unlikely: there is no integer anywhere in this feature that a decrement
+acts on, so withdrawing the last entry yields 0 and withdrawing it again yields
+0.
+
+**Every write carries a caller-supplied retry key.** Recording a date and
+applying a correction each take one, and a repeated write with the same key
+changes nothing. This is the requirement behind "prevent accidental duplicate
+increments from retries", and it is a property of the operation rather than of
+the client: the caller that retries is precisely the caller that cannot be
+trusted to remember not to. A double-tap, a retry after a timeout and two
+workers racing on one key all leave the count where one of them put it.
+
+The key is **not an id of anything**. It names a request, not a date, not a
+person and not a profile, and nothing in the product may display it or reason
+about it as though it did.
+
+### 9.6 Recording requires nothing of the other person
+
+[#49](https://github.com/katzimoto/been_there/issues/49) rules out mandatory
+review and feedback about the other person, and nothing here reintroduces it:
+
+- Recording reads no standing, no block list, no match and no verification
+  state, so a review requirement has nowhere to attach.
+- The other person is **optional**. A date with someone met outside the product
+  is a real date and counts; requiring a `counterpartId` would have quietly made
+  the product's own users the only ones who can keep a count.
+- A recorded date is not an assertion about the other person that anyone else
+  reads. Nothing derived from the ledger is rendered to another user, in any
+  surface, so no counter can become a counter of somebody's behaviour.
+
+The one entry refused is a date with yourself.
+
+### 9.7 What the owner sees
+
+| Surface | What is shown |
+|---|---|
+| The owner's own view | completed dates, the target, whether the goal is reached, and how far past it they are |
+| The discovery card | nothing |
+| The match view | nothing |
+| Any API response to another user | nothing |
+| A percentage, ratio, ring or grade | never, anywhere (§4.2) |
+
+Two integers and a boolean, recomputed on each read, so the figure cannot be
+stale against the ledger behind it. It is a count of what the owner did, shown
+to the owner — not a measure of the person, and never a comparison between
+people.
+
+### 9.8 Where this document and the code have disagreed
+
+The two halves of this feature were built at different times, and the history
+is worth recording because it is the precedent that settles which one wins.
+
+| Feature | Where the code was | Where this document said | Settled |
+|---|---|---|---|
+| R5 minimum photos | `minPhotos: 3` | 1–6, index 0 `approved` (§6.1, §8.1) | **the code was changed to match this document.** One approved photo is enough to enter discovery; three rejected every profile this document calls valid. |
+| The dating goal and the completed-date counter | a tested domain module in `packages/dating`, with an HTTP surface | **absent** — no field row, no rules, no mention | **this document was changed to match the code.** The decisions were already made, tested and written down in [Dating Core §12](../architecture/dating-core.md); what was missing was the specification of them, which is the part a product decision is allowed to depend on. |
+| Whether a restatement keeps the day it replaced | overwrites `occurredOn` and appends the correction, so the originally claimed day is unrecoverable (§9.4) | a correction preserves what was there, and the owner can be shown what they claimed | **open.** The promise is stated and the code does not keep it. Recorded in §13 rather than resolved here, because the fix is in `packages/dating`, and because promising less than "a correction is retained" would be the wrong trade. |
+
+The first two rows resolve the same way, and the rule is the one the rest of
+this document already uses: **this document is the contract.** When the code is
+wrong about a product decision, the code moves — silently changing a documented
+rule would leave two truths and no way to tell which one a reader is holding.
+When the *document* is silent about a decision the code already makes, the
+document is what is owed, and silence is the failure: an implementer following
+this specification would not have built either feature, and a reviewer reading
+only it could not tell that they exist.
+
+The dating goal is the second row, which is why it is written down here at all.
+It is also the argument for closing a gap rather than leaving it to the next
+implementer: the code was right, the document was silent, and every decision in
+§9 was one implementer could have reopened.
+
+The third row is the harder case and worth stating plainly, because it is the
+reason the first two needed a rule. Here the code is *right* about the
+mechanism and this document is *right* about the promise, and they do not
+agree: the correction log grows but does not preserve the value it replaced. A
+specification written by transcribing the code would have recorded the
+overwrite as the design and lost the promise without noticing, which is the
+failure this section exists to prevent. It is written down as open rather than
+decided, because deciding it means changing a tested domain module that this
+document does not own — and a spec that guesses at the fix would be guessing at
+someone else's schema.
+
+## 10. Editing
+
+### 10.1 What is editable once a match exists
 
 | Field | Editable after a match? | Effect on existing matches |
 |---|---|---|
-| `displayName`, `bio`, `pronouns`, `interests`, `promptAnswers`, `intentDetail` | yes, freely (subject to §9.3) | The matched user sees the new value on next render. Existing messages are never rewritten. |
+| `displayName`, `bio`, `pronouns`, `interests`, `promptAnswers`, `intentDetail` | yes, freely (subject to §10.3) | The matched user sees the new value on next render. Existing messages are never rewritten. |
 | `datingIntent` | yes | The match continues. The intent chip in the match view updates. |
-| `gender` | yes, but a likeness re-check is required before the change appears in discovery (§9.2) | Card and match view update after the re-check. |
-| `photos` (add, remove, reorder) | yes, subject to §9.2 and §9.3 | New photos appear. **Removed photos are not retroactively pulled from a matched user's view in v0.1** — except when a moderator removed the photo under a case (§6.4). This is a known gap, recorded in §12. |
+| `gender` | yes, but a likeness re-check is required before the change appears in discovery (§10.2) | Card and match view update after the re-check. |
+| `photos` (add, remove, reorder) | yes, subject to §10.2 and §10.3 | New photos appear. **Removed photos are not retroactively pulled from a matched user's view in v0.1** — except when a moderator removed the photo under a case (§6.4). This is a known gap, recorded in §13. |
 | `ageBand` | never — it is derived | — |
 | `area` | derived from a re-resolved coarse location; the owner may hide it | Distance bucket updates. |
 
@@ -495,7 +781,7 @@ Nothing about a profile edit affects a match's existence. A match is not a
 contract; unmatch is available to both parties at any time
 ([#12](https://github.com/katzimoto/been_there/issues/12)).
 
-### 9.2 What triggers re-discovery
+### 10.2 What triggers re-discovery
 
 | Change | Re-enters the discovery pool? | Re-check required first? |
 |---|---|---|
@@ -515,7 +801,7 @@ re-derived from the current profile on every render. Nothing is cached as a
 "discovery snapshot", so there is no path by which a stale profile is shown and
 no re-queue step to get wrong.
 
-### 9.3 Rate limiting edits — and the evasion it exists to stop
+### 10.3 Rate limiting edits — and the evasion it exists to stop
 
 | Limit | Value | Rationale |
 |---|---|---|
@@ -547,7 +833,7 @@ determined evader:
   and none of them appears to the user as a restriction. A rate-limited edit is
   refused with a plain message and a time.
 
-## 10. Acceptance scenarios
+## 11. Acceptance scenarios
 
 **P1 — Legitimate profile, end to end** (issue #1 scenario 1)
 
@@ -637,7 +923,54 @@ determined evader:
 - *And* the account is flagged for a possible impersonation subject, which reaches
   a human as a possible case and is never a decision the string match makes.
 
-## 11. Events
+**P11 — Changing the goal does not touch the count**
+
+- *Given* a user with 12 recorded dates and a goal of 1,000,
+  *when* they change the goal to 20,
+  *then* the count reads 12, the target reads 20, the progress figure reads
+  12 / 20, and every recorded date and correction is still there — the two are
+  separate records keyed differently (§9.1), so an edit to one cannot reach the
+  other.
+
+**P12 — Reaching the goal opens nothing and closes nothing**
+
+- *Given* a user whose count has reached and then passed their goal,
+  *when* they like, match, message or are shown in discovery,
+  *then* every capability is unchanged, no eligibility rule reads the goal or the
+  count, and recording another date past the target is accepted and reported as
+  `beyondGoal` rather than refused (§9.2).
+
+**P13 — A retried record counts once; a withdrawn date cannot come back**
+
+- *Given* a user who submits the same record key twice,
+  *when* both are accepted,
+  *then* the count rises by one, not two, and the second submission changes
+  nothing (§9.5).
+- *And* given a user who withdraws a recorded date and then restates its day,
+  *when* the restatement is attempted,
+  *then* it is refused as a conflict, the count stays decremented, and the
+  withdrawal and the attempted restatement are both retained on the record
+  (§9.4).
+
+**P14 — Deleting a profile does not delete the count**
+
+- *Given* a user with recorded dates,
+  *when* they delete their profile and create another,
+  *then* the new profile carries the default goal of 1,000 and the count is
+  unchanged, because the ledger is keyed by user and the goal by profile
+  (§9.1). A count of zero here would be indistinguishable from a reset.
+
+**P15 — Nothing about the goal or the count reaches another user**
+
+- *Given* any user with a goal, a count and recorded dates,
+  *when* every surface is inspected — cards, matches, search, any API response,
+  and the analytics sink,
+  *then* neither the target, the count, the counterpart of a recorded date, nor
+  any percentage of the two appears anywhere outside the owner's own view
+  (§9.7, §12).
+
+
+## 12. Events
 
 Names are registered in the Platform catalogue and imported, never re-declared.
 Content never enters a sink: `profile.updated` carries field **names** and a
@@ -654,15 +987,35 @@ count bucket, never a value.
 | `identity.duplicate_photo_signal` | **audit** (`sensitive`) | `match_kind: 'deleted_subject' \| 'blocked_party'` | dedupe hit against a deleted, blocked, or banned subject — Trust & Safety only, never analytics |
 | `identity.status_changed` | **audit** (Identity owns it) | — | drives the likeness/re-verification flow, not a metric |
 | `account_state.changed` | **audit** (Moderation owns it) | — | a standing change may force `live` → `hidden`; the product reacts to the capability set, never to the reason |
+| `dating_goal.updated` | analytics | `from_bucket`, `to_bucket` | the owner changed their target — **buckets only**, never the raw target and never the count |
+| `dating.completed_date.recorded` | analytics | `with_counterpart: true \| false` | the owner recorded a date. The count, the day and who it was with never leave the owner's record |
 
 A photo-level outcome that is borderline is not a `profile.photo_rejected` with a
 probability attached: it is routed to a moderator, held as `needs_human`, and the
 user is told it is being checked. The product never renders a confidence value
 about a safety judgement.
 
-## 12. Open questions
+**Neither event may carry the counter.** Both are `user`-sensitivity facts
+about one person's life, and the analytics sink is not a place that learns how
+many dates somebody has been on: `ANALYTICS_EVENTS` is the allowlist, and a
+count that became a dimension would be exported to every dashboard holder the
+moment someone added it for a chart. What may be published is **shape** — that
+a target changed, that a date was recorded, whether a counterpart was involved —
+which is what [Product Quality & Measurement](./product-quality-and-measurement.md)
+needs to know the feature is used at all. If a metric ever needs the count
+itself, it is asked for there, deliberately, as a named field with a retention
+decision behind it, rather than smuggled out as a dimension.
 
-- **Retroactive removal of a photo the owner later deletes.** §9.1 keeps a
+Neither name is in `ANALYTICS_EVENTS` today, so neither may be published yet —
+`recordAnalyticsEvent` refuses anything outside the catalogue. Recorded as a
+doc/code disagreement in the same direction as `minPhotos` in §9.8: this table
+is the decision, the catalogue is behind it, and closing the gap is a
+registration, not a redesign. Until it is closed the feature is simply not
+measured, which is a smaller problem than a counter leaking into a sink.
+
+## 13. Open questions
+
+- **Retroactive removal of a photo the owner later deletes.** §10.1 keeps a
   deleted photo visible to existing matches in v0.1. If a safety case shows
   that this is a real harm path — an abusive photo that the owner removes once
   they regret it — the fix is a tombstoned media ref, and it belongs in Platform's
@@ -719,3 +1072,35 @@ about a safety judgement.
 - **Per-photo moderation appeal.** A rejected photo can be re-uploaded, but a
   formal appeal path for content screening does not exist in v0.1. Whether one
   lands with the appeals work in [#15](https://github.com/katzimoto/been_there/issues/15) is undecided.
+- **Retention of the completed-date ledger.** §9.1 settles the *scope* — the
+  counter is per user and survives profile deletion — but nothing here sets how
+  long the ledger is kept. It holds who the owner dated, and
+  [Privacy & User Settings §5](./privacy-and-user-settings.md) owns deletion,
+  so the retention period is that document's question. It is not settled here,
+  and it is not settled by omission either: a ledger with no stated retention
+  is a ledger that will be kept forever by default.
+- **Whether the goal ever becomes a card field.** Resolved: **no**, not in
+  v0.1. It is deliberately outside `ProfileContent`, so `evaluateProfileCompleteness`
+  cannot see it and completeness is unaffected by it (§3, §8.1). If it is ever
+  proposed for the card, it is a change to this document first — a goal on a
+  card is a statement to strangers about how many dates you have been on, and
+  it is not a small UI decision.
+- **Whether the counter is ever shown to a match.** Resolved: **no** (§9.7).
+  Recorded because it is the obvious next request and the answer has a reason
+  rather than a preference: a count shown to one other person is a claim about
+  that other person's own dating life, made by the owner, without their say.
+- **Whether one account may hold two profiles at once.** Undecided, and it is
+  the question that would reopen §9.1. The current split already accommodates
+  it (a second profile means a second target, one shared count); what is not
+  decided is whether the second profile gets its own target at all, and a
+  per-profile history would be a schema change rather than a default.
+- **Whether a restatement keeps the day it replaced.** Undecided, and it is the
+  one place where the code and this section disagree today (§9.4, §9.8).
+  `correctCompletedDate` overwrites `occurredOn` and appends the correction, so
+  the day the owner originally claimed is gone: a record claimed on the 3rd and
+  restated to the 2nd retains *that* it was restated, when, and to the 2nd, but
+  not the 3rd. The same is true of a second restatement over a first. The
+  product promise is that a correction preserves what was there, so either the
+  record carries the superseded day with each restatement or this document drops
+  the promise. Owner: Dating + Product. Blocks the correction API's shape, so
+  it should be decided before a store persists corrections.

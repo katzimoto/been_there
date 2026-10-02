@@ -513,10 +513,18 @@ how many they have recorded. Neither is a discovery, matching or moderation
 concept; both live here because a profile is where they are set and shown.
 
 This domain does **not** own the specification for either feature.
-`docs/features/profile-and-personalization.md` §3 fixes the profile field
-inventory and §4.2 fixes the no-score rule, and the goal appears in neither; the
-decisions below are recorded here as the domain's, and the feature spec still
-owes them a field row.
+[`docs/features/profile-and-personalization.md` §9](../features/profile-and-personalization.md)
+is the specification: it fixes both as `user`-sensitivity fields, sets the
+correction rules, decides the per-user scope of the counter and states that
+reaching the goal gates nothing. What follows is the executable half — the
+aggregate shapes and the reason each is shaped that way — and it is written to
+be read *after* that section, not instead of it.
+
+The two documents answer different questions. This one answers "what is the
+type, and why is it that type"; §9 answers "what does the product promise, what
+is visible to whom, and what must never happen". Where they could be read as
+disagreeing, the feature spec wins: it is the contract, and this document
+records the same decisions as a consequence rather than a rival.
 
 ### 12.1 The goal is a target, not a gate
 
@@ -579,7 +587,7 @@ merely *allowed* rather than *possible*. So a correction is a retained record:
 | Correction | Meaning | Effect on the count |
 |---|---|---|
 | `withdrawn` | the date did not happen | −1 |
-| `restated` | it happened on a different day | unchanged; `occurredOn` moves, the original claim stays on the record |
+| `restated` | it happened on a different day | unchanged; `occurredOn` moves — **the superseded day is not retained** (§12.6) |
 
 This is the same rule the like ledger already follows — a retraction is a state
 change on a retained row, never a deletion (§3.2) — and it is what lets the
@@ -608,7 +616,32 @@ reintroduces none of it — which is easiest to show by what is *absent*:
 The one thing refused is `counterpartId === ownerId`: a date with yourself is
 not a date, and that is a rule about the entry, not about the other party.
 
-### 12.6 Idempotence is a property of the function
+### 12.6 A restatement does not keep the day it replaced
+
+This was documented as though it did. It does not, and the difference matters
+before a store persists corrections.
+
+`correctCompletedDate` overwrites `occurredOn` and appends the correction. A
+record claimed for `2026-01-03`, restated to `01-02` and then to `01-01`, holds
+only that it was restated and to what. **The `01-03` is gone.** Verified
+against the built module rather than inferred.
+
+So the append-only guarantee covers the *existence* of the record and the fact
+that it was corrected, not the history of what the correction replaced. That is
+enough to answer "why did this drop from 13 to 12?" — a withdrawal — and not
+enough to answer "when did I first say this was the 3rd?".
+
+Two ways to close it, and the choice belongs to whoever builds the correction
+API:
+
+1. **`supersededOccurredOn` on each correction**, so the chain is walkable and
+   the replaced day is recoverable. Costs one field per correction.
+2. **Leave it**, and say plainly that a restatement corrects rather than
+   annotates. Cheapest, and defensible — but then the record must not be sold as
+   an audit trail of what the user claimed.
+
+Open, and it blocks the shape of the corrections table rather than its existence.
+### 12.7 Idempotence is a property of the function
 
 A retried record replays with the ledger *unchanged* (identity-equal, not merely
 equal), so a double-tap, a retry after a timeout and two workers racing on the
@@ -619,7 +652,7 @@ this domain, for the reason given in `ids.ts`. Both properties are of the
 function rather than of the caller, which is the point: the caller that retries
 is precisely the caller that cannot be trusted to remember not to.
 
-### 12.7 Persistence
+### 12.8 Persistence
 
 `occurredOn` is validated as a real calendar day that has already passed:
 `2025-02-31` and `2026-06-02` recorded on 2026-01-01 are both refused. The
@@ -627,21 +660,25 @@ ledger is the durable record and the count is recomputed from it on every read,
 so nothing has to be reconciled after a reload and a goal change cannot
 invalidate a stored count.
 
-### 12.8 Open questions
+### 12.9 Open questions
 
-- **The counter is per user; the goal is per profile.** A `ProfileId` names a
-  card whose lifecycle ends in `deleted`, and deleting a profile is an ordinary
-  act of privacy that should not take a life behind it — so the history is keyed
-  by `UserId` and survives, and a recreated profile starts again at the default
-  target. If a product decision is ever made that one account may hold two
-  simultaneous profiles, this split is what already accommodates it; if instead
-  the history should be private to a profile and reset with it, that is a schema
-  change and not a default.
+- **The counter is per user; the goal is per profile.** Settled in
+  [`docs/features/profile-and-personalization.md` §9.1](../features/profile-and-personalization.md):
+  a `ProfileId` names a card whose lifecycle ends in `deleted`, and deleting a
+  profile is an ordinary act of privacy that must not take a life behind it — so
+  the history is keyed by `UserId` and survives, and a recreated profile starts
+  again at the default target. This split already accommodates an account that
+  one day holds two simultaneous profiles; making the history private to a
+  profile instead is a schema change, not a default, and is not expected.
 - **Retention of the counter.** Nothing here sets a retention period. The
-  ledger holds who the owner dated, and `docs/features/privacy-and-user-settings.md`
+  ledger holds who the owner dated, and
+  [`docs/features/privacy-and-user-settings.md`](../features/privacy-and-user-settings.md)
   owns deletion, so how long it is kept is that document's question and not
-  settled here.
-- **Whether the goal is ever a profile field.** It is deliberately outside
-  `ProfileContent` today, which is why `evaluateProfileCompleteness` cannot see
-  it and completeness is unaffected by it. If the feature spec later makes it a
-  card field, it becomes one and gets a sensitivity row there.
+  settled here. Recorded as open in the feature spec's Open questions too,
+  because a ledger with no stated retention is kept forever by default.
+- **Whether the goal is ever a profile field.** Settled: **no**, not in v0.1 —
+  [`docs/features/profile-and-personalization.md` §9.2 and §13](../features/profile-and-personalization.md).
+  It is deliberately outside `ProfileContent`, which is why
+  `evaluateProfileCompleteness` cannot see it and completeness is unaffected by
+  it. If it is ever proposed for the card, that is a change to the feature spec
+  first, not a change here.

@@ -13,7 +13,7 @@ Read in this order. Each document is self-contained but assumes the one above it
 | Document | Issue | Package |
 |----------|-------|---------|
 | [Identity & Verification](./architecture/identity-and-verification.md) | [#3](https://github.com/katzimoto/been_there/issues/3) | `packages/identity` |
-| [Dating Core](./architecture/dating-core.md) | [#4](https://github.com/katzimoto/been_there/issues/4) | `packages/dating` |
+| [Dating Core](./architecture/dating-core.md) | [#4](https://github.com/katzimoto/been_there/issues/4) | `packages/dating` — §12 also covers the dating goal and completed-date counter, [#48](https://github.com/katzimoto/been_there/issues/48) and [#49](https://github.com/katzimoto/been_there/issues/49), specified in [Profile & Personalization §9](./features/profile-and-personalization.md) |
 | [Communication](./architecture/communication.md) | [#5](https://github.com/katzimoto/been_there/issues/5) | `packages/communication` |
 | [Trust & Safety Engine](./architecture/trust-safety.md) | [#6](https://github.com/katzimoto/been_there/issues/6) | `packages/trust-safety` |
 | [Moderation & Enforcement](./architecture/moderation-enforcement.md) | [#7](https://github.com/katzimoto/been_there/issues/7) | `packages/moderation` |
@@ -36,7 +36,7 @@ One specification per MVP feature issue, in `features/`:
 | Document | Issue |
 |----------|-------|
 | [Account & Onboarding](./features/account-and-onboarding.md) | [#9](https://github.com/katzimoto/been_there/issues/9) |
-| [Profile & Personalization](./features/profile-and-personalization.md) | [#10](https://github.com/katzimoto/been_there/issues/10) |
+| [Profile & Personalization](./features/profile-and-personalization.md) | [#10](https://github.com/katzimoto/been_there/issues/10) · also [#48](https://github.com/katzimoto/been_there/issues/48) dating goal, [#49](https://github.com/katzimoto/been_there/issues/49) completed-date counter (§9) |
 | [Preferences & Discovery](./features/preferences-and-discovery.md) | [#11](https://github.com/katzimoto/been_there/issues/11) |
 | [Likes & Matching](./features/likes-and-matching.md) | [#12](https://github.com/katzimoto/been_there/issues/12) |
 | [Messaging Experience](./features/messaging-experience.md) | [#13](https://github.com/katzimoto/been_there/issues/13) |
