@@ -86,6 +86,11 @@ lasting check rather than a note.
 - [`AGENTS.md`](../AGENTS.md) — the working agreement, and [`skills/`](../skills/)
   for the procedures it points to
 
+## Where the build stands
+
+- [Delivery state](./delivery-state.md) — what exists, what is proven, what is
+  decided but not built, and the two things nobody should assume are true
+
 ## Document conventions
 
 - A document starts with the issue it satisfies and links to the documents it
