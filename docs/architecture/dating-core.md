@@ -501,3 +501,147 @@ gap.
   two similar states with near-identical product copy. If the product needs only
   one, the honest merge is to drop `hidden` and let the account standing
   govern visibility directly.
+
+## 12. Dating goal and completed-date counter
+
+> Issues [#48](https://github.com/katzimoto/been_there/issues/48) and
+> [#49](https://github.com/katzimoto/been_there/issues/49). Executable contract:
+> `packages/dating/src/goal.ts`.
+
+A per-profile target for how many dates the owner wants to go on, and a count of
+how many they have recorded. Neither is a discovery, matching or moderation
+concept; both live here because a profile is where they are set and shown.
+
+This domain does **not** own the specification for either feature.
+`docs/features/profile-and-personalization.md` §3 fixes the profile field
+inventory and §4.2 fixes the no-score rule, and the goal appears in neither; the
+decisions below are recorded here as the domain's, and the feature spec still
+owes them a field row.
+
+### 12.1 The goal is a target, not a gate
+
+`DatingGoal` is a target and nothing else — `profileId`, `ownerId`, `target`,
+`updatedAt`, with no count field anywhere in the type. `DATING_GOAL_DEFAULT` is
+1,000; `validateDatingGoalTarget` accepts whole numbers from 1 to 100,000 and
+refuses zero, negatives, fractions, `NaN` and `Infinity` with a
+`validation_failed` carrying a `details.reason` of `below_minimum`,
+`not_a_whole_number` or `above_maximum`.
+
+The upper bound is not named by #48. It exists because a target past it is not
+a number any progress view can render, and storing one would record a claim the
+product cannot show back to the person who made it.
+
+**Reaching the goal changes no capability.** `goalProgress` is read by the
+owner's own view; nothing in `ELIGIBILITY_RULES`, `recordLike`, `resolveMatch`
+or `contactPermission` takes a `DatingGoal` or a `CompletedDateLedger`, so
+"dating and matching still work at 1,000 of 1,000" is enforced by the absence of
+a parameter rather than by a rule somebody can forget. The count may pass the
+target: `beyondGoal` reports how far, and recording past the goal is not refused.
+
+### 12.2 Two aggregates, so an edit cannot take the count with it
+
+The property #48 names — *changing the goal preserves the completed-date
+counter* — is the one worth testing hardest, because the naive implementation
+puts both numbers in one row and loses the count on every edit. It is prevented
+structurally rather than by discipline:
+
+| | `DatingGoal` | `CompletedDateLedger` |
+|---|---|---|
+| Keyed by | `ProfileId` | `UserId` |
+| Holds | the target | the recorded dates |
+| Written by | `setDatingGoal` | `recordCompletedDate`, `correctCompletedDate` |
+| Reaches the other | never | never |
+
+`setDatingGoal(goal, target, at)` takes a goal and returns a goal. The ledger is
+neither a parameter nor a return value, so an implementation that stored the two
+together could not express the call. Only a store that persisted both into one
+row could get this wrong, and that is a schema decision this document makes
+explicitly against.
+
+### 12.3 The count is derived, never stored
+
+`completedDateCount` counts the records that are still counted. There is no
+number in the module that a decrement could push below zero, so "the counter
+cannot go below zero" is structural: withdrawing the last entry yields 0, and
+withdrawing it again yields 0 rather than −1.
+
+Only a date the owner explicitly records counts. A like, a match and a message
+are not dates and none of them is an input — `recordCompletedDate` reads no
+interaction ledger, so there is no code path on which one could increment it.
+
+### 12.4 Corrections are appended events, not edits
+
+An editable counter row was the alternative and was rejected. Once a bug writes
+`0` into that row, a user who genuinely has zero dates and a user whose history
+was destroyed are the same fact, and the correction the issue asks for becomes
+merely *allowed* rather than *possible*. So a correction is a retained record:
+
+| Correction | Meaning | Effect on the count |
+|---|---|---|
+| `withdrawn` | the date did not happen | −1 |
+| `restated` | it happened on a different day | unchanged; `occurredOn` moves, the original claim stays on the record |
+
+This is the same rule the like ledger already follows — a retraction is a state
+change on a retained row, never a deletion (§3.2) — and it is what lets the
+aggregate answer "why did this drop from 13 to 12?". Corrections accumulate and
+never resurrect: restating a withdrawn date is a `conflict`, so a date withdrawn
+stays withdrawn however many times its day is redacted.
+
+A restatement exists because "I typed the wrong day" and "I never went on that
+date" are different corrections, and only one of them should cost the user a
+date. #49 says only "correct mistakes".
+
+### 12.5 Recording requires nothing of the other person
+
+#49 rules out mandatory review or feedback about the other person, and the model
+reintroduces none of it — which is easiest to show by what is *absent*:
+
+- `recordCompletedDate` takes no standing, no block list, no match, no
+  verification state and no account state. It cannot consult them, so a review
+  requirement cannot be reintroduced without changing the signature.
+- `counterpartId` is `null`-able, because a date with someone met outside the
+  product is a real date and must count.
+- A date the owner records is not an assertion about the other person that
+  anyone else reads. Nothing derived from the ledger is rendered to another
+  user, so no counter can become a counter of anybody's behaviour.
+
+The one thing refused is `counterpartId === ownerId`: a date with yourself is
+not a date, and that is a rule about the entry, not about the other party.
+
+### 12.6 Idempotence is a property of the function
+
+A retried record replays with the ledger *unchanged* (identity-equal, not merely
+equal), so a double-tap, a retry after a timeout and two workers racing on the
+same key all leave the count where one of them put it. A retried correction
+behaves the same way. `entryId` and the correction `key` are
+`IdempotencyKey`s — the caller-supplied retry token, not an id of anything in
+this domain, for the reason given in `ids.ts`. Both properties are of the
+function rather than of the caller, which is the point: the caller that retries
+is precisely the caller that cannot be trusted to remember not to.
+
+### 12.7 Persistence
+
+`occurredOn` is validated as a real calendar day that has already passed:
+`2025-02-31` and `2026-06-02` recorded on 2026-01-01 are both refused. The
+ledger is the durable record and the count is recomputed from it on every read,
+so nothing has to be reconciled after a reload and a goal change cannot
+invalidate a stored count.
+
+### 12.8 Open questions
+
+- **The counter is per user; the goal is per profile.** A `ProfileId` names a
+  card whose lifecycle ends in `deleted`, and deleting a profile is an ordinary
+  act of privacy that should not take a life behind it — so the history is keyed
+  by `UserId` and survives, and a recreated profile starts again at the default
+  target. If a product decision is ever made that one account may hold two
+  simultaneous profiles, this split is what already accommodates it; if instead
+  the history should be private to a profile and reset with it, that is a schema
+  change and not a default.
+- **Retention of the counter.** Nothing here sets a retention period. The
+  ledger holds who the owner dated, and `docs/features/privacy-and-user-settings.md`
+  owns deletion, so how long it is kept is that document's question and not
+  settled here.
+- **Whether the goal is ever a profile field.** It is deliberately outside
+  `ProfileContent` today, which is why `evaluateProfileCompleteness` cannot see
+  it and completeness is unaffected by it. If the feature spec later makes it a
+  card field, it becomes one and gets a sensitivity row there.
