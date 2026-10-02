@@ -50,6 +50,9 @@ One specification per MVP feature issue, in `features/`:
 
 | Document | Covers |
 |----------|--------|
+| [Event chat safety model](./architecture/event-chat-safety.md) —
+  event messaging without a prior match: the new risks, the rules, and the two
+  open questions decided before implementation
 | [Detector escalation policy](./architecture/detector-escalation-policy.md) —
   which detectors may escalate a subject alone, and which require corroboration
 | [Baseline review findings](./architecture/review-findings.md) | Independent review of the eight commitments, the domain boundaries, and doc/code agreement, with a runnable reproduction per finding |
