@@ -44,17 +44,47 @@ export function providerResult(confidence) {
   };
 }
 
+/** A per-run octet, so two walks never share an address and never share a bucket. */
+const RUN_OCTET = Math.floor(Math.random() * 254) + 1;
+let signUps = 0;
+
+/**
+ * Presents a distinct caller address for the next request.
+ *
+ * The walk creates four accounts against `SIGNUP_PER_IP_PER_HOUR` of five, so
+ * leaving them all on the loopback socket would spend four fifths of one shared
+ * bucket and leave nothing spare — which is how a fifth sign-up, added later by
+ * someone extending the walk, would fail it for a reason that has nothing to do
+ * with what the walk demonstrates.
+ *
+ * It is also what makes the limit meaningful rather than accidental: each
+ * person arrives from their own network, which is what the limit is written to
+ * reason about. `packages/service/test/support/fixtures.ts` does exactly this
+ * and says why — "a limit that is easy to forget is a limit that will be".
+ *
+ * `203.0.113.0/24` is the documentation range, and distinct from the preflight's
+ * addresses, so the two never contend for one bucket.
+ */
+export function presentAddress(client) {
+  signUps += 1;
+  const address = `203.0.113.${((RUN_OCTET + signUps) % 250) + 1}`;
+  client.fromAddress(address);
+  return address;
+}
+
 /**
  * `POST /v1/accounts`. Returns the account and the session token that
  * authenticates everything after it.
  */
 export async function signUp(client, { name, contact, dateOfBirth }, say) {
+  const address = presentAddress(client);
   const response = await client.call('POST', '/v1/accounts', undefined, {
     contact,
     password: PASSWORD,
     dateOfBirth,
     termsVersion: TERMS_VERSION,
   });
+  say(`${name}: presented from ${address}, so no two accounts share a bucket`);
   expectStatus(response, 201, `${name}: sign-up`);
   const body = response.body;
   say(`${name}: userId ${at(body, 'userId')}`);

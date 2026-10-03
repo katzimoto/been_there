@@ -1,6 +1,7 @@
 import type { Route } from './http/router.js';
 import type { ServiceDependencies } from './ports.js';
 import { accountRoutes, accountSessionRoutes } from './routes/accounts.js';
+import { accountDeletionRoutes } from './routes/account-deletion.js';
 import { healthRoutes } from './routes/health.js';
 import { readinessRoutes } from './routes/readiness.js';
 import { conversationRoutes } from './routes/conversations.js';
@@ -40,10 +41,11 @@ export function serviceRoutes(dependencies: ServiceDependencies): readonly Route
     ...readinessRoutes(dependencies),
     ...accountRoutes(dependencies),
     ...accountSessionRoutes(dependencies),
-    ...verificationRoutes(dependencies),
     ...profileRoutes(dependencies),
     ...discoveryRoutes(dependencies),
     ...goalRoutes(dependencies),
+    ...accountDeletionRoutes(dependencies),
+    ...verificationRoutes(dependencies),
     ...interactionRoutes(dependencies),
     ...matchRoutes(dependencies),
     ...conversationRoutes(dependencies),

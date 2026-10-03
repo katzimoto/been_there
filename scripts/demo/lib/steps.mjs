@@ -12,7 +12,7 @@
  * state the service would not have shown a client.
  */
 import { at, detailsOf, expectStatus } from './client.mjs';
-import { completeProfile, signUp, verify } from './people.mjs';
+import { completeProfile, presentAddress, signUp, verify } from './people.mjs';
 
 /** A per-run marker, so two walks never collide on a contact or a rate-limit key. */
 const RUN = Date.now().toString(36);
@@ -34,6 +34,7 @@ export const STEPS = [
   {
     title: 'Alice signs up and passes the age gate',
     async run({ client, say, people }) {
+      presentAddress(client);
       const refused = await client.call('POST', '/v1/accounts', undefined, {
         contact: CONTACTS.underage,
         password: 'correct-horse-battery-staple-42',
