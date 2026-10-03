@@ -1,11 +1,55 @@
-# Running the iOS app in a simulator
+# Running the iOS app, and the macOS app you can run today
 
-The app is built and its safety gate is tested, but **no iOS simulator runtime is
-installed on this machine yet.** That is the one thing standing between the
-repository and a runnable iOS build, and it needs two commands that require
-`sudo` — so it cannot be done from here.
+> **Correction.** An earlier version of this document said the client had no
+> views because no iOS simulator runtime was installed. That was the wrong
+> conclusion from a true premise, and it held up a UI layer that was buildable
+> the whole time. The specific error: **macOS needs no simulator runtime.** A
+> macOS destination builds, tests and launches on a machine with zero runtimes
+> installed, because the platform you build for is the platform you run on.
+> Only the *iOS simulator* needs the runtime.
 
-## What you need to run, in order
+## What is blocked and what is not
+
+| Target | Status |
+|---|---|
+| **macOS SwiftUI app** | ✅ **available now** — builds, tests, launches, no runtime needed |
+| **Mac Catalyst / iPad** | ✅ available, but buys nothing (see below) |
+| **Compiling for `iphonesimulator`** | ✅ already proven — `make client-ios` compiles against the iOS SDK that ships inside Xcode |
+| **Launching on an iOS simulator** | ⛔ needs the ~7 GB runtime and `sudo xcodebuild -runFirstLaunch` |
+
+Evidence, verified on this machine: `MacOSX.platform` carries `SwiftUI.framework`,
+`AppKit.framework` and an explicit `maccatalyst` variant; `/Library/Developer/CoreSimulator/Profiles/Runtimes` does not exist; and `client/BeenThereKit/.build/debug/.../BeenThereKitTests.xctest/Contents/MacOS/` holds a macOS test binary that was built and run with no runtime present. Xcode's own release notes tie the preview fallback to the **iOS** destination specifically.
+
+## So: build macOS-first, share the views
+
+`BeenThereKit` already declares `platforms: [.iOS(.v17), .macOS(.v14)]` and
+imports only Foundation — nothing UIKit — so a macOS app consumes it unchanged.
+
+1. A **shared view target** (`BeenThereViews`) holding the SwiftUI views, written
+   against a fixed iPhone-width frame (`.frame(width: 390)`) so a layout tuned on
+   macOS does not look wrong on a phone.
+2. A **macOS app target** that runs them today, pointed at the live service.
+3. The **iOS app** later consumes the same view target. Nothing is thrown away:
+   the project file, the view layer and the network client are all things the
+   iOS app needs anyway.
+
+**Skip Mac Catalyst.** It would let iOS view code run on macOS, but it
+introduces UIKit, which `BeenThereKit` deliberately avoids.
+
+## Why not a web UI, and not Figma
+
+A web UI would need new static-file serving (the service sets
+`content-type: application/json` on every response), a bundler, a component
+library, and **a second implementation of every client rule in TypeScript**. For a
+product whose thesis is that the client must never offer an action the server
+refuses, two client rule-implementations is precisely the failure to avoid.
+
+Figma is good at visual design and bad at being the source of truth for a
+codebase whose design lives in code and whose safety rules must be tested. The
+useful part — shared design tokens for spacing, colour and type — can be derived
+from the code rather than being authored twice and reconciled by hand.
+
+## When you do want the iOS simulator
 
 ```bash
 sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
@@ -13,54 +57,21 @@ sudo xcodebuild -runFirstLaunch
 xcodebuild -downloadPlatform iOS
 ```
 
-The first selects the full Xcode over the command-line tools that shipped with
-macOS. The second completes Xcode's one-time setup — without it, `xcodebuild`
-fails with *"failed to load a required plug-in"*, which is what happens if you
-skip straight to the third. The third downloads the simulator runtime, which is
-roughly 7 GB and the long pole.
-
-## Then
-
-```bash
-make client-test      # 12 Swift tests against the safety gate
-make client-ios        # compiles the client for arm64-apple-ios17.0-simulator
-```
-
-Both are already wired into `npm run check`, so CI is proving the code compiles
-for the simulator today — without needing a runtime on the machine.
-
-To actually launch it in a simulator you would additionally need an app target
-and a view layer. There is deliberately no `Package.swift` app product yet: see
-"what is not built" below.
-
-## Why the client has no views yet
-
-`client/BeenThereKit` holds the iOS-agnostic core — the safety gate that decides
-whether to offer a composer, whether discovery is available, and what a
-restriction explains — and it is unit-tested against the same rules the server
-enforces. That is the part with logic worth testing, and it is tested.
-
-A SwiftUI layer is deliberately absent. Writing views I could not compile would
-have produced the exact "written but unverified" artefact this repository has
-spent its time eliminating. With a runtime installed it becomes worth building,
-and that is the case for running the commands above.
+Without the middle step, `xcodebuild` fails with *"failed to load a required
+plug-in"*, which looks like a broken install rather than a skipped one.
 
 ## What the client gate covers
 
-Every rule here mirrors `packages/core`, and each has a test:
+Every rule mirrors `packages/core`, and each has a test:
 
 - discovery is offered only to a `verified` account;
-- `report` and `block` survive **every** account state, because a client that
-  hid "report" behind a restriction would be the worst failure this product has;
+- `report` and `block` survive **every** account state;
 - a banned account can still reach delete-account and its own profile, or it is
   stranded — sanctioned, unappealable, unable to leave;
-- messaging is **symmetric**: a restricted counterpart disables the composer here,
-  because the server refuses it;
+- messaging is **symmetric**: a restricted counterpart disables the composer here;
 - a block outranks a restriction and discloses nothing;
 - a restriction explains itself, because a user who cannot see why cannot
   contest it.
 
-The point of the gate is that the server is the authority, so the client must
-not offer an action the server will refuse. An affordance that always fails is
-worse than a disabled one: it teaches people the app is broken, and it leaks the
-existence of a state they are not entitled to know about.
+The point of the gate is that the server is the authority, so the client must not
+offer an action the server will refuse.
