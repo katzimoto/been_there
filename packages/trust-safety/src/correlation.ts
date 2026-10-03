@@ -68,11 +68,35 @@ export interface Corroboration {
  * Two detectors corroborate each other when they have independently said
  * something about the same subject inside the window. Neither knows the other
  * exists; the only thing compared is the subject and the clock.
+ *
+ * A signal `assessSignal` discarded is not in this list, and that exclusion is
+ * the point rather than a refinement. The discard inverts if a refused signal
+ * is counted here: it would be correctly refused as evidence about the account
+ * reported and simultaneously counted as independent support for *that same
+ * account*. Concretely, `report.pattern.coordinated_target` is a
+ * `corroboration_only` detector whose every signal is discarded — and counting
+ * it would hand `identity.reuse`, which by design can never move a subject on
+ * its own, the second independent detector it needs. Two reports filed against
+ * a stranger were then enough to move that stranger from `normal` to `elevated`
+ * with nothing done to them, because
+ * `0.45 (weight) × 0.85 (medium) × 1.25 (repeats) × 1.15 (this multiplier)`
+ * is `0.5059`, and the `normal → elevated` gate is `0.5`.
+ *
+ * The escalation was invisible in the record: a discarded signal adds no
+ * contributing detector and does not touch `lastSignalAt`, so
+ * `contributingDetectors` read `["identity.reuse"]` while the state moved
+ * anyway. Discarding the signal is precisely what removed the evidence that
+ * would have revealed the movement, so a discarded signal must not corroborate
+ * anything — not another detector, and not itself on a later pass.
+ *
+ * Campaign detection is unaffected and does not come through here:
+ * `detectMassReport` filters on `behaviour.kind` and reads `actorId` directly,
+ * so it still counts a campaign's distinct reporters exactly as before.
  */
 function corroboratingDetectors(recent: readonly Signal[], subjectId: SubjectId, incoming: Signal): string[] {
   const names = new Set<string>([incoming.detector]);
   for (const entry of recent) {
-    if (entry.subjectId === subjectId) {
+    if (entry.subjectId === subjectId && entry.behaviour.kind !== 'report_against') {
       names.add(entry.detector);
     }
   }
