@@ -1,12 +1,20 @@
 # Running the iOS app, and the macOS app you can run today
 
-> **Correction.** An earlier version of this document said the client had no
-> views because no iOS simulator runtime was installed. That was the wrong
-> conclusion from a true premise, and it held up a UI layer that was buildable
-> the whole time. The specific error: **macOS needs no simulator runtime.** A
-> macOS destination builds, tests and launches on a machine with zero runtimes
-> installed, because the platform you build for is the platform you run on.
-> Only the *iOS simulator* needs the runtime.
+> **Two corrections, and the second one matters more.**
+>
+> An earlier version said the client had no views because no iOS simulator
+> runtime was installed. That was the wrong conclusion from a true premise, and
+> it held up a UI layer that was buildable the whole time. The specific error:
+> **macOS needs no simulator runtime.** A macOS destination builds, tests and
+> launches on a machine with zero runtimes installed, because the platform you
+> build for is the platform you run on.
+>
+> **Xcode 27.0 (27A266a) is now installed**, with the iOS 27.0 SDK and three
+> available simulators: iPhone 18 Pro, iPhone 18 Pro Max and iPhone 17e. So the
+> item below marked blocked is no longer blocked. Everything stated about
+> *why* it was blocked — the runtime being a separate ~7 GB download, and
+> `runFirstLaunch` needing `sudo` — was accurate when written, and the honest
+> lesson is that "needs sudo" was read as "not possible" for far too long.
 
 ## What is blocked and what is not
 
@@ -15,10 +23,18 @@
 | **macOS SwiftUI app** | ✅ **available now** — builds, tests, launches, no runtime needed |
 | **Mac Catalyst / iPad** | ✅ available, but buys nothing (see below) |
 | **Compiling for `iphonesimulator`** | ✅ already proven — `make client-ios` compiles against the iOS SDK that ships inside Xcode |
-| **Launching on an iOS simulator** | ⛔ needs the ~7 GB runtime and `sudo xcodebuild -runFirstLaunch` |
+| **Launching on an iOS simulator** | ✅ **now possible** — Xcode 27.0 with the iOS 27.0 SDK; `xcrun simctl list devices available` shows three iPhones |
 
-Evidence, verified on this machine: `MacOSX.platform` carries `SwiftUI.framework`,
-`AppKit.framework` and an explicit `maccatalyst` variant; `/Library/Developer/CoreSimulator/Profiles/Runtimes` does not exist; and `client/BeenThereKit/.build/debug/.../BeenThereKitTests.xctest/Contents/MacOS/` holds a macOS test binary that was built and run with no runtime present. Xcode's own release notes tie the preview fallback to the **iOS** destination specifically.
+The macOS evidence, verified when no runtime was present at all:
+`MacOSX.platform` carries `SwiftUI.framework`, `AppKit.framework` and an
+explicit `maccatalyst` variant, and
+`client/BeenThereKit/.build/debug/.../BeenThereKitTests.xctest/Contents/MacOS/`
+holds a macOS test binary that was built and run with zero runtimes installed.
+Xcode's release notes tie the preview fallback to the **iOS** destination
+specifically, which is why macOS was available and iOS was not. That asymmetry
+is no longer in effect: `xcrun simctl list devices available` now reports iOS
+27.0 simulators, so the iOS destination is a first-class target rather than a
+fallback.
 
 ## So: build macOS-first, share the views
 
