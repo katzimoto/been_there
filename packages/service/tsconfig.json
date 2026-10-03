@@ -5,5 +5,33 @@
     "outDir": "./dist",
     "rootDir": "./src"
   },
-  "include": ["src/**/*.ts"]
+  "include": [
+    "src/**/*.ts"
+  ],
+  "references": [
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../contracts"
+    },
+    {
+      "path": "../identity"
+    },
+    {
+      "path": "../dating"
+    },
+    {
+      "path": "../communication"
+    },
+    {
+      "path": "../trust-safety"
+    },
+    {
+      "path": "../moderation"
+    },
+    {
+      "path": "../platform"
+    }
+  ]
 }

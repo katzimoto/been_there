@@ -16,6 +16,13 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
+    // Without this, `tsc --build` writes output for a project that failed to
+    // compile and then stops before the projects that depend on it. The result
+    // is a `dist` that is half new and half from an earlier build, which the
+    // next boot loads as a `ReferenceError` rather than a type error. It has
+    // happened here: a service died at boot on a name `dist/wiring/safety.js`
+    // referenced but the failed build never emitted.
+    "noEmitOnError": true,
     "forceConsistentCasingInFileNames": true
   }
 }
