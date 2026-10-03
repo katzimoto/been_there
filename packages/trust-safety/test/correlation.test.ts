@@ -136,4 +136,61 @@ describe('coordinated reporting detection', () => {
     );
     expect(corroborate(ledgerOf(...messages), messages[0]!).massReport).toBeNull();
   });
+
+  /**
+   * What excluding a discarded signal from corroboration does and does not
+   * change, measured against the same ledger both ways.
+   *
+   * The campaign path is unchanged: the incoming signal seeds the detector set
+   * with its own name, and `report_against` signals can only ever come from
+   * this one detector, so filtering prior ones out removes no name that was not
+   * already there. That is why `origin.detectors` on a campaign case still
+   * lists `report.pattern.coordinated_target`, and why it is safe for that field
+   * to keep carrying it.
+   *
+   * The non-report path is the fix. Before it, a `report_against` signal already
+   * in the ledger counted as a second independent detector, which is what let
+   * two reports move a victim from `normal` to `elevated`.
+   */
+  it('leaves a campaign signal corroborating exactly what it did before', () => {
+    const identityReuse = makeSignal({
+      detector: 'identity.reuse',
+      category: 'identity',
+      subjectId: subject('victim-1'),
+      behaviour: { kind: 'identity_reuse', entityId: 'attempt-1' },
+      occurredAt: at(0, 4),
+    });
+    const corroboration = corroborate(
+      ledgerOf(identityReuse, report('r-1', at(0, 3)), report('r-2', at(0, 2))),
+      report('r-3', NOW),
+    );
+    expect(corroboration.detectors).toEqual([
+      'identity.reuse',
+      'report.coordinated_target',
+    ]);
+    expect(corroboration.massReport?.reporters).toEqual([
+      subject('r-1'),
+      subject('r-2'),
+      subject('r-3'),
+    ]);
+  });
+
+  it('does not let a discarded report signal corroborate another detector', () => {
+    // The incoming signal has to be the *latest* one in its ledger:
+    // `corroborate` drops anything that occurred after it, so an `identity.reuse`
+    // dated before the reports would see an empty window and pass vacuously.
+    const identityReuse = makeSignal({
+      detector: 'identity.reuse',
+      category: 'identity',
+      subjectId: subject('victim-1'),
+      behaviour: { kind: 'identity_reuse', entityId: 'attempt-1' },
+      occurredAt: NOW,
+    });
+    const corroboration = corroborate(
+      ledgerOf(report('r-1', at(0, 3)), report('r-2', at(0, 2))),
+      identityReuse,
+    );
+    expect(corroboration.detectors).toEqual(['identity.reuse']);
+    expect(corroboration.independentDetectors).toBe(1);
+  });
 });
