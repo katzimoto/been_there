@@ -203,6 +203,50 @@ export interface AuditSink {
  * Read side. `clearance` is the reader's, not the record's: an `internal`
  * clearance can never observe a `restricted` record even if it holds the
  * reference.
+ *
+ * ## The gap: reads are not recorded, and nothing here could record them
+ *
+ * This interface takes a clearance and returns records. It does not take — and
+ * has nowhere to put — *who* read, and no row is appended when it happens. The
+ * `audit_log` table agrees: `seq`, `occurred_at`, `actor_id`, `action`,
+ * `entity_type`, `entity_id`, `subject_id`, `case_id`, `detail`. Every one of
+ * those columns describes an action taken **on** something. There is no reader
+ * column, no `read_at`, and no `audit.read` action in the `AuditAction` union.
+ *
+ * So the log answers "who did what to whom" completely, and "who looked" not at
+ * all. A `restricted` row is readable by anyone whose role clears `restricted`,
+ * which today means `senior_moderator`, and the fact that a given moderator read
+ * a particular evidence record is not reconstructable afterwards.
+ *
+ * That gap widened with staff identity and did not cause it. Before this change a
+ * moderator *was* a shared bearer token, so "who read it" had no better answer
+ * than "whoever held the token" — there was no individual to record. Now there is
+ * one: `staff_identities` names every moderator, and each action they take is
+ * attributed to a person. The write side became answerable and the read side did
+ * not follow, which leaves the log able to name a moderator's decisions while
+ * being silent on a moderator's reading of restricted evidence.
+ *
+ * ## Why this is not fixed here
+ *
+ * Closing it is not a local edit, and the shape of the fix is a decision this
+ * repository does not get to make alone:
+ *
+ *  - Adding a reader column to an append-only log changes what the table *is*.
+ *    `audit_log` grants no UPDATE or DELETE and has no correction path, so a
+ *    read record has to be appended by the same sink — which means every reader
+ *    becomes a writer, and a read that fails to append is a read that went
+ *    unrecorded unless reads are made conditional on the append succeeding.
+ *  - Recording reads makes reads more expensive and, on a hot path, more likely
+ *    to be skipped under load — which would trade a real gap for a quieter one.
+ *  - It needs its own `AuditAction`, its own retention reasoning (a read record
+ *    outlives the thing read), and a decision about whether reading the log of
+ *    reads is itself recorded.
+ *
+ * So this is reported rather than worked around. Nothing in the codebase should
+ * *rely* on the absence — a caller cannot currently detect that a read went
+ * unrecorded, and must not be given a way to pretend otherwise. The honest state
+ * is that `AuditReader` records nothing about its caller, and the table has no
+ * column for it.
  */
 export interface AuditReader {
   read(clearance: { readonly upTo: DataSensitivity }): readonly AuditRecord[];

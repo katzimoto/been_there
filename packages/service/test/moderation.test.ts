@@ -1,28 +1,56 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { castId } from '@been-there/core';
-import { type Caller, type Harness, call, member, moderator, startHarness } from './support/harness.js';
+import {
+  type Caller,
+  type Harness,
+  call,
+  member,
+  startHarness,
+  staffIdentity,
+} from './support/harness.js';
 import { COMPLETE_PROFILE, PASSING_RESULT, createAccount, newPeer, verify } from './support/fixtures.js';
 
 const ALICE = 'alice';
 const STRANGER = 'stranger';
 const BOB = 'bob';
 const ERIN = 'erin-token';
-const MOD = 'moderator-token';
-const BOT = 'automation-token';
+let MOD = 'moderator-token';
+let BOT = 'automation-token';
 
 /** The reporting, queue and decision half of the flow. */
 describe('reports, the moderator queue, and decisions', () => {
   let harness: Harness;
   let callers: Caller[];
   let bob: UserId;
+  /** The staff identity ids the database minted. */
+  let modId: string;
+  let botId: string;
   /** A verified user Bob has matched and then unmatched with. */
   let reportedUserId: string;
 
   beforeAll(async () => {
     const bobCaller = member('bob');
-    callers = [bobCaller, moderator(MOD), moderator(BOT, true)];
-    harness = await startHarness(callers);
+    // A placeholder so the harness starts with its shape; the real caller list is
+    // rebuilt below once the identities exist. Starting the service first is not
+    // an option: provisioning a staff identity needs the database, and the
+    // resolver needs to be running to resolve the token it issues.
+    harness = await startHarness([bobCaller]);
+    // Real staff identities, not tokens in a table. `MOD` resolves to a row in
+    // `staff_identities` and a session minted by production code, so `actorId`
+    // is a person the database named. This is the property the suite exists to
+    // check, and a static token could not check it at all.
+    const mod = await staffIdentity(harness, 'senior_moderator', { suffix: 'mod' });
+    const bot = await staffIdentity(harness, 'senior_moderator', {
+      suffix: 'bot',
+      automated: true,
+    });
+    callers = [bobCaller, mod.caller, bot.caller];
+    await harness.reloadCallers(callers);
+    modId = mod.staffId;
+    botId = bot.staffId;
+    MOD = mod.token;
+    BOT = bot.token;
     bob = (await createAccount(harness, 'bob')).userId;
     bobCaller.userId = bob;
     const profile = await call(harness, 'PUT', `/v1/accounts/${bob}/profile`, 'bob', COMPLETE_PROFILE);
@@ -90,7 +118,10 @@ describe('reports, the moderator queue, and decisions', () => {
 
     const opened = await call(harness, 'POST', '/v1/moderation/cases', MOD, {
       reportId: reported.body['reportId'],
-      moderatorId: 'senior_moderator',
+      // The session's own identity, not a role name. The route refuses a body
+      // value that does not match the authenticated actor, so this is also the
+      // assertion that the recorded moderator is a person rather than a literal.
+      moderatorId: modId,
     });
     expect(opened.status).toBe(201);
     // A person-safety reason triages urgent whatever else says.
@@ -107,7 +138,7 @@ describe('reports, the moderator queue, and decisions', () => {
     const reportId = await latestReportId(harness, reportedUserId, BOB);
     const opened = await call(harness, 'POST', '/v1/moderation/cases', MOD, {
       reportId,
-      moderatorId: 'senior_moderator',
+      moderatorId: modId,
     });
     expect(opened.status).toBe(201);
     const caseId = String(opened.body['caseId']);
@@ -122,7 +153,7 @@ describe('reports, the moderator queue, and decisions', () => {
 
     const automated = await call(harness, 'POST', `/v1/moderation/cases/${caseId}/decisions`, BOT, {
       action: 'ban',
-      moderatorId: 'risk-detector',
+      moderatorId: botId,
       rationale: 'a sufficiently long rationale for the decision',
     });
     expect(automated.status).toBe(403);
@@ -133,13 +164,16 @@ describe('reports, the moderator queue, and decisions', () => {
   it('records a decision under the named moderator and applies the standing it produced', async () => {
     const caseId = await anOpenCaseFor(harness, reportedUserId);
     const decided = await call(harness, 'POST', `/v1/moderation/cases/${caseId}/decisions`, MOD, {
-      moderatorId: 'senior_moderator',
+      moderatorId: modId,
       action: 'restrict',
       removedCapabilities: ['like'],
       rationale: 'the messages in this case meet the bar for a first restriction',
     });
     expect(decided.status).toBe(201);
-    expect(decided.body['moderatorId']).toBe('senior_moderator');
+    // The staff identity, not the role and not the bearer token. Before staff
+    // sessions existed this assertion could only be made against a literal,
+    // because the actor id *was* the token.
+    expect(decided.body['moderatorId']).toBe(modId);
     expect(decided.body['action']).toBe('restrict');
     expect(decided.body['caseState']).toBe('resolved');
     // The decision and its audit rows are one unit of work, and there is at least

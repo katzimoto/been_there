@@ -14,3 +14,4 @@ export { PgAccountStandingStore } from './store-account-standing.js';
 export { PgVerificationAttemptStore } from './store-verification-attempts.js';
 export { PostgresGoalStore } from './store-goal.js';
 export { PgAccountPlatformStore } from './store-accounts.js';
+export { PgStaffIdentityStore } from './store-staff.js';

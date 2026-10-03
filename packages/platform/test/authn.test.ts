@@ -8,6 +8,8 @@ import {
   enforceSessionLimit,
   completeRecovery,
   issueSession,
+  memberIdOf,
+  memberSubject,
   recordFailedRecoveryAttempt,
   recoveryAuditFields,
   refreshSession,
@@ -36,7 +38,7 @@ function sessionFor(
   return succeeded(
     issueSession({
       sessionId: sessionId(id),
-      userId,
+      subject: memberSubject(userId),
       authMethod: 'password',
       now: NOW,
       ttlSeconds,
@@ -60,7 +62,7 @@ describe('session lifecycle', () => {
   it('refuses a ttl longer than the refresh window', () => {
     const result = issueSession({
       sessionId: sessionId('sess-long'),
-      userId: ALICE,
+      subject: memberSubject(ALICE),
       authMethod: 'password',
       now: NOW,
       ttlSeconds: 7200,
@@ -259,13 +261,16 @@ describe('account recovery', () => {
       }),
     );
 
-    const alicesSessions = outcome.sessions.filter((session) => session.userId === ALICE);
+    // Off the subject rather than a `session.userId`, which no longer exists: a
+    // staff session is a different arm of the same union and must not be
+    // mistaken for a member's while filtering.
+    const alicesSessions = outcome.sessions.filter((session) => memberIdOf(session.subject) === ALICE);
     // The attacker's cookie and the owner's cookie both die: that is the whole
     // security value of a reset.
     expect(alicesSessions.map((session) => session.status)).toEqual(['revoked', 'revoked']);
     expect(alicesSessions.every((session) => session.revokedReason === 'recovery_completed')).toBe(true);
     // Another user's session is not collateral damage.
-    expect(outcome.sessions.find((session) => session.userId === BOB)?.status).toBe('active');
+    expect(outcome.sessions.find((session) => memberIdOf(session.subject) === BOB)?.status).toBe('active');
     // The owner is not left signed out of their own account.
     expect(outcome.session.authMethod).toBe('recovery');
     expect(outcome.request.status).toBe('consumed');

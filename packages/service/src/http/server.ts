@@ -149,6 +149,12 @@ const ANONYMOUS_ACTOR: RequestActor = {
   principal: { userId: ANONYMOUS_USER_ID, role: 'user' },
   automated: false,
   actorId: castId<'ActorId'>('anonymous'),
+  // There is no session behind this actor, which is the honest value and the
+  // load-bearing one: `sessionId` is what a handler re-checks to abandon work
+  // whose credential was revoked mid-request, and a public route has no
+  // credential to lose. `null` here is why the revocation guard cannot be
+  // satisfied by a caller that never authenticated.
+  sessionId: null,
 };
 
 async function handle(

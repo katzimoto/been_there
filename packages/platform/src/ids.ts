@@ -39,3 +39,15 @@ export type MediaAccessId = ReturnType<typeof castId<'MediaAccessId'>>;
 export type LocationAnchorId = ReturnType<typeof castId<'LocationAnchorId'>>;
 export type IntegrationRequestId = ReturnType<typeof castId<'IntegrationRequestId'>>;
 export type NotificationId = ReturnType<typeof castId<'NotificationId'>>;
+
+/**
+ * A staff identity: a named human who may hold a staff session.
+ *
+ * Deliberately not a `UserId`. A moderator is a person, but not a *member* — the
+ * two are different facts with different consequences, and the whole argument for
+ * a discriminated session subject rests on their being distinguishable. Minting
+ * one from the other is a `castId` away, which is exactly why the column, the
+ * CHECK constraint and the resolver all name the distinction rather than relying
+ * on the type to hold.
+ */
+export type StaffId = ReturnType<typeof castId<'StaffId'>>;

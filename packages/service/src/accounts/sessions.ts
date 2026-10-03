@@ -3,12 +3,18 @@ import { type DomainError, type Result, type UserId, domainError, ok } from '@be
 import type { SessionRow } from '@been-there/contracts';
 import {
   type AuthMethod,
+  type Role,
   type Session,
   type SessionRevokeReason,
+  type SessionSubject,
+  type StaffId,
   enforceSessionLimit,
+  isStaffRole,
   issueSession,
+  memberSubject,
   refreshSession,
   revokeSession,
+  staffIdentityMayAuthenticate,
   validateSession,
 } from '@been-there/platform';
 import { newSessionToken, sessionTokenDigest } from './session-token.js';
@@ -50,10 +56,27 @@ export function issueStoredSession(
   authMethod: AuthMethod,
   now: Date,
 ): Result<IssuedSession, DomainError> {
+  return issueStoredSessionFor(memberSubject(userId), authMethod, now);
+}
+
+/**
+ * Mints a session for an explicit subject.
+ *
+ * The subject-taking form is what makes staff sessions a first-class issuance
+ * rather than a special case bolted onto the member one: there is one code path
+ * from "a credential was verified" to "a row exists", so a staff session gets the
+ * same rotation, the same cap and the same digest handling as a member's, and
+ * there is no second place for those rules to be restated.
+ */
+export function issueStoredSessionFor(
+  subject: SessionSubject,
+  authMethod: AuthMethod,
+  now: Date,
+): Result<IssuedSession, DomainError> {
   const sessionId = randomUUID();
   const issued = issueSession({
     sessionId: sessionId as Parameters<typeof issueSession>[0]['sessionId'],
-    userId,
+    subject,
     authMethod,
     now,
   });
@@ -74,9 +97,20 @@ export function issueStoredSession(
  * built from two different hash functions.
  */
 export function sessionRowOf(session: Session, tokenDigest: string): SessionRow {
+  const subject = session.subject;
   return {
     sessionId: session.sessionId,
-    userId: session.userId,
+    // Written through the subject rather than off `session.userId`, which no
+    // longer exists: a staff session has no member id and a member session has no
+    // staff id, and the row's CHECK is what guarantees the pair agrees. Writing
+    // both columns from one discriminated value means the row can never disagree
+    // with itself.
+    userId: subject.kind === 'member' ? subject.userId : null,
+    subjectKind: subject.kind,
+    staffId: subject.kind === 'staff' ? subject.staffId : null,
+    // From the subject, not a constant. A member session is always a person, so
+    // this is false on that arm; a staff session carries what its issuer said.
+    automated: subject.kind === 'staff' && subject.automated,
     authMethod: session.authMethod,
     status: session.status,
     tokenHash: tokenDigest,
@@ -95,7 +129,7 @@ export function sessionRowOf(session: Session, tokenDigest: string): SessionRow 
 export function sessionOf(row: SessionRow): Session {
   return {
     sessionId: row.sessionId as Parameters<typeof issueSession>[0]['sessionId'],
-    userId: row.userId,
+    subject: subjectOf(row),
     authMethod: row.authMethod as AuthMethod,
     issuedAt: row.issuedAt,
     expiresAt: row.expiresAt,
@@ -107,6 +141,55 @@ export function sessionOf(row: SessionRow): Session {
       ? {}
       : { supersededBy: row.supersededBy as Parameters<typeof issueSession>[0]['sessionId'] }),
   };
+}
+
+/**
+ * The subject a stored row claims.
+ *
+ * This is the read side of the one-subject guarantee, and it is deliberately
+ * strict. The row's CHECK already makes `user_id IS NULL` and `staff_id IS NULL`
+ * impossible together, so a violation here means the row did not come from this
+ * schema — a hand-written insert, a restored backup, a future migration that
+ * widened the CHECK. Throwing is the right answer to that: the alternative is
+ * inventing a subject from half a row and authenticating on it, which is the
+ * exact failure this whole design exists to make impossible.
+ *
+ * A staff row also carries no role, and that is not an omission. The role lives
+ * on `staff_identities` and is read fresh by the resolver on every request, so
+ * demoting a moderator takes effect immediately rather than whenever their
+ * sessions happen to expire. A role cached here would reintroduce the wait.
+ *
+ * `automated` is read back from the row rather than defaulted, because it is a
+ * property of how the credential was presented at issue time and nothing else
+ * records it — so a default here would silently reclassify a machine as a person.
+ */
+function subjectOf(row: SessionRow): SessionSubject {
+  if (row.subjectKind === 'staff') {
+    if (row.staffId === null || row.userId !== null) {
+      throw new Error(
+        `account_sessions ${row.sessionId} claims subject_kind 'staff' but its subject columns disagree`,
+      );
+    }
+    // No role, and no placeholder for one. The subject names *who*; the role is
+    // read from `staff_identities` by the resolver on every request, which is
+    // what makes a demotion immediate rather than effective at token expiry. A
+    // role filled in here would be an authority no row can revoke.
+    // Read back from the row rather than defaulted. Defaulting to `false` here
+    // would read every automated staff session as human, and the domain guard
+    // that refuses automation would never fire — the guard would be present,
+    // tested, and inert.
+    return { kind: 'staff', staffId: castStaffId(row.staffId), automated: row.automated };
+  }
+  if (row.userId === null || row.staffId !== null) {
+    throw new Error(
+      `account_sessions ${row.sessionId} claims subject_kind 'member' but its subject columns disagree`,
+    );
+  }
+  return memberSubject(row.userId);
+}
+
+function castStaffId(value: string): StaffId {
+  return value as StaffId;
 }
 
 /**

@@ -69,11 +69,29 @@ if (!Number.isInteger(port) || port < 0 || port > 65_535) {
  */
 const DEMO_TERMS_VERSION = '2026-09-01';
 
-const staff = parseStaff(process.env['DEMO_STAFF_TOKENS']);
+/**
+ * The demo moderator, as a real identity.
+ *
+ * `DEMO_STAFF_TOKENS` used to be a JSON array of `{token, role, automated}`
+ * compared inside an `ActorResolver` wrapper in this file, with `actorId` set to
+ * the token string. That made a shared secret the acting identity of every
+ * decision the walk took, and it let `role` and `automated` be set by
+ * configuration — so the walk could "prove" the automation refusal by declaring
+ * an actor automated.
+ *
+ * Now the walk signs in over `POST /v1/staff-sessions` like any other client, and
+ * the service derives the role from the identity row. `DEMO_STAFF_CONTACT` /
+ * `DEMO_STAFF_PASSWORD` exist so the journey can sign in deterministically; they
+ * are a local demo credential, hashed on the way in.
+ */
+const STAFF_CONTACT = process.env['DEMO_STAFF_CONTACT'] ?? 'moderator@demo.localhost';
+const STAFF_PASSWORD = process.env['DEMO_STAFF_PASSWORD'] ?? 'demo-staff-local-only';
+const STAFF_DISPLAY_NAME = process.env['DEMO_STAFF_NAME'] ?? 'Demo Moderator';
 
 const pg = (await import('pg')).default;
 const { createStores, createTransaction } = await import('@been-there/database');
-const { ok } = await import('@been-there/core');
+const { hashPassword } = await import('@been-there/platform');
+const { randomUUID } = await import('node:crypto');
 const {
   createServiceHealth,
   createSessionActorResolver,
@@ -88,7 +106,10 @@ const transaction = createTransaction(pool);
 const dependencies = {
   stores,
   transaction,
-  actors: actorsFor(staff, stores, transaction),
+  // The production resolver, unmodified. A moderator is a session, so this file
+  // no longer wraps it in a token comparison — that wrapper was a second
+  // authentication path, and the one the demo was actually exercising.
+  actors: createSessionActorResolver({ stores, transaction, now: () => new Date() }),
   // Composed here and never sent: there is no relay in this repository, and a
   // demo that quietly posted mail to a sandbox would be an outbound side effect
   // nobody asked for. The message is reported so its existence stays visible.
@@ -138,9 +159,13 @@ const health = createServiceHealth(dependencies);
 
 say(`Been There is serving at ${running.url}`);
 say(`database ${redact(connectionString)}`);
-for (const entry of staff) {
-  say(`staff bearer token (${entry.role}): ${entry.token}`);
-}
+// Signed in over HTTP so the token is one the service minted. A token built in
+// this file would be a second issuance path, and this file used to have three.
+const staffSession = await provisionStaff(stores, transaction, running.url);
+say(
+  `moderator signed in: ${staffSession.displayName} (${staffSession.role}), ` +
+    `staff id ${staffSession.staffId}`,
+);
 say(`liveness:  curl -s ${running.url}/v1/health/live`);
 say(`readiness: curl -s ${running.url}/v1/health/ready`);
 say('sign up (the token in the response is the bearer for everything else):');
@@ -182,51 +207,54 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
  * @param {string | undefined} raw
  * @returns {readonly { token: string, role: string, automated: boolean }[]}
  */
-function parseStaff(raw) {
-  if (raw === undefined || raw === '') {
-    return [{ token: 'demo-senior-moderator', role: 'senior_moderator', automated: false }];
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    throw new Error(`DEMO_STAFF_TOKENS is not JSON: ${String(error)}`);
-  }
-  if (!Array.isArray(parsed)) {
-    throw new Error('DEMO_STAFF_TOKENS must be a JSON array of { token, role, automated }.');
-  }
-  return parsed;
-}
-
 /**
- * Static staff first, then the production session resolver. The order matters:
- * it is what makes "an unrecognised token is refused" an honest statement about
- * sessions rather than about a table of three names.
+ * Provisions the demo moderator and signs them in, returning `{ token, staffId }`.
+ *
+ * The sign-in goes over HTTP rather than being assembled here, so the token is one
+ * the service minted and would accept. Building a session directly in this file
+ * would be a second issuance path — the thing this file no longer has.
+ *
+ * @param {import('@been-there/contracts').Stores} storesForStaff
+ * @param {import('@been-there/contracts').Transaction} transactionForStaff
+ * @param {string} baseUrl
  */
-function actorsFor(staffEntries, storesForActors, transactionForActors) {
-  const table = new Map(staffEntries.map((entry) => [entry.token, entry]));
-  const live = createSessionActorResolver({
-    stores: storesForActors,
-    transaction: transactionForActors,
-    now: () => new Date(),
-  });
-  return {
-    async resolve(authorization) {
-      const token =
-        authorization?.startsWith('Bearer ') === true ? authorization.slice(7) : undefined;
-      const caller = token === undefined ? undefined : table.get(token);
-      if (caller !== undefined) {
-        return ok({
-          userId: null,
-          role: caller.role,
-          principal: { userId: null, role: caller.role },
-          automated: caller.automated === true,
-          actorId: caller.token,
-        });
-      }
-      return live.resolve(authorization);
-    },
+async function provisionStaff(storesForStaff, transactionForStaff, baseUrl) {
+  const now = new Date();
+  // Hashed before the transaction rather than inside it: scrypt is deliberately
+  // slow, and holding a transaction open across it would pin a connection for
+  // every demo boot.
+  const passwordHash = await hashPassword(STAFF_PASSWORD);
+  const row = {
+    staffId: randomUUID(),
+    contactKind: 'email',
+    contactIdentifier: STAFF_CONTACT,
+    passwordHash,
+    displayName: STAFF_DISPLAY_NAME,
+    role: 'senior_moderator',
+    status: 'active',
+    createdAt: now,
+    updatedAt: now,
   };
+  await transactionForStaff.run((tx) => storesForStaff.staff.insertStaff(row, tx));
+  const response = await fetch(`${baseUrl}/v1/staff-sessions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ contact: STAFF_CONTACT, password: STAFF_PASSWORD }),
+  });
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(`demo staff sign-in failed: ${response.status} ${JSON.stringify(body)}`);
+  }
+  // `token` is included because the walk drives the service the way a client
+  // does, and a client signs in to get one. It is a local demo credential minted
+  // seconds earlier against a database this process created and will drop.
+  emit('staff', {
+    staffId: body.staffId,
+    role: body.role,
+    displayName: body.displayName,
+    token: body.token,
+  });
+  return body;
 }
 
 function say(text) {

@@ -24,7 +24,7 @@ import { type IsolatedDatabase, isolatedDatabase } from './isolation.js';
 import { notePrepared } from './reclaim.js';
 import pg from 'pg';
 import { createStores, createTransaction } from '@been-there/database';
-import type { Principal, Role } from '@been-there/platform';
+import { hashPassword, type Principal, type Role, type StaffId } from '@been-there/platform';
 import { type DomainError, type Result, type UserId, castId, domainError, ok } from '@been-there/core';
 import { type Stores, type Transaction } from '@been-there/contracts';
 import type { ContactMessage, RunningService } from '@been-there/service';
@@ -36,6 +36,8 @@ import {
   serviceRoutes,
   startService,
 } from '@been-there/service';
+import { randomUUID } from 'node:crypto';
+import { issueStoredSessionFor } from '../../src/accounts/sessions.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, '..', '..', '..', '..');
@@ -201,6 +203,17 @@ export interface Harness {
    */
   fromAddress(address: string | null): void;
   /**
+   * Swaps the resolver's caller list while the service keeps running.
+   *
+   * A staff identity cannot exist before the service starts — provisioning one
+   * needs the database, and the session it mints is resolved by the running
+   * service — so a suite that wants a *real* moderator has to start the harness,
+   * provision, and then register. The list is captured per resolve rather than at
+   * construction for exactly this reason; this method exists so the swap is
+   * explicit at the call site instead of the harness guessing.
+   */
+  reloadCallers(callers: readonly Caller[]): void;
+  /**
    * The service's own transaction runner, exposed so a suite can read the
    * records a request wrote — the audit trail in particular is only observable
    * through a store method, and a property that is only true in the response
@@ -223,6 +236,19 @@ export interface Caller {
   userId: UserId | null;
   readonly role: Role;
   readonly automated: boolean;
+  /**
+   * Set when this caller is backed by a REAL staff identity rather than a token
+   * in a table.
+   *
+   * Its presence is what tells the resolver to hand the request to production.
+   * Without it the harness would resolve the caller itself and set
+   * `actorId = token`, which is precisely the lie this change removes: the
+   * decision log would record a bearer token where it must record a person. So a
+   * caller carrying a real identity is *not* answered from this table at all — it
+   * goes through `createSessionActorResolver`, which reads the session row and
+   * `staff_identities`, and the resulting `actorId` is the staff id.
+   */
+  readonly realStaff?: boolean;
 }
 
 export function member(token: string): Caller {
@@ -260,6 +286,105 @@ function principalOf(caller: Caller, actorId: string): Principal {
 }
 
 /**
+ * A real staff identity, with a real session and a real bearer token.
+ *
+ * ## Why this exists
+ *
+ * The static `staff(token, role)` table above is the thing this whole change is
+ * about: it manufactures a moderator out of a string, with `actorId` set to the
+ * token. A test using it proves the *routes* work while proving nothing about
+ * whether a human can reach them.
+ *
+ * So a suite that needs a genuine moderator provisions one here: a row in
+ * `staff_identities`, a password, and a session minted by the same
+ * `issueStoredSessionFor` production uses. The returned token is resolved by the
+ * production resolver, which is the point — the actor id the test then asserts on
+ * is a staff identity id that the database minted, not a literal.
+ *
+ * `automated` is a field of the issued session subject rather than something the
+ * resolver invents, which is what lets the "automation may not decide" refusal be
+ * exercised against a real identity instead of a fabricated one.
+ */
+export interface StaffIdentity {
+  readonly token: string;
+  readonly staffId: string;
+  /** The credentials the sign-in route verifies against, so a suite can sign in over HTTP. */
+  readonly contact: string;
+  readonly password: string;
+  readonly role: Role;
+  readonly displayName: string;
+  readonly sessionId: string;
+  readonly caller: Caller;
+}
+
+/**
+ * Provisions a staff identity and signs it in.
+ *
+ * `suffix` makes the contact unique per call; the store refuses a duplicate
+ * contact, and two suites sharing a harness must not collide on one.
+ */
+export async function staffIdentity(
+  harness: Harness,
+  role: Role,
+  options: { readonly automated?: boolean; readonly suffix?: string; readonly displayName?: string } = {},
+): Promise<StaffIdentity> {
+  const suffix = options.suffix ?? Math.random().toString(36).slice(2, 10);
+  const contact = `mod-${suffix}@been-there.test`;
+  const displayName = options.displayName ?? `Moderator ${suffix}`;
+  const password = 'staff-password-for-tests';
+  const passwordHash = await hashPassword(password);
+  const staffId = randomUUID();
+
+  await harness.transaction.run((tx) =>
+    harness.stores.staff.insertStaff(
+      {
+        staffId,
+        contactKind: 'email',
+        contactIdentifier: contact,
+        passwordHash,
+        displayName,
+        role,
+        status: 'active',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+      tx,
+    ),
+  );
+
+  const issued = issueStoredSessionFor(
+    { kind: 'staff', staffId: castId<'StaffId'>(staffId), automated: options.automated === true },
+    'staff_password',
+    new Date(),
+  );
+  if (!issued.ok) {
+    throw new Error(`harness could not issue a staff session: ${issued.error.message}`);
+  }
+  await harness.transaction.run((tx) => harness.stores.accounts.insertSession(issued.value.row, tx));
+
+  return {
+    token: issued.value.token,
+    staffId,
+    contact,
+    password,
+    role,
+    displayName,
+    sessionId: issued.value.row.sessionId,
+    // `realStaff` routes this token to the production resolver rather than the
+    // table above. Without it the harness would answer the request itself and
+    // stamp `actorId = token`, and the suite would be asserting against a
+    // credential dressed up as a person.
+    caller: {
+      token: issued.value.token,
+      userId: null,
+      role,
+      automated: options.automated === true,
+      realStaff: true,
+    },
+  };
+}
+
+/**
  * The actor resolver, as a real one would be: a bearer token names a session, and
  * the session says who the caller is and whether they are a machine.
  *
@@ -282,14 +407,38 @@ function principalOf(caller: Caller, actorId: string): Principal {
  * signs in obtains a real token, and this resolves it the way production does.
  */
 export function resolverFor(
-  callers: readonly Caller[],
+  initialCallers: readonly Caller[],
   stores?: Stores,
   transaction?: Transaction,
+  /**
+   * The cell the caller owns. Passing it in rather than returning a setter keeps
+   * one source of truth for the list: the harness holds it, `reloadCallers`
+   * writes it, and the resolver reads it per request.
+   */
+  cell?: { current: readonly Caller[] },
 ): ActorResolver {
+  // Read per request through the cell rather than captured, so `reloadCallers`
+  // works: a staff identity is minted *after* the service starts, and a resolver
+  // holding a captured list would never learn about it.
+  const current = (): readonly Caller[] => cell?.current ?? initialCallers;
   const staticTable: ActorResolver = {
     async resolve(authorization: string | undefined): Promise<Result<RequestActor, DomainError>> {
       const token = bearerOf(authorization);
-      const caller = token === undefined ? undefined : callers.find((entry) => entry.token === token);
+      const caller =
+        token === undefined ? undefined : current().find((entry) => entry.token === token);
+      // A real staff identity is deliberately NOT answered here. This table can
+      // only produce `actorId = token`, and a token is not a person: answering
+      // from it would make every assertion about "the decision names the
+      // moderator" pass while the recorded actor was still a credential. Refusing
+      // hands the request to production, which reads the session row.
+      if (caller?.realStaff === true) {
+        return domainError(
+          'permission_denied',
+          'service.http',
+          'this request carries no recognised session',
+          { reason: 'unauthenticated' },
+        );
+      }
       if (caller === undefined) {
         return domainError(
           'permission_denied',
@@ -305,6 +454,7 @@ export function resolverFor(
         principal: principalOf(caller, actorId),
         automated: caller.automated,
         actorId: castId<'ActorId'>(actorId),
+        sessionId: null,
       });
     },
   };
@@ -380,10 +530,13 @@ export async function startHarness(
     const stores: Stores = createStores(pool);
     const transaction = createTransaction(pool);
     const messages: ContactMessage[] = [];
+    // One cell, owned here and written by `reloadCallers`, read by the resolver
+    // on every request. That is the whole of the seam.
+    const callerCell: { current: readonly Caller[] } = { current: callers };
     const dependencies: ServiceDependencies = {
       stores,
       transaction,
-      actors: resolverFor(callers, stores, transaction),
+      actors: resolverFor(callers, stores, transaction, callerCell),
       // Captures rather than sends, so a suite can read the verification code or
       // reset link. It must not throw and must not reach a relay.
       contacts: {
@@ -416,6 +569,17 @@ export async function startHarness(
       stores,
       pool,
       transaction,
+      /**
+       * Registers callers minted after the service started.
+       *
+       * The seam exists for real staff identities: provisioning one needs the
+       * database, and the session it mints is only usable if the running
+       * resolver can see it. A static-token harness never needed this because it
+       * invented the token it was about to present.
+       */
+      reloadCallers(next: readonly Caller[]): void {
+        callerCell.current = next;
+      },
       /** Every message the service tried to deliver, newest last. */
       messages,
       /**

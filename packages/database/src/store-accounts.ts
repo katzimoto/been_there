@@ -243,12 +243,23 @@ export class PgAccountPlatformStore implements AccountPlatformStore {
       'insertSession',
       tx,
       `INSERT INTO app.account_sessions
-         (session_id, user_id, auth_method, status, token_hash, issued_at, expires_at,
-          refreshable_until, last_active_at, revoked_reason, superseded_by, device_label, coarse_city)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+         (session_id, user_id, subject_kind, staff_id, automated, auth_method, status, token_hash,
+          issued_at, expires_at, refreshable_until, last_active_at, revoked_reason, superseded_by,
+          device_label, coarse_city)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
       [
         row.sessionId,
+        // Null for a staff subject, and the driver binds it as NULL rather than
+        // rejecting it — which is what makes one table hold both kinds of
+        // session. `account_sessions_one_subject` refuses a row that sets
+        // neither column, so "I forgot the subject" is not a row that exists.
         row.userId,
+        row.subjectKind,
+        row.staffId,
+        // Written, not defaulted: a session minted for a machine has to say so on
+        // every later read, because that is the value the automated-actor refusal
+        // in `moderation.decision` is checked against.
+        row.automated,
         row.authMethod,
         row.status,
         row.tokenHash,
@@ -284,6 +295,17 @@ export class PgAccountPlatformStore implements AccountPlatformStore {
     return found[0] === undefined ? null : toSessionRow(found[0]);
   }
 
+  /**
+   * Every session one **member** holds.
+   *
+   * `WHERE user_id = $1` is load-bearing, not incidental: a staff session has a
+   * NULL `user_id`, so this can never return one. That is the guarantee that a
+   * member's sign-out revokes the member's sessions and nothing else — the
+   * moderator's sessions are found by identity through
+   * `StaffIdentityStore.listSessionsForStaff`, never through a member's
+   * account id. `NULL = $1` is never true in SQL, which is why no extra
+   * `subject_kind` filter is needed here.
+   */
   async listSessionsFor(userId: UserId, tx: Transaction): Promise<readonly SessionRow[]> {
     const found = await rows(
       'listSessionsFor',

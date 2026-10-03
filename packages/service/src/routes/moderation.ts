@@ -47,6 +47,7 @@ import {
   requestModerationContext,
 } from '../wiring/moderation.js';
 import { userIdOf } from './accounts.js';
+import { namedModerator } from './moderation-actor.js';
 import { subjectStandingFor } from '../wiring/standing.js';
 
 /**
@@ -158,17 +159,13 @@ async function openCaseFor(
   if (!reportRaw.ok) {
     return reportRaw;
   }
-  const moderatorRaw = readString(request.body, 'moderatorId');
-  if (!moderatorRaw.ok) {
-    return domainError(
-      'validation_failed',
-      'service.http',
-      'opening a case requires the moderator who opened it',
-      { field: 'moderatorId' },
-    );
+  const named = namedModerator(request);
+  if (!named.ok) {
+    return named;
   }
+  const moderatorId = named.value;
   const permitted = authorize(request.actor.principal, 'case.open', {
-    moderatorId: castId<'ActorId'>(moderatorRaw.value),
+    moderatorId,
   });
   if (!permitted.ok) {
     return permitted;
@@ -187,8 +184,15 @@ async function openCaseFor(
     return NOT_FOUND('report');
   }
   const report = reportOf(row);
-  const moderatorId = castId<'ActorId'>(moderatorRaw.value);
-  const actor: ModeratorActor = { actorId: moderatorId, isLead: false, identityPrivacyRole: false, automated: request.actor.automated };
+  const actor: ModeratorActor = {
+    actorId: moderatorId,
+    // From the authenticated role, not hardcoded. `openCaseFor` was the one
+    // handler that ignored `APPOINTMENT_BY_ROLE`, so a `senior_moderator` opening
+    // a case was recorded as a non-lead — which meant an escalated case this
+    // person was entitled to work read as one they were not.
+    ...APPOINTMENT_BY_ROLE[request.actor.principal.role],
+    automated: request.actor.automated,
+  };
   const correlationId = castId<'CorrelationId'>(randomUUID());
   const { context, pending } = requestModerationContext(request.now);
   const triaged = triageReport(context, { report, moderatorId, correlationId });
@@ -232,15 +236,11 @@ async function recordDecision(
   dependencies: ServiceDependencies,
   request: RouteRequest,
 ): Promise<Result<HttpResponse, DomainError>> {
-  const moderatorRaw = readString(request.body, 'moderatorId');
-  if (!moderatorRaw.ok) {
-    return domainError(
-      'validation_failed',
-      'service.http',
-      'a moderation decision must name the moderator who took it',
-      { field: 'moderatorId' },
-    );
+  const named = namedModerator(request);
+  if (!named.ok) {
+    return named;
   }
+  const moderatorId = named.value;
   const action = readEnum(request.body, 'action', DECISION_ACTIONS, 'warn');
   if (!action.ok) {
     return action;
@@ -265,8 +265,6 @@ async function recordDecision(
   if (caseId.length === 0) {
     return MISSING_FIELD('caseId');
   }
-  const moderatorId = castId<'ActorId'>(moderatorRaw.value);
-
   const permitted = authorize(request.actor.principal, 'case.decide', { caseId, moderatorId });
   if (!permitted.ok) {
     return permitted;
