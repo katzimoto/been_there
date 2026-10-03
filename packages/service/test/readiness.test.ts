@@ -13,6 +13,7 @@ import {
   startService,
 } from '@been-there/service';
 import { requireDatabaseReady } from './support/harness.js';
+import { harnessVerificationProvider } from './support/provider.js';
 import { reclaimPrepared } from './support/reclaim.js';
 
 /**
@@ -57,6 +58,7 @@ function serviceOver(connectionString: string): {
     transaction: createTransaction(pool),
     actors: REFUSES_EVERY_SESSION,
     contacts: CONTACTS,
+    verification: harnessVerificationProvider(),
     now: () => new Date(),
   };
   return { dependencies, close: async () => pool.end() };
@@ -114,6 +116,29 @@ describe('readiness and liveness, over real HTTP', () => {
     const checks = answer.body['checks'] as readonly { name: string; ok: boolean }[];
     expect(checks.map((check) => check.name)).toEqual(['database']);
     expect(checks[0]?.ok).toBe(true);
+  });
+
+  /**
+   * The stub declaration, at the endpoint a deployment reads.
+   *
+   * This is what "nobody ships believing a vendor is behind it" reduces to: a
+   * process whose verification is stubbed must not be able to answer a passing
+   * readiness probe without saying so *in the same body*. Note that `ready` is
+   * still true — a deployment that chose a stub is supposed to be serving, and
+   * failing the probe would take it out of rotation and teach operators to
+   * ignore this endpoint.
+   */
+  it('reports the provider mode on a passing readiness probe, so a stub cannot read as a vendor', async () => {
+    const answer = await fetchJson(`${reachableService?.url}/v1/health/ready`);
+    expect(answer.status).toBe(200);
+    expect(answer.body['ready']).toBe(true);
+
+    const verification = answer.body['verification'] as Record<string, unknown>;
+    expect(verification['mode']).toBe('stub');
+    // The caveat is the part that does the work: a `mode` field with prose
+    // nobody reads is a field, not a disclosure.
+    expect(String(verification['caveat'])).toContain('no document, selfie or liveness capture');
+    expect(String(verification['caveat'])).toContain('must not be described as verifying');
   });
 
   it('is not ready when the store cannot be reached, and says which check failed', async () => {

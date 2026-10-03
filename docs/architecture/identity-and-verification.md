@@ -271,6 +271,7 @@ client. Three operations, all vendor-neutral:
 ```ts
 interface VerificationProvider {
 	readonly label: string;                                    // "primary", "fallback"
+	readonly mode: 'vendor' | 'stub';                           // required, never defaulted
 	startSession(request: ProviderSessionRequest): Promise<Result<ProviderSession, DomainError>>;
 	fetchResult(session: ProviderSession): Promise<Result<ProviderVerificationResult | null, DomainError>>;
 	releaseSession(session: ProviderSession): Promise<Result<void, DomainError>>;
@@ -283,6 +284,38 @@ The vocabulary the domain reasons about is a list of *checks*
 carries scores, not a verdict: the threshold policy is ours, so a vendor changing
 its default cannot change who we verify. `fetchResult` returning `null` means
 "not finished yet", which is the ordinary waiting case, not an error.
+
+### `mode` is required, and a stub is reported at the health boundary
+
+`mode` has two named states and no default, so an implementation that has not
+chosen cannot compile. `ServiceDependencies.verification` is required for the
+same reason: a service with no provider cannot be constructed, so there is no
+configuration in which a route falls back to reading a score off the wire.
+
+The only implementation shipped here is `StubVerificationProvider` (`mode:
+'stub'`). `ServiceHealth` reports it at `GET /v1/health/ready` as
+`verification: { mode, label, caveat }` — alongside `ready: true`, deliberately,
+because a deployment that *chose* a stub is supposed to be serving, and failing
+the probe would take it out of rotation and teach operators to ignore the
+endpoint. What changes is that nobody can reach a passing readiness body and
+conclude a vendor is behind it. Every `stub-session-` prefixed provider reference
+reaches the `provider_reference` column, so a row written by the stub is
+identifiable in the database without asking the process that wrote it.
+
+### The artefact gap: `ProviderSessionRequest` carries no evidence
+
+An adapter written to this port can open a session but **cannot be handed the
+captures the attempt collected** — `CaptureInput` records a `storageRef` and a
+digest into the evidence store, and neither crosses this boundary. So "swapping
+vendors is a change to one adapter file" is true about the call and false about
+the work. A real integration needs one adapter plus a decision this repository
+deliberately does not make alone: evidence crosses as **bytes** (the vendor
+becomes a second copy outside our retention clock), as an **opaque reference into
+our own store** (one retention clock, but a signed fetch endpoint over biometric
+media), or as a **short-lived signed URL** (no new inbound endpoint, but the URL's
+lifetime becomes a second retention deadline). Each choice amends the retention
+table in `evidence.ts` and what `releaseSession` can reach. The full reasoning is
+on the port itself, so it is found before the first adapter rather than after.
 
 ### Failure modes
 

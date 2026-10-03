@@ -8,7 +8,7 @@ import { type DomainError, type Err, type Result, err } from '@been-there/core';
  * no vendor concept appears in any type below, so swapping vendors is a change
  * to one adapter file and not a change to the domain.
  *
- * Two rules shape the vocabulary:
+ * Three rules shape the vocabulary:
  *
  *  - The provider *scores*, the domain *decides*. `ProviderVerificationResult`
  *    carries observations; it never carries a verdict. The verdict comes from
@@ -18,8 +18,47 @@ import { type DomainError, type Err, type Result, err } from '@been-there/core';
  *  - A provider failure is data, not an exception. Vendor errors are normalised
  *    to `ProviderFailureReason`, so "the vendor was down" can never be confused
  *    with "this person is not real".
+ *  - **The provider is declared, never assumed.** Every implementation states
+ *    its `mode`. A stub is a legitimate configuration choice, but a deployment
+ *    has to be able to see it from *outside* the process, so `mode` is required
+ *    rather than defaulted: a silent default makes the fixture indistinguishable
+ *    from the real thing at runtime, which is precisely the failure an
+ *    unimplemented port invites.
+ *
+ * ## The artefact gap: read this before writing the first real adapter
+ *
+ * `ProviderSessionRequest` carries no evidence. It names a correlation, a
+ * re-verification flag and the checks we intend to run — and that is all. An
+ * adapter written to this port can open a session but has **no way to hand the
+ * vendor the captures the attempt collected**: `CaptureInput` records a
+ * `storageRef` and a digest into evidence, and neither crosses this boundary.
+ *
+ * So the claim above that swapping vendors is "a change to one adapter file" is
+ * true about the *call* and false about the *work*. A real integration is one
+ * adapter plus one decision this repository deliberately does not make on its
+ * own. Evidence has to cross somehow, and each way changes the retention story
+ * in `evidence.ts` and the erasure path in `releaseSession`:
+ *
+ *  - **As bytes.** The simplest to write and the worst to keep. The vendor
+ *    becomes a second copy of a government ID and a selfie, outside our
+ *    retention clock, and `EVIDENCE_RETENTION` stops describing reality the
+ *    moment the upload succeeds.
+ *  - **As an opaque reference into our own store.** We keep the bytes and the
+ *    vendor fetches them. Retention stays ours and one clock governs both
+ *    copies — but we now run a signed, short-lived fetch endpoint over
+ *    biometric media, which is a new surface rather than a new integration.
+ *  - **As a short-lived signed URL.** The narrowest thing that crosses. No new
+ *    inbound endpoint and the vendor holds a capability, not an account — but
+ *    the URL's lifetime becomes a second retention deadline, and an unexpired
+ *    one at the moment of an erasure request is a promise already broken.
+ *
+ * Whichever is chosen, the retention table in `evidence.ts` has to be amended
+ * to name the vendor-side copy and `releaseSession` has to be able to reach it.
+ * **This gap is why the only implementation in this repository is a stub, and
+ * why that stub must not be reachable as though it were a vendor.** Find it
+ * here, at the port, rather than after the first adapter has been written
+ * against an interface that could not carry what it needed.
  */
-
 /** A check in the vendor-neutral vocabulary the domain reasons about. */
 export type VerificationCheck =
   | 'document_authenticity'
@@ -121,10 +160,39 @@ export function classifyProviderFailure(failure: ProviderFailure): ProviderFailu
   }
 }
 
+/**
+ * What a provider implementation actually is.
+ *
+ * `stub` is not a degraded `vendor` — it is a distinct answer, and it is
+ * deliberately not a boolean. A boolean has two states and one of them is the
+ * default, which is how a stub ends up reading as "fine, nothing to see". Two
+ * named states with no default means every implementation has to choose, and
+ * `ServiceHealth` can report that choice from outside the process.
+ */
+export type ProviderMode = 'vendor' | 'stub';
+
+/**
+ * Why `stub` is surfaced rather than merely correct.
+ *
+ * A stub that behaves correctly is not the problem. The problem is that nothing
+ * distinguishes it at runtime: a deployment whose provider is stubbed answers
+ * `verified` with the same confidence and through the same code path as one with
+ * a vendor behind it, so an operator watching readiness and metrics sees a
+ * healthy product that has verified nobody. Reporting `mode` at the health
+ * boundary is what turns "the fixture happens to be wired up" into a fact a
+ * deployment can be wrong about loudly.
+ */
+
 /** The port. Implementations are adapters; the domain only ever sees this shape. */
 export interface VerificationProvider {
   /** Opaque label for operations and audit ("primary", "fallback"). */
   readonly label: string;
+  /**
+   * Required, with no default. An implementation that does not state its mode
+   * is not finished: the whole point is that the answer is knowable from
+   * outside the process.
+   */
+  readonly mode: ProviderMode;
   startSession(request: ProviderSessionRequest): Promise<Result<ProviderSession, DomainError>>;
   /**
    * `null` means "the provider has not finished yet" — the ordinary waiting

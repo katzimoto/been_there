@@ -10,6 +10,7 @@ import {
 import { requireDatabaseReady, type JsonResponse } from './support/harness.js';
 import { createSessionActorResolver } from '../src/accounts/session-resolver.js';
 import { reclaimPrepared } from './support/reclaim.js';
+import { harnessVerificationProvider } from './support/provider.js';
 
 /**
  * Sign-in, refresh, logout and recovery, over real HTTP against the real
@@ -57,7 +58,11 @@ let presentedAddress: string | null = null;
 /** Per-run octets, so two runs never share a bucket. */
 const ROTATION_A = Math.floor(Math.random() * 254) + 1;
 const ROTATION_B = Math.floor(Math.random() * 254) + 1;
+const provider = harnessVerificationProvider();
 const harness = {
+  get verification() {
+    return provider;
+  },
   get url() {
     return url;
   },
@@ -98,6 +103,7 @@ beforeAll(async () => {
         messages.push(message);
       },
     },
+    verification: provider,
     now: () => new Date(),
   };
   url = (

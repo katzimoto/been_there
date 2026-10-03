@@ -24,6 +24,7 @@ import {
 } from './support/harness.js';
 import { type Created, COMPLETE_PROFILE, PASSING_RESULT, verify } from './support/fixtures.js';
 import { reclaimPrepared } from './support/reclaim.js';
+import { harnessVerificationProvider } from './support/provider.js';
 
 /**
  * One teardown for the whole file, not one per `describe`.
@@ -81,11 +82,15 @@ async function startHarnessWith(callers: readonly Caller[], fault?: Partial<Inte
   const pool = new pg.Pool({ connectionString: await requireDatabaseReady() });
   await pool.query('SELECT 1');
   const stores: Stores = createStores(pool);
+  // One instance, wired into the service and handed back on the harness, so a
+  // suite moves the score the service actually reads rather than a copy.
+  const provider = harnessVerificationProvider();
   const dependencies: ServiceDependencies = {
     stores: fault === undefined ? stores : { ...stores, interaction: withFault(stores.interaction, fault) },
     transaction: createTransaction(pool),
     actors: resolverFor(callers),
     contacts: CONTACTS,
+    verification: provider,
     now: () => new Date(),
   };
   const running = await startService(dependencies, { routes: serviceRoutes(dependencies) });
@@ -96,6 +101,7 @@ async function startHarnessWith(callers: readonly Caller[], fault?: Partial<Inte
     pool,
     transaction: dependencies.transaction,
     dependencies,
+    verification: provider,
     health: createServiceHealth(dependencies),
     // No trusted hop is installed above, so every request takes its socket
     // address and there is nothing to present a different one through.
@@ -429,6 +435,7 @@ describe('a route that takes no transaction', () => {
       transaction: createTransaction(pool),
       actors: resolverFor([]),
       contacts: CONTACTS,
+      verification: harnessVerificationProvider(),
       now: () => new Date(),
     };
     const reported: unknown[] = [];

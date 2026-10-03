@@ -189,7 +189,7 @@ for, and to let it be the oracle for the things a local run cannot see.
 | Whether existing event conversations stay writable after an event ends | `event-chat-safety.md` — **decided: read-only** | Was genuinely open |
 | Evidence retention period per market | `review-findings.md` | Regulatory, not technical |
 | Whether `limited` states compose or are a strict ladder | `00-overview.md` §9 | Product, currently a ladder by decision |
-| Whether identity verification is ever backed by a real vendor, and what a user is told when it is not | `verification-boundary.md` | **The provider is a stub by decision.** The score is a fixture; the machine and its 0.9 floor are real. Shipping this without saying so would be a claim the code cannot support |
+| Whether identity verification is ever backed by a real vendor, and what a user is told when it is not | `identity-and-verification.md` §6 | **The provider is a stub by decision, and it now says so.** The score is asserted; the machine and its 0.9 floor are real. `ServiceDependencies.verification` is required, the score is refused from a client, and `GET /v1/health/ready` reports `verification.mode: "stub"` with a caveat. What is still open is whether a vendor is ever bought, and how evidence crosses to one — `ProviderSessionRequest` carries no artefacts, so an adapter cannot be handed the captures |
 | Whether a moderator authenticates as a person or as a role | `staff-identity.md` | Today a static bearer token stands in for a human, so **no real person can reach a moderation queue in a deployment.** Everything else — evidence retention, restricted accounts, capability floors — is unreachable by anyone not holding a hardcoded string |
 
 ## Next in the delivery order

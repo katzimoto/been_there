@@ -18,6 +18,7 @@ import { healthRoutes } from '../src/routes/health.js';
 import type { RequestActor, ServiceDependencies } from '../src/ports.js';
 import { requireDatabaseReady } from './support/harness.js';
 import { reclaimPrepared } from './support/reclaim.js';
+import { harnessVerificationProvider } from './support/provider.js';
 
 /**
  * The edge-wide counter that keeps a safety refusal and an outage apart.
@@ -276,6 +277,7 @@ describe('the counter, over a real server', () => {
       transaction: createTransaction(pool),
       actors,
       contacts: CONTACTS,
+      verification: harnessVerificationProvider(),
       now: () => new Date(),
     };
     writtenKey = randomUUID();

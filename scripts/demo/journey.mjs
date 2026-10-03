@@ -405,9 +405,14 @@ function report() {
   say('every row written, and the restart in step 11.');
   walk.heading('Simulated, and what each one costs the demonstration:');
   say('1. Identity verification. There is no identity vendor in this repository and no');
-  say('   outbound call to one. The walk posts a provider result of 0.95 to the same');
-  say('   endpoint a vendor client would use. The identity machine and its 0.9 floor are');
-  say('   real; the score is a fixture this script chose.');
+  say('   outbound call to one. The service is wired to the stub provider, which declares');
+  say('   a confidence of 0.95 and examines nothing. The identity machine and its 0.9 floor');
+  say('   are real. The walk no longer supplies the score: it asks the service, and the');
+  say('   service asks its provider. The provider reference written to the database is');
+  say('   prefixed stub-session-, and /v1/health/ready reports mode "stub" with a caveat, so');
+  say('   this process cannot be mistaken for one that has verified anybody. Before this,');
+  say('   the walk posted its own provider result to the endpoint a vendor would use, and a');
+  say('   subject could have posted their own and reached verified.');
   say('2. Staff identity. The service is handed one static moderator token. There is no');
   say('   staff login, no SSO and no staff session row, so a real deployment needs that');
   say('   built before a person can moderate anything.');

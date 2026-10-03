@@ -1,4 +1,5 @@
 import type { ActorId, DomainError, EventPublisher, Result, UserId } from '@been-there/core';
+import type { VerificationProvider } from '@been-there/identity';
 import type { Stores, Transaction } from '@been-there/contracts';
 import type { Principal, Role } from '@been-there/platform';
 /**
@@ -101,6 +102,27 @@ export interface ServiceDependencies {
    * that opened its own connection would be a second answer to them.
    */
   readonly contacts: ContactDelivery;
+  /**
+   * The verification boundary, and the seam that makes "swap the provider" a
+   * wiring change rather than a rewrite.
+   *
+   * **Required, and not optional.** This used to be absent, and the route that
+   * consumes a provider result read `confidence` and `checks` out of the request
+   * body instead — so the subject could post their own score. The 0.9 floor was
+   * applied faithfully, to a number the subject had chosen, and the account
+   * became `verified`. A real control applied to a subject-chosen number is not
+   * a weaker verification; it is no verification at all.
+   *
+   * Making it required is what stops that recurring: a service with no provider
+   * cannot be constructed, so there is no configuration in which the route
+   * falls back to reading a score off the wire.
+   *
+   * `mode` is not defaulted either, and `ServiceHealth` reports it at
+   * `/v1/health/ready`. The only implementation shipped here is a stub, and a
+   * deployment must be able to discover that from outside the process rather
+   * than from reading this comment.
+   */
+  readonly verification: VerificationProvider;
   /** One clock per request, so a handler's `now` and the domain's `now` agree. */
   readonly now: () => Date;
 }

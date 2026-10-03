@@ -25,8 +25,6 @@ const CONTACTS = {
   bandProbe: `demo-${RUN}-band-probe@example.test`,
 };
 
-/** The provider score the walk uses. 0.95 clears the 0.9 verified floor. */
-const PROVIDER_CONFIDENCE = 0.95;
 
 export const STEP_COUNT = 11;
 
@@ -68,10 +66,10 @@ export const STEPS = [
   },
 
   {
-    title: 'Alice verifies (provider result 0.95)',
+    title: 'Alice verifies (stubbed provider, declared 0.95)',
     async run({ client, say, people }) {
       await completeProfile(client, people.alice, say);
-      const recorded = await verify(client, people.alice, PROVIDER_CONFIDENCE, say);
+      const recorded = await verify(client, people.alice, say);
       if (at(recorded, 'identityState') !== 'verified') {
         throw new Error(`expected identityState verified, received ${at(recorded, 'identityState')}`);
       }
@@ -92,7 +90,7 @@ export const STEPS = [
       );
       people.bob = bob;
       await completeProfile(client, bob, say);
-      const recorded = await verify(client, bob, PROVIDER_CONFIDENCE, say);
+      const recorded = await verify(client, bob, say);
       if (at(recorded, 'identityState') !== 'verified') {
         throw new Error(`expected identityState verified, received ${at(recorded, 'identityState')}`);
       }
@@ -213,7 +211,7 @@ export const STEPS = [
       say('setup: Carol completes verification and matches Alice, because an unverified');
       say('       account cannot hold a conversation — there would be nowhere to send');
       await completeProfile(client, people.carol, say);
-      await verify(client, people.carol, PROVIDER_CONFIDENCE, say);
+      await verify(client, people.carol, say);
 
       const carolLike = await client.call('POST', '/v1/interactions/likes', people.carol.token, {
         toUserId: people.alice.userId,
