@@ -159,8 +159,13 @@ audit-log: seed-build ## Read the seeded audit log as a role. AUDIT_AS=senior_mo
 client-test: ## Test the client safety gate (needs Xcode)
 	cd client/BeenThereKit && swift test
 
+# The whole client source set, not one file. Naming `ClientGate.swift` here
+# compiled a single file of nine and left the other eight — the API client, the
+# decoding shim and every view model — outside CI entirely, so a client that
+# did not compile was still green. The glob is what makes a new source file
+# part of the gate by existing.
 client-ios: ## Compile the client for the iOS simulator (needs Xcode)
-	@export SDK=$$(xcrun --sdk iphonesimulator --show-sdk-path); xcrun swiftc -sdk "$$SDK" -target arm64-apple-ios17.0-simulator -emit-module -module-name BeenThereKit client/BeenThereKit/Sources/BeenThereKit/ClientGate.swift -o "$${RUNNER_TEMP:-$${TMPDIR:-/tmp}}/BeenThereKit.swiftmodule"
+	@export SDK=$$(xcrun --sdk iphonesimulator --show-sdk-path); xcrun swiftc -sdk "$$SDK" -target arm64-apple-ios17.0-simulator -emit-module -module-name BeenThereKit client/BeenThereKit/Sources/BeenThereKit/*.swift -o "$${RUNNER_TEMP:-$${TMPDIR:-/tmp}}/BeenThereKit.swiftmodule"
 
 workflow: ## Validate the CI workflow before pushing it
 	node scripts/dev/check-workflow.mjs

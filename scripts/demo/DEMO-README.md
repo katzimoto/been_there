@@ -42,22 +42,23 @@ than one that admits a gap:
   not an authenticated person.
 - **No outbound email.** Recovery codes and sign-out notices are composed by the
   service and then dropped; no relay is configured. The walk does not use them.
-- **No client.** No iOS or web UI is started. What you are exercising is the
-  server and the rules it enforces, driven as a client would drive it.
+- **No UI is started by this walk.** It exercises the server and the rules it
+  enforces, driven as a client would drive it. A web client exists — `node
+  web/server.mjs`, then <http://127.0.0.1:5173> — and is the way to *look* at
+  this rather than read it.
 - **Step 7 deviates from a straight three-person script.** Carol completes
   verification and matches Alice before blocking her, because an unverified
   account cannot hold a conversation, so the block would have nothing to close.
   The walk prints the deviation inside the step. Step 4's discovery claim is
   unaffected — Carol is still unverified when it runs.
-- **`make demo` serves an empty database.** See above. The schema is applied;
-  no fixture rows are loaded.
-- **Interrupting the walk can leave its throwaway database behind.** `SIGINT` and
-  `SIGTERM` are handled and the walk drops its `t_journey_*` database on the way
-  out, and that works for an interrupt early in the run. There is a narrow
-  window around step 11 — where the walk is already killing and restarting the
-  service — where the handler runs while the restart is in flight and the drop
-  loses the race. If you `Ctrl-C` at that moment, one empty `t_journey_*`
-  database survives. It holds no rows and costs a few MB; clear it with
+- **A signal in the first few milliseconds can leave the throwaway database
+  behind**, and `SIGKILL` always does. Neither is catchable in-process. What is
+  gone is the wider window it used to have: the teardown is now a single memoised
+  promise, every spawned child is registered from the moment it exists, and the
+  create is held so teardown awaits it. Measured over 66 interrupts across
+  `SIGINT` and `SIGTERM`: 0 leaked databases. The handler prints the exact DROP
+  command when it cannot clean up, so the failure is visible rather than silent.
+  It holds no rows; clear it with
   `make db-shell` and `DROP DATABASE <name> WITH (FORCE)`. A run that completes
   normally always drops its own.
 - **No production infrastructure.** One Postgres container on port `55432`, a
@@ -116,16 +117,14 @@ make down              # stops Postgres too, keeping the data
 <http://127.0.0.1:8787>, printing the URL, the pid and a ready-to-paste `curl`
 line in `.demo/service.log`. Health: `curl http://127.0.0.1:8787/v1/health/ready`.
 
-**The database it serves is empty.** The schema is applied; the rows are not.
-`make demo` also tries `make seed`, that fails — there is no `packages/seed` in
-this repository — and it says so rather than pretending:
+**`make demo` seeds 87 rows** and refuses to serve if that fails — it prints what
+`make seed` said and exits 1, rather than starting an empty database and letting
+you believe the product worked. The rows are written through the domain's own
+stores, so a seeded `verified` account is one the domain would have produced.
 
-```
-Dataset:  NOT loaded — 'make seed' failed; .demo/seed.log has why.
-```
-
-That is the honest state of the build, not a defect in the demo. Use it to try
-individual requests by hand; use `npm run demo:journey` to see actual rows.
+(An earlier version of this file said the served database was empty because
+`packages/seed` did not exist. It does now; the claim was stale, not a defect in
+the demo.)
 
 ### What the walk proves
 
@@ -201,7 +200,7 @@ The full design argument is in `docs/architecture/00-overview.md`.
 | `make demo` cannot reach the database         | Postgres is not up yet: run `make ps`.                                                        |
 | The service exits at start                    | Run `make logs`. Usually a port already in use; `make demo-stop` then retry.                  |
 | A `t_journey_*` database survives a run       | You interrupted the walk near step 11. It holds no rows; drop it. See "What is _not_ real".   |
-| `Dataset: NOT loaded` from `make demo`        | Expected. There is no `packages/seed` in this repository; see above.                          |
+| `Dataset: NOT loaded` from `make demo`        | No longer expected — `make demo` now seeds 87 rows and hard-fails if seeding fails.         |
 
 ## Notes on this archive
 

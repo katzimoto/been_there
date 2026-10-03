@@ -96,6 +96,14 @@ jobs:
       - name: Migrate
         run: node packages/database/scripts/migrate.mjs
 
+      # The dataset is built by running the domain, so the only thing that proves
+      # the loader still works is loading it. It was broken for a long time with
+      # nothing red: `make setup` — the first command a newcomer runs — failed,
+      # and no step here touched it. This writes the *shared* database; the suites
+      # above each create and drop their own, so it cannot collide with them.
+      - name: Seed the development dataset
+        run: node packages/seed/scripts/load.mjs
+
   # The client mirrors rules the server enforces, and a mirror that drifts is
   # worse than no mirror: the client offers an action the server refuses. These
   # tests are the only thing keeping the two in step.
@@ -115,9 +123,15 @@ jobs:
       # The package declares iOS 17 as a platform, so compiling for the simulator
       # is what proves the source is actually iOS-compatible rather than merely
       # building on the Mac.
+      #
+      # The whole client source set, not one file. Naming `ClientGate.swift`
+      # compiled a single file of nine and left the other eight — the API client,
+      # the decoding shim and every view model — outside CI entirely, so a client
+      # that did not compile was still green. The glob is what makes a new source
+      # file part of this gate by existing.
       - name: Compile for the iOS simulator
         env:
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
           export SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
-          xcrun swiftc -sdk "$SDK" -target arm64-apple-ios17.0-simulator -emit-module -module-name BeenThereKit client/BeenThereKit/Sources/BeenThereKit/ClientGate.swift -o "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/BeenThereKit.swiftmodule"
+          xcrun swiftc -sdk "$SDK" -target arm64-apple-ios17.0-simulator -emit-module -module-name BeenThereKit client/BeenThereKit/Sources/BeenThereKit/*.swift -o "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/BeenThereKit.swiftmodule"
