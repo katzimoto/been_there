@@ -109,6 +109,34 @@ export type CaseOrigin =
       readonly source: 'identity_anomaly';
       readonly verificationId: VerificationId;
       readonly anomaly: string;
+    }
+  | {
+      /**
+       * A coordinated reporting campaign, opened against one of the *reporters*.
+       *
+       * This exists because the reporters' own risk state cannot carry the
+       * finding. `assessSignal` discards every `report_against` signal precisely
+       * so that reports never move the account reported — which means a reporter
+       * in a three-account campaign is still sitting at `normal`, and `openCase`
+       * refuses a `trust_safety_review` intake at `normal` on the grounds that a
+       * detector must raise the subject first. Here the detector deliberately
+       * raised nobody: the campaign is the evidence, and the subject is one of
+       * the accounts that filed it.
+       *
+       * `clusterKey` identifies the campaign this reporter took part in, so a
+       * moderator reading two cases can see they belong to one attack rather
+       * than to two coincidences. It is a behaviour key, never a report id and
+       * never an account id.
+       */
+      readonly source: 'mass_report_campaign';
+      readonly clusterKey: string;
+      /** The account the campaign targeted. Never the case's subject. */
+      readonly targetId: UserId;
+      /** The distinct reporters in the campaign, including this one. */
+      readonly reporters: readonly UserId[];
+      readonly detectors: readonly string[];
+      /** Content hash of the campaign snapshot the case freezes. */
+      readonly digest: string;
     };
 
 export interface Case {

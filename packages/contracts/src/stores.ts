@@ -240,6 +240,60 @@ export interface NoticeRow {
 }
 
 /**
+ * One account-deletion request (§8), with the 30-day window already resolved.
+ *
+ * `completesAt` is stored rather than recomputed from `requestedAt` on read, and
+ * that is the load-bearing decision of the whole table: raising the window from 30
+ * days to 45 must not retroactively extend the deadline of every request already
+ * in flight. A computed column would, silently, for exactly the accounts that
+ * asked to leave first.
+ */
+export interface DeletionRequestRow {
+  readonly deletionId: string;
+  readonly userId: UserId;
+  /** `scheduled` | `cancelled` | `completed`, from `DELETION_RETENTION`'s domain. */
+  readonly status: string;
+  readonly requestedAt: Date;
+  readonly completesAt: Date;
+  readonly cancelledAt: Date | null;
+  readonly completedAt: Date | null;
+}
+
+/**
+ * What a deletion removed and what it kept, per §8.2.
+ *
+ * Counted rather than booleaned because "the profile was deleted" and "the profile
+ * had nothing in it" are the same answer at the level of a flag, and only the
+ * counts tell a caller whether the completion did what it said. `retained` is
+ * deliberately present: a user told their account was deleted and nothing about
+ * what survived has been told a half-truth (§9's completion row is honest about
+ * both halves precisely because the retained set is real).
+ */
+export interface DeletionOutcome {
+  readonly pseudonym: string;
+  readonly deleted: Readonly<Record<string, number>>;
+  readonly retained: Readonly<Record<string, number>>;
+}
+
+/**
+ * The pseudonymous subject a completed deletion leaves behind, for §8.3's
+ * re-registration check.
+ *
+ * `priorState` is the standing at deletion and `openCase` whether a case was
+ * unresolved. Together they are the two conditions §8.3 names for holding a
+ * re-registered account out of discovery. What is deliberately *not* here is the
+ * pseudonym's derivation or the moderation history behind it — this row exists to
+ * answer "does this contact point need a human to look at it", and §2 puts
+ * moderation reasoning off limits to every product surface.
+ */
+export interface DeletedSubjectRow {
+  readonly pseudonym: string;
+  readonly priorState: string | null;
+  readonly openCase: boolean;
+  readonly deletedAt: Date;
+}
+
+/**
  * The rate-limit buckets Platform enforces, named so that a caller cannot invent
  * one. §10 gives the numbers; this names the things they are counted over.
  */
@@ -323,6 +377,82 @@ export interface AccountPlatformStore {
    */
   insertNotice(row: NoticeRow, tx: Transaction): Promise<void>;
   listNoticesFor(userId: UserId, tx: Transaction): Promise<readonly NoticeRow[]>;
+
+  // --- Account deletion (§8). The request is soft; the completion is not. ---
+
+  /**
+   * Schedules a deletion, or returns the one already scheduled.
+   *
+   * §8.1's idempotence, and it is enforced here rather than by the caller reading
+   * first and writing second: a retried request and a double-tapped button are the
+   * same event by the time they arrive, and two of them racing past a
+   * read-then-write would produce two open requests with two deadlines. The
+   * partial unique index decides it, and the *first* request's deadline is the one
+   * returned — so a retry cannot extend the window, which is the failure a caller
+   * reading `findOpenDeletion` first could still produce under concurrency.
+   *
+   * Returns the row that is now open, and `created: false` when this call found an
+   * existing one rather than writing.
+   */
+  scheduleDeletion(
+    row: DeletionRequestRow,
+    tx: Transaction,
+  ): Promise<{ readonly request: DeletionRequestRow; readonly created: boolean }>;
+
+  /** The open request for an account, or `null`. Cancelled and completed are history. */
+  findOpenDeletionFor(userId: UserId, tx: Transaction): Promise<DeletionRequestRow | null>;
+
+  /**
+   * A deletion by id.
+ *
+   * Separate from `findOpenDeletionFor` because "this request" and "this account's
+   * current request" are different questions, and a caller that wanted the former
+   * would otherwise have to search every row it could see to find it.
+   */
+  findDeletion(deletionId: string, tx: Transaction): Promise<DeletionRequestRow | null>;
+
+  /** Moves a request to a terminal state. The CHECK constraints own what is legal. */
+  updateDeletion(row: DeletionRequestRow, tx: Transaction): Promise<boolean>;
+
+  /**
+   * Performs the completion: removes §8.2's deleted classes, rewrites the account
+   * row as `deleted` with a stable pseudonym, and returns what went.
+   *
+   * **The users row is never deleted**, and that is the whole design. Every table
+   * in §8.2's retained column — reports, cases, decisions, the audit log, risk
+   * signals, the standing — hangs off `app.users` by `ON DELETE CASCADE`, so
+   * `DELETE FROM app.users` would take the moderation history with it. The row is
+   * rewritten instead: no credential, no date of birth, no contact identifier, and
+   * a pseudonym in place of the identity. That is §8.2's "Anonymized, not erased"
+   * taken literally, and it is why nothing in the retained set needs this method to
+   * remember to spare it.
+   *
+   * Counting what went rather than returning a boolean is what lets the caller
+   * build §9's completion summary from the transaction's own result instead of
+   * from a list of intentions.
+   */
+  completeDeletion(
+    userId: UserId,
+    pseudonym: string,
+    at: Date,
+    tx: Transaction,
+  ): Promise<DeletionOutcome>;
+
+  /**
+   * The pseudonym for a contact point, computed from the stored salt.
+   *
+   * In the store rather than in the service because it must be byte-identical to
+   * the one `completeDeletion` writes, and §8.2's promise that "a future account on
+   * the same contact point ... can be linked" is a promise about *one* function.
+   * Two implementations of "stable" is how it stops being stable.
+   */
+  deletionPseudonym(contactIdentifier: string, tx: Transaction): Promise<string | null>;
+
+  /**
+   * The pseudonymous subject for a contact point, if that contact point has been
+   * deleted before. §8.3's re-entry check reads this and nothing else.
+   */
+  findDeletedSubject(contactIdentifier: string, tx: Transaction): Promise<DeletedSubjectRow | null>;
 }
 
 /** Dating: profiles, preferences, likes, passes, blocks, matches. */
