@@ -9,8 +9,11 @@
 > launches on a machine with zero runtimes installed, because the platform you
 > build for is the platform you run on.
 >
-> **Xcode 27.0 (27A266a) is now installed**, with the iOS 27.0 SDK and three
-> available simulators: iPhone 18 Pro, iPhone 18 Pro Max and iPhone 17e. So the
+> **Xcode 27.0 (27A266a) is now installed**, with the iOS 27.0 runtime and eleven
+> available simulators — five iPhones (18 Pro, 18 Pro Max, 17e, Air, 17) and six
+> iPads. (An earlier version of this file said three; `xcrun simctl list devices
+> available` reports five iPhones. The count was taken when the runtime was
+> first installed and not re-read.) So the
 > item below marked blocked is no longer blocked. Everything stated about
 > *why* it was blocked — the runtime being a separate ~7 GB download, and
 > `runFirstLaunch` needing `sudo` — was accurate when written, and the honest
@@ -23,7 +26,7 @@
 | **macOS SwiftUI app** | ✅ **available now** — builds, tests, launches, no runtime needed |
 | **Mac Catalyst / iPad** | ✅ available, but buys nothing (see below) |
 | **Compiling for `iphonesimulator`** | ✅ already proven — `make client-ios` compiles against the iOS SDK that ships inside Xcode |
-| **Launching on an iOS simulator** | ✅ **now possible** — Xcode 27.0 with the iOS 27.0 SDK; `xcrun simctl list devices available` shows three iPhones |
+| **Launching on an iOS simulator** | ✅ **now possible** — Xcode 27.0 with the iOS 27.0 runtime; `xcrun simctl list devices available` reports 11 devices, 5 of them iPhones |
 
 The macOS evidence, verified when no runtime was present at all:
 `MacOSX.platform` carries `SwiftUI.framework`, `AppKit.framework` and an
@@ -36,18 +39,21 @@ is no longer in effect: `xcrun simctl list devices available` now reports iOS
 27.0 simulators, so the iOS destination is a first-class target rather than a
 fallback.
 
-## So: build macOS-first, share the views
+## macOS-first, sharing the views — this is built
 
-`BeenThereKit` already declares `platforms: [.iOS(.v17), .macOS(.v14)]` and
-imports only Foundation — nothing UIKit — so a macOS app consumes it unchanged.
+`BeenThereKit` declares `platforms: [.iOS(.v17), .macOS(.v14)]` and imports only
+Foundation — nothing UIKit — so a macOS app consumes it unchanged. Steps 1 and 2
+of the plan below are **done**; only the iOS app is outstanding.
 
-1. A **shared view target** (`BeenThereViews`) holding the SwiftUI views, written
-   against a fixed iPhone-width frame (`.frame(width: 390)`) so a layout tuned on
-   macOS does not look wrong on a phone.
-2. A **macOS app target** that runs them today, pointed at the live service.
+1. A **shared view target**, `client/BeenThereViews`, holding the SwiftUI views
+   written against a fixed iPhone-width frame (`.frame(width: 390)`) so a layout
+   tuned on macOS does not look wrong on a phone.
+2. A **macOS app target**, `client/BeenThereMac`, that runs them against the live
+   service. `swift build` in that directory completes.
 3. The **iOS app** later consumes the same view target. Nothing is thrown away:
-   the project file, the view layer and the network client are all things the
-   iOS app needs anyway.
+   the view layer and the network client are all things the iOS app needs
+   anyway, and the platform-conditional text-entry modifiers are already fenced
+   with `#if os(iOS)` for that move.
 
 **Skip Mac Catalyst.** It would let iOS view code run on macOS, but it
 introduces UIKit, which `BeenThereKit` deliberately avoids.
