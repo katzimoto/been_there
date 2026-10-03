@@ -260,6 +260,14 @@ export function accountSessionRoutes(dependencies: ServiceDependencies): readonl
       // longer something the code can read off the row without being told which
       // kind of row it has. Refusing is the honest answer: a staff session is
       // signed out through the staff surface, which knows the identity.
+      if (row.subjectKind !== 'member' || row.userId === null) {
+        return domainError(
+          'permission_denied',
+          'service.accounts',
+          'this route signs out a member session; a staff session is signed out as a staff identity',
+          { reason: 'subject_kind_mismatch', subjectKind: row.subjectKind },
+        );
+      }
       await dependencies.stores.accounts.updateSession(
         revokedRow(row, 'user_logout'),
         request.tx,

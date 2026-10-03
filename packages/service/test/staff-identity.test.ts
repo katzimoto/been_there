@@ -57,14 +57,34 @@ describe('a named moderator can reach the queue, and the queue records their nam
   });
 
   /** A report about somebody Bob interacted with, which is what a case opens from. */
+  let peerCount = 0;
+
+  /**
+   * A fresh peer, matched and unmatched with Bob, with a report filed about them.
+   *
+   * **A new peer per call, and why the first version of this helper was broken.**
+   * It reused one peer and one idempotency key, so the second call re-ran an
+   * unmatch that had already been consumed and then filed a report about a pair
+   * with no unconsumed interaction left — which `evidenceForReport` answers with
+   * `not_found`, because a report needs a recorded interaction to be about. Four
+   * tests then failed with `expected 404 to be 201`, in a helper four levels below
+   * the assertions that mattered.
+   *
+   * The 404 was correct behaviour being read as a broken route. The evidence is
+   * consumed by the report, so a second report about the same pair has nothing
+   * left to attach; giving each call its own peer keeps every test asserting on
+   * what it means to assert on.
+   */
   async function aReportedPeer(): Promise<string> {
-    const peer = (await newPeer(harness, callers, ERIN)).userId;
-    await call(harness, 'PUT', `/v1/accounts/${peer}/profile`, ERIN, COMPLETE_PROFILE);
-    await verify(harness, ERIN, peer, PASSING_RESULT);
+    peerCount += 1;
+    const label = `${ERIN}-${peerCount}`;
+    const peer = (await newPeer(harness, callers, label)).userId;
+    await call(harness, 'PUT', `/v1/accounts/${peer}/profile`, label, COMPLETE_PROFILE);
+    await verify(harness, label, peer, PASSING_RESULT);
     await call(harness, 'POST', '/v1/interactions/likes', BOB, { toUserId: peer });
-    const matched = await call(harness, 'POST', '/v1/interactions/likes', ERIN, { toUserId: bob });
+    const matched = await call(harness, 'POST', '/v1/interactions/likes', label, { toUserId: bob });
     await call(harness, 'POST', `/v1/matches/${String(matched.body['match'])}/unmatch`, BOB, {
-      idempotencyKey: 'staff-identity-unmatch',
+      idempotencyKey: `staff-identity-unmatch-${peerCount}`,
     });
     const reported = await call(harness, 'POST', '/v1/reports', BOB, {
       subjectUserId: peer,
