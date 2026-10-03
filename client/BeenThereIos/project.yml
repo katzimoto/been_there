@@ -1,0 +1,32 @@
+name: BeenThereIos
+options:
+  bundleIdPrefix: dev.beenthere
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    # The service a developer runs speaks plain HTTP on the local network;
+    # ATS would refuse it before the connection screen could answer. Scoped
+    # to local networking so a real https deployment gains nothing to turn off.
+    INFOPLIST_KEY_NSAppTransportSecurity_LocalNetworking: YES
+targets:
+  BeenThereIos:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/BeenThereIos
+    dependencies:
+      - package: BeenThereViews
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.beenthere.BeenThereIos
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_FILE: Sources/BeenThereIos/Info.plist
+        # Signing is a decision a person makes with their own Apple ID: the
+        # team is left unset rather than guessed. Xcode fills it on first
+        # device build; the simulator needs no signature at all.
+        CODE_SIGN_STYLE: Automatic
+packages:
+  BeenThereViews:
+    path: ../BeenThereViews

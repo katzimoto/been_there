@@ -30,6 +30,11 @@ packages/*/src/**/*.d.ts.map
 client/**/.build/
 .swiftpm/
 *.swiftmodule
+# `xcodegen generate` writes the .xcodeproj from project.yml; committing a
+# generated file lets it drift from the spec that produces it.
+client/BeenThereIos/BeenThereIos.xcodeproj/
+xcuserdata/
+DerivedData/
 
 # Where `make demo` keeps the running service's pid and log. The service outlives
 # the command that started it, so something has to record it, and a pid file

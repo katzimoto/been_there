@@ -1,5 +1,6 @@
 import SwiftUI
 import BeenThereKit
+import CoreText
 
 /// The member-facing restriction screen, assembled from the published standing.
 ///
@@ -320,9 +321,29 @@ struct FlowChips: View {
     }
 
     /// Measured with the font that actually draws the chip, so a chip never
-    /// clips its own text.
+    /// clips its own text. `ValueChip` draws `.system(size: 12, weight: .medium,
+    /// design: .monospaced)`; CoreText derives the same monospaced system font
+    /// from the system UI font by symbolic trait, and `CTLineGetTypographicBounds`
+    /// measures it. Chosen over `NSFont.monospacedSystemFont` — which measured
+    /// to the same number on the Mac — because the views package imports neither
+    /// UIKit nor AppKit, and CoreText is the one text engine that compiles for
+    /// both platforms from one source file. Measured 163.195 on macOS against
+    /// the AppKit call's 163.195 before the swap.
     private static func width(of text: String) -> CGFloat {
-        let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)
-        return (text as NSString).size(withAttributes: [.font: font]).width
+        let system = CTFontCreateUIFontForLanguage(.system, 12, nil)!
+        let monospaced = CTFontCreateCopyWithSymbolicTraits(
+            system,
+            12,
+            nil,
+            CTFontSymbolicTraits.traitMonoSpace,
+            CTFontSymbolicTraits.traitMonoSpace
+        )
+        let line = CTLineCreateWithAttributedString(
+            NSAttributedString(
+                string: text,
+                attributes: [NSAttributedString.Key(kCTFontAttributeName as String): monospaced]
+            )
+        )
+        return CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
     }
 }

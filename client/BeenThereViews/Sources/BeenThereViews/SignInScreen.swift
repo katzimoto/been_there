@@ -170,16 +170,18 @@ public struct SignInScreen: View {
         TextField(placeholder, text: text)
             .textFieldStyle(.plain)
             .font(.system(size: 14, design: monospaced ? .monospaced : .default))
-            // `.autocapitalization` and `.disableAutocorrection` are UIKit-backed
-            // and exist only on iOS. They are applied inside `#if os(iOS)` because
-            // this package must compile for macOS today and for the iOS app later
-            // out of one copy of this file — which is the whole reason the views
-            // are their own package. On macOS the text entry behaviour has no
-            // equivalent to ask for.
+            // Verbatim entry — a contact address is an identifier, not prose.
+            // `.textInputAutocapitalization` exists only in the iOS SDK's
+            // SwiftUI (the macOS one has no text-input traits to set), and
+            // `.autocorrectionDisabled` is carried by both; `.autocorrection(_:)`
+            // was deprecated in iOS 16 and `.autocapitalization(_:)` was
+            // UIKit-backed, which the no-UIKit rule forbids. One `#if` on the
+            // modifier is narrower than one on a behaviour: the view, its state
+            // and its layout stay shared.
             #if os(iOS)
-            .autocapitalization(.never)
-            .disableAutocorrection(verbatim)
+            .textInputAutocapitalization(.never)
             #endif
+            .autocorrectionDisabled(verbatim)
             .padding(Space.sm)
             .background(Ink.canvas)
             .clipShape(RoundedRectangle(cornerRadius: Radius.chip, style: .continuous))
