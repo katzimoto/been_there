@@ -18,15 +18,20 @@ import { type PairingKey, createPairingMatcher, type PairingMatcher, openCase } 
 import {
   type DetectionReachability,
   type IdFactory,
+  REPLAYS_RETAINED,
+  REPLAY_WINDOW,
   SAFETY_DETECTORS,
   type ReviewCandidate,
+  type ReplayReport,
   type RiskRecord,
   type Signal,
+  type SignalAuthor,
   type SignalLedger,
   applySignal,
   createSafetyDetectors,
   createSafetySeam,
   emptyRiskRecord,
+  replaySignals,
   safetyDetectorReach,
 } from '@been-there/trust-safety';
 import { auditAppender, caseRowOf, corrupt, flushAudit, requestModerationContext } from './moderation.js';
@@ -58,16 +63,16 @@ import { subjectOf } from './standing.js';
  *
  * ## Two limits worth stating rather than discovering
  *
- *  1. **The observation window and the corroboration ledger are process-local.**
- *     `createSafetySeam` holds reduced facts in memory by design, and the ledger
- *     that feeds `corroborate` is held beside it. A restart forgets both, so a
- *     subject's recent behaviour stops corroborating until it is observed again.
- *     The *evidence* is durable — every signal is appended to `risk_signals` and
- *     every fold is written to `risk_assessments` — but a faithful replay from the
- *     store is not possible today: `risk_signals` has no column for a signal's
- *     author (`reliability`, `category`, `escalation`) nor for its actor, and
- *     `corroborate` reads the actor to count a reporting campaign's distinct
- *     reporters. That is a gap in the `RiskStore` port, not a choice made here.
+ *  1. **The observation window is process-local; the corroboration ledger is
+ *     not.** `createSafetySeam` holds reduced facts in memory by design, so a
+ *     restart does forget the observation window and a subject must be observed
+ *     again before its behaviour is visible. The ledger that feeds `corroborate`
+ *     is different: it is seeded from `risk_signals` on a subject's first
+ *     observation after a restart (`seedLedger`), because migration 007 gave the
+ *     log the author and actor columns a replay needs. Where a stored row still
+ *     cannot be replayed — written before those columns, or naming a detector
+ *     this build no longer runs — it is skipped and counted, and the shortfall
+ *     is visible through `SafetyRecorder.replays()` rather than absorbed.
  *  2. **Only one detector can carry a subject to `high`.** Every detector in the
  *     catalogue is `corroboration_only`, and the weighted scores cap below the
  *     shared machine's `0.7` gate for all of them except
@@ -166,6 +171,24 @@ export interface SafetyRecorder {
    * than a gap to paper over.
    */
   refusals(): readonly DomainError[];
+  /**
+   * What each subject's replayed ledger could not be rebuilt from, newest first
+   * and bounded to `REPLAYS_RETAINED`.
+   *
+   * A report here says a subject is being scored on a **shorter history than the
+   * log holds**, because rows written before migration 007 carry no author and
+   * rows whose detector this build no longer runs cannot be re-declared. Under-
+   * counting is the direction that hurts, so the shortfall is reported rather
+   * than absorbed.
+   *
+   * Only subjects with a gap are retained, so an entry here is always bad news.
+   * An empty list therefore does not distinguish "every ledger is whole" from
+   * "nothing has been replayed yet" — a replay is seeded on a subject's first
+   * observation, so before any request arrives this is empty too. Both readings
+   * are healthy; the line to watch is the stderr warning emitted per gap, which
+   * is the deployment-visible form of the same fact.
+   */
+  replays(): readonly ReplayReport[];
 }
 
 /**
@@ -242,16 +265,31 @@ export function createSafetyRecorder(wiring: SafetyWiring): SafetyRecorder {
     // domain tests use — a prefixed counter — is refused by Postgres here.
     nextAssessmentId: () => castId<'RiskAssessmentId'>(randomUUID()),
   };
+  /**
+   * The detector catalogue this recorder runs, kept for the replay.
+   *
+   * The same list the seam was built with, held rather than recomputed so a
+   * replay can never re-declare a signal against a detector this process is not
+   * actually running.
+   */
+  const catalogue: readonly SignalAuthor[] =
+    pairing === null ? SAFETY_DETECTORS : createSafetyDetectors(pairing);
+
   /** Folded state and evidence, per subject, for this process's lifetime. */
   const ledgers = new Map<SubjectId, SignalLedger>();
   const folded = new Map<SubjectId, FoldedAssessment>();
+  /** Subjects already seeded from the store, so a replay happens once each. */
+  const seeded = new Set<SubjectId>();
+  const reports: ReplayReport[] = [];
 
   return {
     refusals: () => seam.refusals(),
+    replays: () => reports,
 
     async observe(behaviour, tx) {
       await transport.publish(behaviourEvent(behaviour, castId<'CorrelationId'>(randomUUID())));
       for (const subject of evaluatedSubjects(behaviour)) {
+        await seedLedger(wiring, subject, catalogue, ledgers, seeded, reports, tx);
         const run = seam.detect(subject, ledgers.get(subject)?.entries ?? []);
         // A detector that threw is reported rather than thrown: one miscalibrated
         // detector must not cost the request its behaviour, and the run already
@@ -265,6 +303,85 @@ export function createSafetyRecorder(wiring: SafetyWiring): SafetyRecorder {
       }
     },
   };
+}
+
+/**
+ * Rebuilds a subject's ledger from the durable log, once per process.
+ *
+ * ## Why this exists
+ *
+ * The in-memory ledger is what `corroborate` reads, and it used to be built only
+ * from signals this process had itself folded. A restart therefore forgot every
+ * subject's history, and a subject that had been behaving in a pattern for a
+ * week stopped corroborating until it happened to be observed again — so its
+ * risk was recomputed from a *shorter* history after a deploy than before it,
+ * silently. Migration 007 gave the log the columns a replay needs; this is the
+ * read that uses them.
+ *
+ * ## What it does with rows it cannot use
+ *
+ * A row written before 007 has no author and no actor, and one whose detector
+ * this build no longer runs cannot be re-declared. Those rows are **skipped and
+ * counted**, never folded and never invented, so `replays()` reports a subject
+ * being scored on less evidence than the log holds. The count is the honest
+ * artefact; a shorter ledger presented as a whole one is not.
+ *
+ * Seeding is per subject and once, so the steady-state cost is nil after the
+ * first observation and a long-lived subject is never re-read.
+ *
+ * A store failure is reported and the subject left unseeded rather than thrown:
+ * the request still performed its behaviour, and the next observation retries.
+ * The consequence is that corroboration for that one cycle sees only live
+ * signals — the same under-count a restart used to cause, but visible in
+ * `replays()` instead of invisible.
+ */
+async function seedLedger(
+  wiring: SafetyWiring,
+  subjectId: SubjectId,
+  catalogue: readonly SignalAuthor[],
+  ledgers: Map<SubjectId, SignalLedger>,
+  seeded: Set<SubjectId>,
+  reports: ReplayReport[],
+  tx: Transaction,
+): Promise<void> {
+  if (seeded.has(subjectId)) {
+    return;
+  }
+  // Marked before the read, not after: two observations for one subject can
+  // interleave on the same connection, and seeding twice would append the same
+  // history to the same ledger.
+  seeded.add(subjectId);
+  try {
+    const rows = await wiring.stores.risk.findSignalsFor(subjectId, REPLAY_WINDOW, tx);
+    const report = replaySignals(rows, catalogue);
+    ledgers.set(subjectId, report.ledger);
+    if (report.skipped.length > 0) {
+      reports.unshift(report);
+      if (reports.length > REPLAYS_RETAINED) {
+        reports.length = REPLAYS_RETAINED;
+      }
+      warn(
+        `replay skipped ${report.skipped.length} of ${report.skipped.length + report.replayed} stored signals: ${describeSkips(report)}`,
+        subjectId,
+      );
+    }
+  } catch (error) {
+    seeded.delete(subjectId);
+    warn(`replay failed, corroboration is reading live signals only: ${messageOf(error)}`, subjectId);
+  }
+}
+
+/** The per-reason tally, so a log line says which kind of gap it is. */
+function describeSkips(report: ReplayReport): string {
+  return Object.entries(report.skippedByReason)
+    .filter(([, count]) => count > 0)
+    .map(([reason, count]) => `${reason}=${count}`)
+    .join(' ');
+}
+
+/** Driver text, never a caller-supplied string: this goes to a shared log. */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : 'unknown store failure';
 }
 
 /**

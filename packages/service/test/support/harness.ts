@@ -207,6 +207,20 @@ export interface Harness {
    * body is not the property that matters.
    */
   readonly transaction: Transaction;
+  /**
+   * The `ServiceDependencies` the server was started with.
+   *
+   * Exposed because `createServiceSafety` memoises on this object's identity: a
+   * suite that assembled its own dependencies would get a *different* recorder
+   * from the one the routes use, and would assert against a recorder no request
+   * ever touched — a suite that passes without testing anything.
+   *
+   * Optional because three suites hand-build a `Harness` to inject faulted
+   * stores, and they have no single set of dependencies to hand back. It is set
+   * whenever `startHarness` built the server, so a caller that got one from here
+   * always has it; the optionality is for the hand-built shape.
+   */
+  readonly dependencies?: ServiceDependencies;
   close(): Promise<void>;
 }
 
@@ -416,6 +430,7 @@ export async function startHarness(
       stores,
       pool,
       transaction,
+      dependencies,
       /** Every message the service tried to deliver, newest last. */
       messages,
       /**
