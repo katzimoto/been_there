@@ -81,6 +81,9 @@ lasting check rather than a note.
 
 ## Development
 
+- [Running the iOS app in a simulator](./ios-simulator-setup.md) — the two
+  `sudo` commands needed, and why the client has no views yet
+
 - [Local environment](./development/local-environment.md) — bring up the
   dependencies, seed a dataset, and observe the safety model from a REPL
 - [`AGENTS.md`](../AGENTS.md) — the working agreement, and [`skills/`](../skills/)
