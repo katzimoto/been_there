@@ -20,6 +20,9 @@ import {
   type Harness,
   LEAD,
   MODERATOR,
+  OTHER_SUBJECT,
+  REPORTER,
+  campaignIntake,
   SUBJECT,
   caseInReview,
   harness,
@@ -178,24 +181,34 @@ describe('case lifecycle table', () => {
   });
 });
 
-describe('the three intake paths', () => {
+describe('every intake path', () => {
   it('produce the same case record, differing only in how it was found', () => {
     const h = harness();
     const fromReport = openCaseFromReport(h, succeeded(makeReport(h)));
     const fromRisk = succeeded(openCase(h.ctx, trustSafetyIntake())).moderationCase;
     const fromIdentity = succeeded(openCase(h.ctx, identityIntake())).moderationCase;
+    // A campaign case is about a *reporter*, so it is the one intake whose
+    // subject is not `SUBJECT`. Everything else about the record is identical,
+    // which is the point: a fourth variant of `CaseOrigin` with no producer
+    // would be a claim the type system makes and nothing keeps true.
+    const fromCampaign = succeeded(openCase(h.ctx, campaignIntake())).moderationCase;
 
-    for (const opened of [fromReport, fromRisk, fromIdentity]) {
+    for (const opened of [fromReport, fromRisk, fromIdentity, fromCampaign]) {
       expect(opened.state).toBe('open');
-      expect(opened.subjectId).toBe(SUBJECT);
       expect(opened.assignedModeratorId).toBeNull();
       expect(opened.resolutionDecisionId).toBeNull();
       expect(opened.evidenceIds.length).toBeGreaterThan(0);
       expect(opened.caseId).not.toBe('');
     }
+    expect([fromReport, fromRisk, fromIdentity].map((opened) => opened.subjectId)).toEqual([
+      SUBJECT,
+      SUBJECT,
+      SUBJECT,
+    ]);
+    expect(fromCampaign.subjectId).toBe(REPORTER);
     expect(
-      [fromReport.origin.source, fromRisk.origin.source, fromIdentity.origin.source].sort(),
-    ).toEqual(['identity_anomaly', 'trust_safety_review', 'user_report']);
+      [fromReport, fromRisk, fromIdentity, fromCampaign].map((opened) => opened.origin.source).sort(),
+    ).toEqual(['identity_anomaly', 'mass_report_campaign', 'trust_safety_review', 'user_report']);
   });
 
   it('run the same review and decision sequence whatever the intake path was', () => {
@@ -204,6 +217,7 @@ describe('the three intake paths', () => {
       openCaseFromReport(h, succeeded(makeReport(h))),
       succeeded(openCase(h.ctx, trustSafetyIntake())).moderationCase,
       succeeded(openCase(h.ctx, identityIntake())).moderationCase,
+      succeeded(openCase(h.ctx, campaignIntake())).moderationCase,
     ];
 
     const chains = cases.map((opened) => {
@@ -268,6 +282,57 @@ describe('the three intake paths', () => {
   it('refuses an identity anomaly that does not say what the anomaly is', () => {
     const h = harness();
     expect(rejected(openCase(h.ctx, identityIntake('  '))).code).toBe('validation_failed');
+  });
+
+  it('opens a campaign case against the reporter, at the priority the campaign is raised at', () => {
+    const h = harness();
+    const opened = succeeded(openCase(h.ctx, campaignIntake()));
+
+    expect(opened.moderationCase.subjectId).toBe(REPORTER);
+    expect(opened.moderationCase.priority).toBe('high');
+    expect(opened.moderationCase.queue).toBe('safety');
+    expect(opened.moderationCase.origin).toEqual({
+      source: 'mass_report_campaign',
+      clusterKey: 'report_against:sha256',
+      targetId: SUBJECT,
+      reporters: [REPORTER, OTHER_SUBJECT],
+      detectors: ['report.pattern.coordinated_target'],
+      digest: 'sha256:campaign',
+    });
+    // No report is folded in: a report's subject is the account reported, so
+    // one attached here would make the case read as though the reporter had
+    // been reported.
+    expect(opened.moderationCase.reportIds).toEqual([]);
+    expect(opened.evidence).toHaveLength(1);
+    expect(opened.evidence[0]?.subjectId).toBe(REPORTER);
+    expect(opened.evidence[0]?.kind).toBe('risk_assessment');
+    expect(opened.evidence[0]?.redactedSummary).toBe(
+      'Mass-report campaign: 2 distinct accounts reported one account (report.pattern.coordinated_target)',
+    );
+  });
+
+  it('refuses a campaign case whose subject is not one of the reporters', () => {
+    const h = harness();
+    const error = rejected(openCase(h.ctx, campaignIntake({ subjectId: OTHER_SUBJECT, reporters: [REPORTER] })));
+
+    expect(error.code).toBe('validation_failed');
+    expect(error.message).toContain('one of its reporters');
+  });
+
+  it('refuses a campaign that names the account reported as one of its reporters', () => {
+    const h = harness();
+    const error = rejected(openCase(h.ctx, campaignIntake({ reporters: [REPORTER, SUBJECT] })));
+
+    expect(error.code).toBe('validation_failed');
+    expect(error.message).toContain('cannot be one of the reporters');
+  });
+
+  it('refuses a campaign whose reporter list names the same account twice', () => {
+    const h = harness();
+    const error = rejected(openCase(h.ctx, campaignIntake({ reporters: [REPORTER, OTHER_SUBJECT, REPORTER] })));
+
+    expect(error.code).toBe('validation_failed');
+    expect(error.message).toContain('distinct reporters');
   });
 
   it('refuses to open a second case for a report already merged into one', () => {

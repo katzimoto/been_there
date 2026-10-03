@@ -264,3 +264,25 @@ export function identityIntake(
     correlationId: CORRELATION,
   };
 }
+
+/**
+ * A three-reporter campaign against `SUBJECT`, which is the account *reported*.
+ * The subject of the case is one of the reporters, so `REPORTER` is the one
+ * named here and the caller overrides it when it wants to be somebody else.
+ */
+export function campaignIntake(
+  overrides: Partial<Extract<CaseIntake, { source: 'mass_report_campaign' }>> = {},
+): Extract<CaseIntake, { source: 'mass_report_campaign' }> {
+  return {
+    source: 'mass_report_campaign',
+    subjectId: REPORTER,
+    clusterKey: 'report_against:sha256',
+    targetId: SUBJECT,
+    reporters: [REPORTER, OTHER_SUBJECT],
+    detectors: ['report.pattern.coordinated_target'],
+    digest: 'sha256:campaign',
+    openedBy: 'system',
+    correlationId: CORRELATION,
+    ...overrides,
+  };
+}

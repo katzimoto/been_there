@@ -125,8 +125,13 @@ export type CaseOrigin =
        *
        * `clusterKey` identifies the campaign this reporter took part in, so a
        * moderator reading two cases can see they belong to one attack rather
-       * than to two coincidences. It is a behaviour key, never a report id and
-       * never an account id.
+       * than to two coincidences. It is a behaviour key and nothing else: never
+       * a report id, and — because the behaviour it is keyed on is itself named
+       * by the account reported — never a bare account id either. The wiring
+       * derives it as the behaviour kind plus a digest of the entity, so the
+       * key groups a campaign without being resolvable to the account it
+       * targeted. `targetId` above names that account deliberately, in the
+       * field whose job is to.
        */
       readonly source: 'mass_report_campaign';
       readonly clusterKey: string;
@@ -168,6 +173,18 @@ const PRIORITY_BY_RISK_STATE: Readonly<Record<RiskState, CasePriority>> = {
 /** An identity anomaly is never less than `high`: it questions who is on the app. */
 const IDENTITY_ANOMALY_PRIORITY: CasePriority = 'high';
 
+/**
+ * A mass-report campaign is `high`, never lower.
+ *
+ * Not derived from a risk state, because there is none to derive it from: the
+ * reporters sit at `normal` by construction — that is the guard that stops a
+ * vendetta reading as detection, and it is exactly why this intake exists. The
+ * number matches the `high` the review candidate is raised at (`trust-safety`'s
+ * `policy.ts`), so the queue and the candidate that put a case there cannot
+ * disagree.
+ */
+const MASS_REPORT_CAMPAIGN_PRIORITY: CasePriority = 'high';
+
 export type CaseIntake =
   | {
       readonly source: 'user_report';
@@ -194,6 +211,26 @@ export type CaseIntake =
       readonly digest: string;
       readonly openedBy: ActorId | 'system';
       readonly correlationId: CorrelationId;
+    }
+  | {
+      readonly source: 'mass_report_campaign';
+      /**
+       * The reporter this case is about. Never the account the campaign
+       * targeted — that is the whole point of the variant, and `openCase`
+       * refuses an intake whose subject is the target.
+       */
+      readonly subjectId: UserId;
+      /** Behaviour key of the campaign, shared by every reporter's case. */
+      readonly clusterKey: string;
+      /** The account the campaign targeted. Never the case's subject. */
+      readonly targetId: UserId;
+      /** The distinct reporters, including the subject. */
+      readonly reporters: readonly UserId[];
+      readonly detectors: readonly string[];
+      /** Content hash of the campaign snapshot the case freezes. */
+      readonly digest: string;
+      readonly openedBy: ActorId | 'system';
+      readonly correlationId: CorrelationId;
     };
 
 export interface CaseOpened {
@@ -216,6 +253,9 @@ export function openCase(
 
   if (intake.source === 'user_report') {
     return openFromReport(ctx, intake, caseId, openedAt);
+  }
+  if (intake.source === 'mass_report_campaign') {
+    return openFromCampaign(ctx, intake, caseId, openedAt);
   }
   if (intake.source === 'trust_safety_review' && intake.riskState === 'normal') {
     return domainError(
@@ -323,6 +363,109 @@ function openFromReport(
     correlationId: intake.correlationId,
     reportIds: [report.reportId],
     evidence: report.capturedEvidence,
+  });
+}
+
+/**
+ * A campaign opens one case per reporter, against the reporter.
+ *
+ * Three refusals, and each is the guard the whole variant exists to hold:
+ *
+ * 1. **The subject is one of the reporters.** A case whose subject is somebody
+    outside the campaign would be a case about the account reported, reached by
+    the back door — the exact thing `assessSignal` refuses when it discards
+    every `report_against` signal. An intake that cannot be checked against the
+    reporter list is refused rather than opened.
+ * 2. **The target is not among the reporters.** A self-report is not a
+ *    campaign: one account filing several reports is one account with several
+ *    reports, and it must not be able to manufacture a cohort out of itself.
+ * 3. **The reporters are distinct.** `corroborate` counts a `Set` of actors, so
+ *    a campaign's size is the number of *people* in it. An intake carrying the
+ *    same reporter twice would open a case that claims a wider campaign than
+ *    the evidence supports.
+ *
+ * The priority is `high` and the queue is `safety`, chosen here rather than
+ * derived from a risk state: the reporters are at `normal` by construction,
+ * which is why this intake exists, so there is no state to map. A coordinated
+ * attack on one person by several accounts is not a low-priority queue item,
+ * and `mass_report_attack` is already declared `high` where the candidate is
+ * raised (`policy.ts`), so this is the same number rather than a second one.
+ */
+function openFromCampaign(
+  ctx: ModerationContext,
+  intake: Extract<CaseIntake, { source: 'mass_report_campaign' }>,
+  caseId: CaseId,
+  openedAt: Date,
+): Result<CaseOpened, DomainError> {
+  if (!intake.reporters.includes(intake.subjectId)) {
+    return domainError(
+      'validation_failed',
+      'moderation.case',
+      'a mass-report campaign case is about one of its reporters',
+      { subjectId: intake.subjectId, clusterKey: intake.clusterKey },
+    );
+  }
+  if (intake.reporters.includes(intake.targetId)) {
+    return domainError(
+      'validation_failed',
+      'moderation.case',
+      'the account a campaign targeted cannot be one of the reporters',
+      { targetId: intake.targetId, clusterKey: intake.clusterKey },
+    );
+  }
+  if (new Set(intake.reporters).size !== intake.reporters.length) {
+    return domainError(
+      'validation_failed',
+      'moderation.case',
+      'a campaign counts distinct reporters; this intake names one twice',
+      { clusterKey: intake.clusterKey, reporters: intake.reporters.length },
+    );
+  }
+
+  // Intake freezes the campaign as it stood, so a moderator can read why these
+  // accounts were grouped months later without asking the safety layer what it
+  // thought at the time. It is a `risk_assessment` record because it is exactly
+  // that: detector names and a derived finding, never a verdict about a person.
+  const captured = captureEvidence(ctx, {
+    kind: 'risk_assessment',
+    subjectId: intake.subjectId,
+    sourceDomain: 'trust-safety',
+    artefactReference: `mass-report-campaign:${intake.clusterKey}`,
+    digest: intake.digest,
+    redactedSummary:
+      `Mass-report campaign: ${intake.reporters.length} distinct accounts reported one account ` +
+      `(${intake.detectors.join(', ')})`,
+    capture: { at: 'case_intake', caseId },
+    caseId,
+    actorId: intake.openedBy,
+    correlationId: intake.correlationId,
+  });
+  if (!captured.ok) {
+    return captured;
+  }
+
+  return finishCase(ctx, {
+    subjectId: intake.subjectId,
+    origin: {
+      source: 'mass_report_campaign',
+      clusterKey: intake.clusterKey,
+      targetId: intake.targetId,
+      reporters: intake.reporters,
+      detectors: intake.detectors,
+      digest: intake.digest,
+    },
+    priority: MASS_REPORT_CAMPAIGN_PRIORITY,
+    queue: 'safety',
+    caseId,
+    openedAt,
+    openedBy: intake.openedBy,
+    correlationId: intake.correlationId,
+    // No report is folded in: a report's subject is the account reported, so
+    // attaching one here would make the case read as though the reporter had
+    // been reported. The campaign is the evidence, and it is frozen as its own
+    // record above.
+    reportIds: [],
+    evidence: [captured.value],
   });
 }
 

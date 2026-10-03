@@ -172,7 +172,16 @@ describe('a report must not move the reported account', () => {
 
     const queue = await call(harness, 'GET', '/v1/moderation/cases', 'mod');
     expect(queue.status).toBe(200);
-    expect(queue.body['cases']).toEqual([]);
+    // Not "the queue is empty". A mass-report campaign now opens a case **per
+    // reporter**, which is the correct outcome and means the queue is not empty.
+    // The invariant is narrower and is the one this suite exists to protect: no
+    // case anywhere in the queue is about the account that was reported.
+    const subjects = (queue.body['cases'] as { subjectId: string }[]).map((c) => c.subjectId);
+    expect(subjects).not.toContain(campaignVictim);
+    // And every subject is one of the people who did the reporting.
+    for (const subjectId of subjects) {
+      expect([...ids.values()].includes(subjectId as UserId)).toBe(true);
+    }
   });
 
   /** A verified, profiled account, so it carries `identity.reuse` and little else. */
