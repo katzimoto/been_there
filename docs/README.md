@@ -91,8 +91,14 @@ lasting check rather than a note.
 
 ## Where the build stands
 
-- [Delivery state](./delivery-state.md) — what exists, what is proven, what is
-  decided but not built, and the two things nobody should assume are true
+- [Status](./status.md) — **start here if you are new to the repository.** What
+  this is, a per-capability built/partial/stubbed table with the artefact that
+  proves each row, where each of the eight commitments is enforced and whether a
+  regression would be caught, what is genuinely missing, the commands to run it,
+  and the traps that have cost real time here
+- [Delivery state](./delivery-state.md) — the dated narrative of the same
+  territory. Several of its claims predate the current code; `status.md` §4.6
+  lists the ones the code does not support, quoted.
 
 ## Document conventions
 

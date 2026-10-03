@@ -1,0 +1,159 @@
+/**
+ * The three operations every person in the walk goes through.
+ *
+ * Sign-up, a complete profile, and the four-call verification sequence. Each is
+ * the same HTTP surface a client uses, in the same order, with the same request
+ * shapes the suites use — `packages/service/test/support/fixtures.ts` is the
+ * reference for the last one and this is deliberately its twin rather than a
+ * tidier invention, because a demo that drives the product differently from its
+ * own tests is a demo of the demo.
+ *
+ * One thing is worth saying plainly because a reader will otherwise assume
+ * otherwise: the provider result is posted by *this* script. There is no
+ * identity vendor in this repository and no outbound call to one. The score is
+ * a fixture the walk supplies through the same endpoint the vendor's client
+ * would use, and the identity machine's decision — which is the part under
+ * demonstration — is made by the real domain code either way.
+ */
+import { at, expectStatus } from './client.mjs';
+
+const TERMS_VERSION = '2026-09-01';
+const PASSWORD = 'correct-horse-battery-staple-42';
+
+/** The three artefacts the identity machine requires, one per required check. */
+const ARTEFACTS = [
+  { check: 'document_authenticity', kind: 'government_id_image' },
+  { check: 'liveness', kind: 'liveness_video' },
+  { check: 'likeness', kind: 'selfie_image' },
+]
+
+/**
+ * The provider's answer. `confidence: 0.95` clears
+ * `CONFIDENCE_THRESHOLDS.verifiedFloor` (0.9) with all three checks passed, which
+ * is what turns the attempt into a `verified` identity.
+ */
+export function providerResult(confidence) {
+  return {
+    providerReference: `vendor-session-${confidence}`,
+    confidence,
+    checks: [
+      { check: 'document_authenticity', outcome: 'passed', score: 0.97, reason: null },
+      { check: 'liveness', outcome: 'passed', score: 0.95, reason: null },
+      { check: 'likeness', outcome: 'passed', score: 0.96, reason: null },
+    ],
+  };
+}
+
+/**
+ * `POST /v1/accounts`. Returns the account and the session token that
+ * authenticates everything after it.
+ */
+export async function signUp(client, { name, contact, dateOfBirth }, say) {
+  const response = await client.call('POST', '/v1/accounts', undefined, {
+    contact,
+    password: PASSWORD,
+    dateOfBirth,
+    termsVersion: TERMS_VERSION,
+  });
+  expectStatus(response, 201, `${name}: sign-up`);
+  const body = response.body;
+  say(`${name}: userId ${at(body, 'userId')}`);
+  say(`${name}: identity.state ${at(body, 'identity.state')}, identity.discoverable ${at(body, 'identity.discoverable')}`);
+  // The age gate's other half. The date of birth went in; what comes out is a
+  // band and nothing that identifies a person, because an age that is never on
+  // the wire cannot be leaked off it.
+  const wire = JSON.stringify(body);
+  for (const forbidden of ['"age"', '"dateOfBirth"', dateOfBirth]) {
+    if (wire.includes(forbidden)) {
+      throw new Error(`${name}: the sign-up response carried ${forbidden}: ${wire}`);
+    }
+  }
+  say(`${name}: ageBand ${at(body, 'ageBand')}; no age and no date of birth on the wire`);
+  return {
+    name,
+    contact,
+    token: String(at(body, 'session.token')),
+    userId: String(at(body, 'userId')),
+    accountId: String(at(body, 'accountId')),
+    ageBand: String(at(body, 'ageBand')),
+  };
+}
+
+/**
+ * A profile the dating domain will call complete. Without one, discovery returns
+ * nothing and every later step fails for a reason that has nothing to do with
+ * what the walk is demonstrating, so it is done once per person and said out
+ * loud.
+ */
+export async function completeProfile(client, person, say) {
+  const response = await client.call(
+    'PUT',
+    `/v1/accounts/${person.userId}/profile`,
+    person.token,
+    {
+      displayName: person.name,
+      bio: `${person.name} has a profile long enough to satisfy the minimum length here.`,
+      photos: [
+        { photoId: `${person.name}-p1`, approval: 'approved' },
+        { photoId: `${person.name}-p2`, approval: 'approved' },
+        { photoId: `${person.name}-p3`, approval: 'approved' },
+      ],
+      prompts: [{ promptId: `${person.name}-q1`, text: 'an answer' }],
+      genderIdentities: ['woman'],
+      birthdate: '1990-06-15',
+      location: '25_50_km',
+    },
+  );
+  expectStatus(response, 200, `${person.name}: complete the profile`);
+  if (at(response.body, 'complete') !== true) {
+    throw new Error(
+      `${person.name}: the profile did not become complete, missing ${JSON.stringify(at(response.body, 'missing'))}`,
+    );
+  }
+  say(`${person.name}: profile state complete`);
+}
+
+/**
+ * The four-call verification sequence: open an attempt, capture one artefact per
+ * required check, submit, then post the provider's result.
+ */
+export async function verify(client, person, confidence, say) {
+  const base = `/v1/accounts/${person.userId}/verification/attempts`;
+  const started = await client.call('POST', base, person.token, { reason: 'onboarding' });
+  expectStatus(started, 201, `${person.name}: open a verification attempt`);
+  const verificationId = String(at(started.body, 'verificationId'));
+  say(`${person.name}: attempt ${verificationId}`);
+
+  for (const artefact of ARTEFACTS) {
+    const captured = await client.call(
+      'POST',
+      `${base}/${verificationId}/captures`,
+      person.token,
+      {
+        check: artefact.check,
+        kind: artefact.kind,
+        storageRef: `ref:${artefact.check}`,
+        digest: artefact.check.padEnd(64, '0'),
+      },
+    );
+    expectStatus(captured, 200, `${person.name}: capture ${artefact.check}`);
+  }
+  say(`${person.name}: captured ${ARTEFACTS.length} artefacts, one per required check`);
+
+  const submitted = await client.call('POST', `${base}/${verificationId}/submit`, person.token, {});
+  expectStatus(submitted, 200, `${person.name}: submit the attempt`);
+
+  const recorded = await client.call(
+    'POST',
+    `${base}/${verificationId}/provider-result`,
+    person.token,
+    providerResult(confidence),
+  );
+  expectStatus(recorded, 200, `${person.name}: post the provider result`);
+  say(
+    `${person.name}: provider result confidence ${confidence} -> decision ` +
+      `${at(recorded.body, 'decision')}, identity.state ${at(recorded.body, 'identityState')}, ` +
+      `generation ${at(recorded.body, 'generation')}`,
+  );
+  return recorded.body;
+}

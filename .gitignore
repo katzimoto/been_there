@@ -30,3 +30,8 @@ packages/*/src/**/*.d.ts.map
 client/**/.build/
 .swiftpm/
 *.swiftmodule
+
+# Where `make demo` keeps the running service's pid and log. The service outlives
+# the command that started it, so something has to record it, and a pid file
+# under version control would be a pid of somebody else's process.
+/.demo/

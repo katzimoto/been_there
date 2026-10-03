@@ -24,7 +24,7 @@ Where each link stands:
 | Like → match | **built** | reciprocal like creates exactly one match |
 | Chat | **built** | through the communication gate; refusal is symmetric |
 | Block & report | **built** | a report after an unmatch works — evidence is retained independently |
-| Risk detection | **built** | no behavioural detector escalates alone; corroboration is required |
+| Risk detection | **domain only — not wired** | the corroboration policy is built and tested, but **no service route feeds it**: `packages/service` does not import `trust-safety`, and nothing writes the risk store over HTTP |
 | Moderation | **built** | a decision with no named human, or by an automated actor, is refused |
 | Enforcement | **built** | restrictions cannot strip `report` or `block` |
 
@@ -43,13 +43,21 @@ removes the match gate — see
 **Nothing is gated until the age gate is reachable over HTTP.** `evaluateAgeGate`
 exists and is unit-testable; the account route still accepted an empty body when
 this was written, so an account could be created with no date of birth at all.
-The foundation was built first and the surface second, and only the first is
-done. Check `POST /v1/accounts` before assuming the 18+ requirement is enforced.
+The age gate **is** enforced: `POST /v1/accounts` evaluates it before any write,
+and `npm run demo:journey` step 1 asserts a `422 not_eligible` for an under-18
+date of birth with no row written. (An earlier version of this file said
+otherwise, when the gate existed but no route called it.)
 
-**There is no client.** The moderator workspace is a server half with no UI, and
-the file says so at the top. No issue in the current delivery can be *accepted* in
-the sense of "a person did the thing on a phone" until an iOS build exists, and
-that needs Xcode, which is not installed here.
+**There is a web client; there is no iOS app yet.** `web/` is a working browser
+client against the real service — `node web/server.mjs`, then
+<http://127.0.0.1:5173>. It covers sign-up, verification, discovery, matches,
+block, report and a moderator desk, and it renders service refusals verbatim rather
+than interpreting them.
+
+**No iOS app exists.** `client/BeenThereKit` is the tested safety gate with no
+views. A macOS SwiftUI app *could* be built today — macOS needs no simulator
+runtime — but has not been. So no issue can be *accepted* in the sense of "a person
+did the thing on a phone".
 
 ## What the service now answers about itself
 

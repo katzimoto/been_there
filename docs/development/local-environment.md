@@ -4,12 +4,16 @@ Everything a newcomer needs to run this repository locally: one Postgres, one
 Makefile, and a development dataset that is built by running the domain rather
 than by writing rows into a table.
 
-The honest summary of what exists today: **the local database has no schema, and
-`make migrate` and `make seed` say so and fail.** That is the intended state,
-not a broken setup. The domain packages are executable contracts; there is no
-application, no persistence layer and no migration runner yet. Everything that
-does work — the dependency container, the CI-parity check, the dataset, the
-audit log — works without a database.
+`make setup` is the one command: it installs, starts the dependencies, builds,
+applies the migrations and loads the development dataset. Each of those is also a
+CI step, and `make check` runs all of them in CI order — so a clean checkout that
+`make setup` can complete is a checkout CI has already proven.
+
+The dataset is the part worth knowing about. `make seed` does not write rows: it
+runs the identity machine, the risk machine, the like/match/block rules, the send
+path and the moderation queue walk to produce the state, and then persists it
+through the same stores the HTTP routes use. A seeded `verified` account is one
+the identity machine verified.
 
 ## Quick start
 
@@ -20,9 +24,8 @@ make check           # exactly what CI runs, in CI order
 ```
 
 `make up` is the only command needed for the dependency. `make setup` is the
-full one-command path — install, start, migrate, seed — and it stops at
-`migrate` with a message explaining that there is no schema, because that is
-what is true.
+full one-command path — install, start, build, migrate, seed — and it is the
+command CI exercises step for step, so if it fails for you it fails there too.
 
 Nothing has to be configured first. A clean checkout runs on the defaults in the
 Makefile. Copy `.env.example` to `.env` only if you want to change the port, the
@@ -66,8 +69,8 @@ If you want to see the ADR reasoning rather than the summary:
 | `make db-shell` | `psql` against the local database |
 | `make db-url` | Print the connection string |
 | `make db-reset` | Destroy the volume and start from an empty database |
-| `make migrate` | Applies migrations. **Refuses**: there is no schema or runner yet |
-| `make seed` | Loads the dataset into the database. **Refuses**: there is no schema |
+| `make migrate` | Applies the migrations in order. Idempotent: a second run is a no-op |
+| `make seed` | Loads the dataset through the domain transitions and the stores. Skips if it is already loaded |
 | `make build` | Build the whole solution into `dist` |
 | `make seed-build` | Build only the six packages the dataset loads |
 | `make seed-print` / `make seed-json` | The development dataset, as a summary or as JSON |
@@ -234,19 +237,21 @@ credentials. Use `make up`, or export them:
 set -a; . ./.env; set +a     # if you have a .env
 ```
 
-**The database is up but looks empty after running something.** It is empty:
-there is no schema yet. `make migrate` will tell you so, and so will `\dt` at the
-`make db-shell` prompt.
+**The database is up but looks empty after `make check`.** `make check` seeds the
+shared database, so an empty `\dt` at the `make db-shell` prompt means nothing
+ran. `make migrate` says so when the schema is missing; `make seed` says so when
+it cannot write. `make db-reset` followed by `make setup` is the clean answer to
+either.
 
 **A stale volume.** If Postgres logs a complaint about `PGDATA`, or the data
 directory looks wrong after an image change (Postgres 18 moved the default data
 path), `make db-reset` is the fix. The compose file pins `PGDATA` inside the
 volume so a major-version bump cannot silently orphan your data.
 
-**A migration ran out of order.** Not reachable today — there is no migration
-runner. When there is one, the rule to hold it to is that a migration applies
-exactly once and the schema version says which; a target that reports success
-without checking that is the failure this setup is built to avoid.
+**`make seed` refuses because the database holds part of the dataset.** Something
+else wrote there, or an earlier run failed partway. It names the tables and rows
+it found rather than merging: which of them to trust is not a decision a seed
+script should make on your behalf. `make db-reset`, then `make setup`.
 
 **The seed fails with "the packages are not built".** Cross-package imports
 resolve to `packages/*/dist`, not to `src`, so a stale `dist` silently runs old
@@ -265,8 +270,15 @@ keep.
 
 - **A broker.** See above: the outbox is a table in this database, and neither it
   nor the worker draining it exists.
-- **A migration tool.** There is no schema. `make migrate` refuses rather than
-  reporting a success that did nothing.
+- **A migration tool with a rollback story.** `make migrate` applies the SQL files
+  in order, one transaction each, and records what it applied. There is no
+  `down`, and a schema change here is a forward file.
 - **Per-domain databases.** ADR 0001 says one store.
-- **Seeded rows in Postgres.** `make seed` refuses; the dataset runs in process
-  via `make seed-print`.
+- **Risk signals in the seeded database.** The dataset builds risk by replaying
+  the risk machine's events, so the *assessment* it folds to is a real answer and
+  is seeded; the individual `RiskSignal` records are not, because the dataset
+  never had per-observation detectors to write. `packages/seed/scripts/load.mjs`
+  says so at the top rather than inventing evidence.
+- **A clearance gate over the seeded audit log.** `app.audit_log` has no
+  classification column, so the platform log's clearance decision is stored with
+  each field's own classification rather than as a column to filter on.

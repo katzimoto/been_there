@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Been There</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="brand">
+        <strong>Been There</strong>
+        <span class="tag">web client &middot; talks HTTP to the service, decides nothing</span>
+      </div>
+      <div id="personas" class="personas"></div>
+      <div class="bar-right">
+        <span id="health" class="health"></span>
+        <button id="new-persona" type="button" class="ghost">Add a person</button>
+      </div>
+    </header>
+
+    <nav id="tabs" class="tabs"></nav>
+
+    <main id="view" class="view"></main>
+
+    <section class="log">
+      <div class="log-head">
+        <h2>Request log</h2>
+        <p>
+          Every call this page made, exactly as the service answered it. A refusal
+          is a response, not an error &mdash; that is why a <code>403</code> shows the
+          reason instead of hiding it.
+        </p>
+        <button id="log-toggle" type="button" class="ghost">Hide</button>
+      </div>
+      <div id="log-body"></div>
+    </section>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

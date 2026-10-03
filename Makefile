@@ -35,8 +35,12 @@ export COMPOSE_PROJECT_NAME POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB POSTGRES
 # `AS=moderator` on the command line would be quietly ignored.
 AUDIT_AS ?= senior_moderator
 
+# One awk pass over the file, matching the target name and its `##` comment
+# separately rather than splitting on a separator: the descriptions contain `|`
+# (the `audit-log` target's role list), and a separator chosen for convenience
+# would truncate the one description that has punctuation in it.
 help: ## List every target
-	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-16s %s\n", $$1, $$2}'
+	@awk 'match($$0, /^[a-zA-Z0-9_.-]+:/) { n = RLENGTH; if (match(substr($$0, n + 1), /## /)) printf "  %-16s %s\n", substr($$0, 1, n - 1), substr($$0, n + 1 + RSTART + 2) }' $(MAKEFILE_LIST)
 
 # --- Verification. Each recipe below is the CI step it is named for. ---------
 
@@ -61,7 +65,7 @@ docs: ## Check that documentation links resolve
 research-check: ## Check the research tool still runs
 	node scripts/research/search.mjs --help > /dev/null
 
-check: workflow typecheck typecheck-tests test docs research-check stale-artifacts lockfile migrate client-test client-ios parity ## Everything CI runs, in CI order
+check: workflow typecheck typecheck-tests test docs research-check stale-artifacts lockfile migrate seed client-test client-ios parity ## Everything CI runs, in CI order
 ci: install check ## The whole CI sequence as one command
 
 lockfile: ## Assert the lockfile covers every workspace package
@@ -101,18 +105,22 @@ db-reset: ## Destroy the volume and start from an empty database
 
 # --- Setup. ----------------------------------------------------------------
 
-setup: install up migrate seed ## One command: install, start, migrate, seed
+setup: install up build migrate seed ## One command: install, start, build, migrate, seed
 
-# Not implemented, and it says so. This repository has no schema and no
-# migration runner, so there is nothing to apply; the target checks the database
-# for the truth of that and then refuses. It will not exit 0 while doing nothing.
+# Applies the SQL migrations in filename order, one transaction each, and records
+# what it applied. Idempotent: a second run is a no-op that exits 0.
 migrate: ## Apply the SQL migrations. Idempotent: a second run is a no-op
 	@node packages/database/scripts/migrate.mjs
 
-# The seed loads through the domain's own transitions rather than writing state
-# directly, so a seeded `verified` account is one the identity machine actually
-# produced. A seed that wrote the state column would make the whole point of the
-# codebase untrue in the one place a developer goes to look.
+# The seed loads through the domain's own transitions and writes with the stores,
+# rather than writing state directly, so a seeded `verified` account is one the
+# identity machine actually produced. A seed that wrote the state column would make
+# the whole point of the codebase untrue in the one place a developer goes to look.
+#
+# It is a CI step, so it must be the last thing that can still be broken quietly:
+# `make setup` runs it, and CI runs the same command against a database nothing
+# else has written to. It skips rather than upserts when the dataset is already
+# there, and refuses by name when only part of it is — see load.mjs.
 seed: ## Load the development dataset through the domain transitions
 	@node packages/seed/scripts/load.mjs
 
@@ -156,3 +164,96 @@ client-ios: ## Compile the client for the iOS simulator (needs Xcode)
 
 workflow: ## Validate the CI workflow before pushing it
 	node scripts/dev/check-workflow.mjs
+
+# --- The demo. ------------------------------------------------------------
+#
+# Two independent things, and neither is a CI step: a service left running for a
+# person to poke at, and a walk that proves the product's claims and exits
+# non-zero when one of them fails.
+
+# Port the demo service listens on. `make demo` prints it, so this is the one
+# value worth overriding.
+DEMO_PORT ?= 8787
+
+# Where the running service's pid and log live. Under the repository and
+# git-ignored, so `make demo-stop` can find the process it started and nothing
+# else can.
+DEMO_RUN ?= .demo
+
+demo: install up build migrate ## One command: deps up, migrated, seeded, serving
+	@mkdir -p "$(DEMO_RUN)"
+	@if [ -f "$(DEMO_RUN)/service.pid" ] && kill -0 "$$(cat "$(DEMO_RUN)/service.pid")" 2>/dev/null; then \
+		echo "A demo service is already running (pid $$(cat "$(DEMO_RUN)/service.pid"))."; \
+		echo "Stop it first: make demo-stop DEMO_RUN=$(DEMO_RUN)"; \
+		exit 1; \
+	fi
+	@rm -f "$(DEMO_RUN)/service.log" "$(DEMO_RUN)/service.pid"
+	@if $(MAKE) --no-print-directory seed >"$(DEMO_RUN)/seed.log" 2>&1; then \
+		grep -q '^Already loaded' "$(DEMO_RUN)/seed.log" \
+			&& echo "Dataset:  already loaded" \
+			|| echo "Dataset:  loaded through the domain transitions"; \
+	else \
+		echo "The dataset did not load, so there is nothing to serve. 'make seed' said:"; \
+		cat "$(DEMO_RUN)/seed.log"; \
+		echo; \
+		echo "To start from an empty database: make db-reset, then make demo."; \
+		exit 1; \
+	fi
+	@DEMO_PORT="$(DEMO_PORT)" nohup node scripts/demo/server.mjs > "$(DEMO_RUN)/service.log" 2>&1 & \
+	echo $$! > "$(DEMO_RUN)/service.pid"
+	@for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+		if grep -q '^READY ' "$(DEMO_RUN)/service.log" 2>/dev/null; then break; fi; \
+		if grep -qi '^The packages are not built\|^DATABASE_URL is not set' "$(DEMO_RUN)/service.log" 2>/dev/null; then break; fi; \
+		sleep 1; \
+	done
+	@if grep -q '^READY ' "$(DEMO_RUN)/service.log" 2>/dev/null; then \
+		url=$$(sed -n 's/.*"url":"\([^"]*\)".*/\1/p' "$(DEMO_RUN)/service.log" | head -1); \
+		pid=$$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$(DEMO_RUN)/service.log" | head -1); \
+		echo "Serving:  $$url (pid $$pid)"; \
+		echo "Health:   $$url/v1/health/ready"; \
+		echo "Sign-up:  $(DEMO_RUN)/service.log has a ready-to-paste curl"; \
+		echo "Log:      $(DEMO_RUN)/service.log"; \
+		echo "Stop:     make demo-stop DEMO_RUN=$(DEMO_RUN)"; \
+	else \
+		launched=$$(cat "$(DEMO_RUN)/service.pid" 2>/dev/null || echo ""); \
+		if [ -n "$$launched" ]; then kill "$$launched" 2>/dev/null || true; fi; \
+		rm -f "$(DEMO_RUN)/service.pid"; \
+		echo "The service did not start. Last lines of $(DEMO_RUN)/service.log:"; \
+		tail -20 "$(DEMO_RUN)/service.log"; \
+		if grep -q 'EADDRINUSE' "$(DEMO_RUN)/service.log" 2>/dev/null; then \
+			echo; \
+			echo "Port $(DEMO_PORT) is taken. Run: make demo DEMO_PORT=8899"; \
+		fi; \
+		exit 1; \
+	fi
+
+demo-stop: ## Stop the service `make demo` started
+	@if [ -f "$(DEMO_RUN)/service.pid" ]; then \
+		pid=$$(cat "$(DEMO_RUN)/service.pid"); \
+		kill "$$pid" 2>/dev/null || true; \
+		rm -f "$(DEMO_RUN)/service.pid"; \
+		echo "Stopped pid $$pid."; \
+	else \
+		echo "No pid file at $(DEMO_RUN)/service.pid; nothing started by make demo is running."; \
+	fi
+
+# Builds, then walks. The build is a prerequisite because the walk drives the
+# built packages, and a walk that silently loaded stale output would be a
+# demonstration of the wrong thing.
+demo-journey: build ## Drive the whole product journey over HTTP; non-zero on any failure
+	@npm run --silent demo:journey
+
+
+# --- The downloadable bundle. ----------------------------------------------
+
+# Not a CI step. A bundle is an artefact for one person on one machine, and
+# `make check` builds it every run only to delete it again. It runs the same
+# script CI would, so a green CI run means a green bundle without the wait.
+
+BUNDLE_OUT ?= dist/demo
+
+demo-bundle: ## Package the repository into a verified, runnable archive
+	node scripts/demo/bundle.mjs --out "$(BUNDLE_OUT)"
+
+demo-bundle-verify: ## Rebuild the bundle and keep the unpacked tree for inspection
+	node scripts/demo/bundle.mjs --out "$(BUNDLE_OUT)" --keep
