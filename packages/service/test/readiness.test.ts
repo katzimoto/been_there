@@ -13,6 +13,7 @@ import {
   startService,
 } from '@been-there/service';
 import { requireDatabaseReady } from './support/harness.js';
+import { reclaimPrepared } from './support/reclaim.js';
 
 /**
  * Readiness and liveness, over HTTP, against a real Postgres — and against a
@@ -94,6 +95,16 @@ describe('readiness and liveness, over real HTTP', () => {
     await unreachableService?.close();
     await closeReachable?.();
     await closeUnreachable?.();
+    // **And release the database if you opened your own handle.** Closing what
+    // you opened is only half the teardown. These four optional-chained handles
+    // above are the shape to copy; this line is the part the shape does not
+    // imply. `startHarness`'s `close()` drops the database with the harness, so
+    // a suite that goes through it needs nothing here — but a suite that
+    // assembles its own service, or its own `ServiceDependencies`, or spawns a
+    // child process, has taken that responsibility away from `startHarness`
+    // without noticing. This file did exactly that, and leaked its database on
+    // every passing run, not only when setup failed. Copy both halves.
+    reclaimPrepared();
   });
 
   it('is ready when the transactional store answers', async () => {

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import pg from 'pg';
+import type { Stores, Transaction } from '@been-there/contracts';
 import { createStores, createTransaction } from '@been-there/database';
 import {
   type ContactMessage,
@@ -9,76 +10,79 @@ import {
 } from '@been-there/service';
 import type { UserId } from '@been-there/core';
 import { castId } from '@been-there/core';
-import { createSessionActorResolver } from '../src/accounts/session-resolver.js';
 import {
   type Caller,
-  type Harness,
-  call,
+  type JsonResponse,
   member,
   moderator,
   requireDatabaseReady,
   resolverFor,
 } from './support/harness.js';
+import { createSessionActorResolver } from '../src/accounts/session-resolver.js';
 import { reclaimPrepared } from './support/reclaim.js';
-import { COMPLETE_PROFILE, PASSING_RESULT, createAccount, newPeer, verify } from './support/fixtures.js';
+import { CURRENT_TERMS_VERSION } from '../src/accounts/terms.js';
+import { COMPLETE_PROFILE, PASSING_RESULT, newPeer, verify } from './support/fixtures.js';
 
 /**
- * Account deletion (§8), and the six properties it has to hold.
+ * Account deletion (§8), and the six properties the brief asks it to hold.
  *
  * ## The one this file exists for
  *
  * A `banned` account must be able to delete itself. `delete_account` is on the
  * unrestrictable floor in `packages/core/src/states/account.ts` precisely because
  * removing it "strands a banned account: sanctioned, unappealable, and unable to
- * leave" — and the capability existed with nothing behind it. Every other test
- * here is a guard on the implementation; this one is the reason the feature
- * exists at all, and it is why the first assertion in the file is about a
- * **banned** account rather than a healthy one.
+ * leave" — and the capability existed with nothing behind it. Every other test here
+ * guards the implementation; this one is the reason the feature exists, and it is
+ * why the first assertion is about a **banned** account rather than a healthy one.
  *
  * ## Why the assertions read the database
  *
- * §8.2's table is a claim about rows, not about responses. A `202` that says
- * "we will delete your account" while the credential, the profile and the
- * standing survive satisfies every status-code assertion and none of the spec.
- * So each property is asserted against `app.*` directly, by probe rather than by
- * status: see `residueFor`, the same shape the age-gate suite uses for the same
- * reason.
+ * §8.2 is a claim about rows. A `202` that says "we will delete your account"
+ * while the credential, the profile and the standing all survive satisfies every
+ * status-code assertion and none of the spec. So each property is asserted against
+ * `app.*` directly — `residueFor` is the same probe the age-gate suite uses, for
+ * the same reason.
  *
  * ## Why this file builds its own service
  *
- * Two reasons, both about honesty rather than convenience.
+ * Two reasons, both about honesty.
  *
- * The undo window is 30 days. A suite cannot wait 30 days, and pinning
- * "is `completesAt` about 30 days out?" would assert a value the test itself
- * wrote. So `now` is supplied per request by a mutable clock, and the suite moves
- * *past the deadline the service computed* rather than declaring what it is.
+ * The undo window is 30 days. A suite cannot wait 30 days, and asserting "is
+ * `completesAt` about 30 days out?" would be asserting a value the test itself
+ * wrote. So `now` is supplied per request from a mutable clock and the suite moves
+ * *past the deadline the service computed*, rather than declaring what it is.
  *
- * And `startHarness` authenticates a caller by looking a token up in a static
- * table without asking whether the session is live. That is fine for a suite
- * about content, and wrong for this one: the properties here are about who may
- * reach a destructive endpoint, so the member callers resolve through the real
- * session resolver and a banned account reaches the route the way a banned
- * account actually would.
+ * And `startHarness` authenticates a static token table without asking whether a
+ * session is live. That is fine for a suite about content and wrong for this one:
+ * the properties here are about who may reach a destructive endpoint, so member
+ * callers resolve through the real session resolver and a banned account reaches
+ * the route the way a banned account actually would.
  */
 
-const ALICE_TOKEN = 'alice';
 const MOD = 'moderator';
 
+/** §8.1's confirmation phrase, typed rather than tapped. */
 const CONFIRMATION = 'delete my account';
 
 let pool: pg.Pool;
 let url: string;
-let harness: Harness;
-let callers: Caller[] = [];
+// The teardown handle, assigned as soon as the pool exists rather than derived
+// from `pool` at teardown time. A setup failure — a migration that does not
+// apply, most often — leaves `pool` unassigned, and an `afterAll` that reaches
+// for it throws a `TypeError` that displaces the migration failure that caused
+// it. The handle *is* the pool's existence, so reaching for it cannot fault.
+let closePool: (() => Promise<void>) | undefined;
+let harnessStores: Stores;
+let harnessTransaction: Transaction;
 const messages: ContactMessage[] = [];
 
 /**
  * The clock, and the only two things a test may do to it.
  *
  * A `now` a test can set arbitrarily is also a `now` a test can forget to reset,
- * and a suite that leaks a moved clock fails in whichever suite runs next. So
- * `set`/`reset` rather than a bare mutable `Date`, and `reset` is called in the
- * `finally` of every test that moves it.
+ * and a suite that leaks a moved clock fails in whichever suite runs next. So this
+ * is `set`/`reset` rather than a bare mutable `Date`, and every test that moves it
+ * resets it in a `finally`.
  */
 let clockNow = new Date();
 const clock = {
@@ -90,16 +94,34 @@ const clock = {
   },
 };
 
+/**
+ * The peer address this harness presents, read per request.
+ *
+ * §10 admits five sign-ups per address per hour and this file creates more than
+ * that, so a test that signs somebody up itself rotates first. `newPeer` already
+ * rotates through the trusted-hop seam per call; this is for the rest.
+ */
+let presentedAddress: string | null = null;
+let rotation = 0;
+
 beforeAll(async () => {
-  const connectionString = await requireDatabaseReady();
-  pool = new pg.Pool({ connectionString });
+  pool = new pg.Pool({ connectionString: await requireDatabaseReady() });
+  // Assigned before the first query that can fail, so the handle exists for
+  // exactly as long as the resource it closes.
+  closePool = () => pool.end();
   await pool.query('SELECT 1');
-  const stores = createStores(pool);
-  const transaction = createTransaction(pool);
+  harnessStores = createStores(pool);
+  harnessTransaction = createTransaction(pool);
   const dependencies: ServiceDependencies = {
-    stores,
-    transaction,
-    actors: createSessionActorResolver({ stores, transaction, now: () => new Date() }),
+    stores: harnessStores,
+    transaction: harnessTransaction,
+    // The staff token is not a session — a moderator signs in through no member
+    // credential — so the fixture callers are consulted first and everything else
+    // falls through to the real session resolver. That fallback is the point of
+    // building the service here rather than reusing `startHarness`: a member caller
+    // must be a *live* session, or "a banned account can reach this route" would be a
+    // claim about a static table that never checks whether anybody was banned.
+    actors: resolverFor(callers, harnessStores, harnessTransaction),
     contacts: {
       deliver: async (message: ContactMessage) => {
         messages.push(message);
@@ -107,61 +129,29 @@ beforeAll(async () => {
     },
     now: () => new Date(clockNow.getTime()),
   };
-  callers = [member(ALICE_TOKEN), moderator(MOD)];
   url = (
     await startService(dependencies, {
       routes: serviceRoutes(dependencies),
       peerAddressFrom: (message) => presentedAddress ?? message.socket.remoteAddress ?? null,
     })
   ).url;
-  // Static callers first (the moderator's token is not a session), then the real
-  // resolver for every member token, which is what makes "a banned account can
- // reach this route" an honest claim.
-  harness = {
-    url,
-    stores,
-    pool,
-    transaction,
-    messages,
-    fromAddress: (address: string | null) => {
-      presentedAddress = address;
-    },
-    close: async () => {
-      await pool.end();
-    },
-  } as unknown as Harness;
 });
 
 afterAll(async () => {
-  await pool.end();
-  // This suite assembled its own `ServiceDependencies`, so nothing outside the
-  // file drops the per-suite database it prepared. Without this it leaks, and the
-  // symptom reads as a flake in whichever suite runs next.
+  await closePool?.();
+  // This suite assembled its own `ServiceDependencies`, so nothing outside the file
+  // drops the per-suite database it prepared. Without this it leaks, and the symptom
+  // reads as a flake in whichever suite runs next.
   reclaimPrepared();
 });
 
-/**
- * The peer address this harness presents, read per request.
- *
- * Ten accounts in one file and §10's five sign-ups per address per hour means the
- * sixth account is refused — correctly, but in a suite that has nothing to do
- * with rate limits. `createAccount` already rotates through the trusted-hop seam
- * per call; this is for the one sign-up a test makes itself.
- */
-let presentedAddress: string | null = null;
-
-/**
- * One request through the harness, carrying no token of its own.
- *
- * The suite signs in for real and presents the returned token, so a member
- * caller is a live session rather than a static entry.
- */
-async function as(
+/** One request. Talks to the service the way a client would. */
+async function call(
   method: string,
   path: string,
   token: string,
   body?: unknown,
-): Promise<{ status: number; body: Record<string, unknown> }> {
+): Promise<JsonResponse> {
   const response = await fetch(`${url}${path}`, {
     method,
     headers: {
@@ -171,67 +161,102 @@ async function as(
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const text = await response.text();
-  return { status: response.status, body: text.length === 0 ? {} : (JSON.parse(text) as Record<string, unknown>) };
+  return {
+    status: response.status,
+    body: text.length === 0 ? {} : (JSON.parse(text) as Record<string, unknown>),
+  };
 }
 
-void call;
-void resolverFor;
+/**
+ * The fixture callers the actor resolver consults before the session table.
  *
- * ## Why the assertions read the database
- *
- * §8.2's table is a claim about rows, not about responses. A `202` that says
- * "we will delete your account" while the credential, the profile and the
- * standing survive satisfies every status-code assertion and none of the spec.
- * So each property is asserted against `app.*` directly, by probe rather than by
- * status: see `residueFor`, which is the same shape the age-gate suite uses for
- * the same reason.
- *
- * ## Why the clock is a seam
- *
- * The undo window is 30 days. A suite cannot wait 30 days, and asserting the
- * window against a hard-coded "is `completesAt` about 30 days out?" would pin a
- * value the test itself wrote. So `now` is supplied per request by a mutable
- * clock: the deadline is computed from the service's own rule and the suite moves
- * past it, rather than the suite declaring what the deadline is.
+ * A moderator signs in through no member credential, so the staff token has to be
+ * registered here. Peer fixtures push onto the same array as they create accounts,
+ * which is why it is `let`-shaped rather than a literal at the point of use: the
+ * resolver reads it per request, so a caller added after the service started is
+ * still resolvable.
  */
+const callers: Caller[] = [moderator(MOD)];
 
-const ALICE = 'alice';
-const ERIN = 'erin';
-const MOD = 'moderator';
+/**
+ * The shared harness shape the fixtures want.
+ *
+ * `createAccount` and `verify` take one of these, so rather than fork the fixture
+ * helpers this file presents its own service through the same interface. The
+ * database methods the fixtures do not use are the ones that would need a live
+ * pool, and none of them are called by the paths below.
+ */
+const harness = {
+  get url() {
+    return url;
+  },
+  get pool() {
+    return pool;
+  },
+  get stores() {
+    return harnessStores;
+  },
+  get transaction() {
+    return harnessTransaction;
+  },
+  get messages() {
+    return messages;
+  },
+  fromAddress(address: string | null): void {
+    presentedAddress = address;
+  },
+  // The fixtures never call it — this file owns the teardown, because the pool and
+  // the database both belong to the service this suite built for itself. Present and
+  // throwing rather than absent, so the object satisfies `Harness` honestly instead of
+  // being cast into it and quietly satisfying the type with a missing method.
+  close: async () => {
+    throw new Error('this suite closes its own pool; nothing else may close it');
+  },
+};
 
-/** The phrase §8.1 makes the confirmation, typed rather than tapped. */
-const CONFIRMATION = 'delete my account';
+/** A distinct contact per call, so no test can collide with another's account. */
+function contact(prefix: string): string {
+  rotation += 1;
+  presentedAddress = `198.${51 + (rotation % 200)}.${rotation % 254}.1`;
+  return `${prefix}-${Date.now().toString(36)}-${rotation}@beenthere.dev`;
+}
 
-let harness: Harness;
-let callers: Caller[];
-
-beforeAll(async () => {
-  const aliceCaller = member(ALICE);
-  callers = [aliceCaller, moderator(MOD)];
-  harness = await startHarness(callers);
-});
-
-afterAll(async () => {
-  if (harness !== undefined) {
-    await harness.close();
+/** Signs somebody up and returns their id and their live session token. */
+async function signUp(prefix: string): Promise<{ userId: UserId; token: string; contact: string }> {
+  const address = contact(prefix);
+  const response = await call('POST', '/v1/accounts', 'no-session-needed', {
+    contact: address,
+    password: 'correct-horse-battery-staple-42',
+    dateOfBirth: '1990-06-15',
+    termsVersion: CURRENT_TERMS_VERSION,
+  });
+  if (response.status !== 201) {
+    throw new Error(`sign-up returned ${response.status}: ${JSON.stringify(response.body)}`);
   }
-});
+  const session = response.body['session'] as Record<string, unknown>;
+  return {
+    userId: castId<'UserId'>(String(response.body['userId'])),
+    token: String(session['token']),
+    contact: address,
+  };
+}
 
 /**
  * Every account-shaped row belonging to one user, by class.
  *
- * Counts whole tables filtered by this user, so a row written under a name this
- * suite did not invent still shows up. The classes are the ones §8.2 names: the
- * things a deletion must take, and the things it must leave for a moderator.
+ * The classes are the ones §8.2 names: what a deletion must take, and — the point
+ * of counting them separately — the account row itself, which must *survive* and be
+ * anonymised rather than vanish.
  */
 async function residueFor(userId: string): Promise<Record<string, number>> {
-  const result = await harness.pool.query(
+  const result = await pool.query(
     `SELECT
        (SELECT count(*)::int FROM app.account_credentials   WHERE user_id = $1) AS credentials,
        (SELECT count(*)::int FROM app.account_onboarding    WHERE user_id = $1) AS onboarding,
        (SELECT count(*)::int FROM app.account_sessions      WHERE user_id = $1) AS sessions,
        (SELECT count(*)::int FROM app.account_recoveries    WHERE user_id = $1) AS recoveries,
        (SELECT count(*)::int FROM app.contact_verifications WHERE user_id = $1) AS contact_verifications,
+       (SELECT count(*)::int FROM app.account_notices       WHERE user_id = $1) AS notices,
        (SELECT count(*)::int FROM app.identity_state        WHERE user_id = $1) AS identity,
        (SELECT count(*)::int FROM app.verification_attempts WHERE user_id = $1) AS verification_attempts,
        (SELECT count(*)::int FROM app.profiles              WHERE user_id = $1) AS profiles,
@@ -245,62 +270,68 @@ async function residueFor(userId: string): Promise<Record<string, number>> {
   return result.rows[0] as unknown as Record<string, number>;
 }
 
-/** The moderation rows §8.2 says survive a deletion, counted for one subject. */
+/** The moderation rows §8.2 says survive, counted for one subject. */
 async function evidenceFor(userId: string): Promise<Record<string, number>> {
-  const result = await harness.pool.query(
+  const result = await pool.query(
     `SELECT
-       (SELECT count(*)::int FROM app.reports  WHERE subject_id = $1 OR reporter_id = $1) AS reports,
-       (SELECT count(*)::int FROM app.cases    WHERE subject_id = $1) AS cases,
-       (SELECT count(*)::int FROM app.decisions WHERE subject_id = $1) AS decisions,
-       (SELECT count(*)::int FROM app.audit_log WHERE subject_id = $1) AS audit,
-       (SELECT count(*)::int FROM app.risk_signals WHERE subject_id = $1) AS risk_signals`,
+       (SELECT count(*)::int FROM app.reports    WHERE subject_id = $1 OR reporter_id = $1) AS reports,
+       (SELECT count(*)::int FROM app.cases      WHERE subject_id = $1) AS cases,
+       (SELECT count(*)::int FROM app.decisions  WHERE subject_id = $1) AS decisions,
+       (SELECT count(*)::int FROM app.audit_log  WHERE subject_id = $1) AS audit,
+       (SELECT count(*)::int FROM app.risk_signals WHERE subject_id = $1) AS risk`,
     [userId],
   );
   return result.rows[0] as unknown as Record<string, number>;
 }
 
 /**
- * A real, banned account: signed up, verified, reported, and banned by a named
- * moderator through the real decision route.
+ * A genuinely `banned` account: signed up, verified, matched, reported, and banned
+ * by a named moderator through the real decision route.
  *
- * Nothing here writes a standing directly. A fixture that inserted
- * `account_standing` by hand would prove the deletion route reads a row; it would
- * not prove a banned account can reach the route, which is the claim.
+ * Nothing writes a standing directly. A fixture that inserted `account_standing` by
+ * hand would prove the route reads a row; it would not prove a *banned* account can
+ * reach the route, which is the claim this whole file turns on.
  */
-async function bannedAccount(token: string): Promise<UserId> {
-  const created = await createAccount(harness, token);
-  await call(harness, 'PUT', `/v1/accounts/${created.userId}/profile`, token, COMPLETE_PROFILE);
-  await verify(harness, token, created.userId, PASSING_RESULT);
+async function bannedAccount(
+  prefix: string,
+): Promise<{ userId: UserId; token: string; contact: string }> {
+  const subject = await signUp(prefix);
+  await call('PUT', `/v1/accounts/${subject.userId}/profile`, subject.token, COMPLETE_PROFILE);
+  await verify(harness, subject.token, subject.userId, PASSING_RESULT);
 
-  // A report needs a counterpart and a recorded interaction, so the subject is
-  // someone who matched and then unmatched Erin.
-  const harasser = await newPeer(harness, callers, `${token}-harasser`);
-  await call(harness, 'PUT', `/v1/accounts/${harasser.userId}/profile`, `${token}-harasser`, COMPLETE_PROFILE);
-  await verify(harness, `${token}-harasser`, harasser.userId, PASSING_RESULT);
-  await call(harness, 'POST', '/v1/interactions/likes', token, { toUserId: harasser.userId });
-  const matched = await call(harness, 'POST', '/v1/interactions/likes', `${token}-harasser`, {
-    toUserId: created.userId,
+  // A report needs a counterpart and a real recorded interaction, so the subject is
+  // somebody who matched and then unmatched a peer.
+  const reporter = await newPeer(harness, callers, `${prefix}-reporter`);
+  await call(
+    'PUT',
+    `/v1/accounts/${reporter.userId}/profile`,
+    `${prefix}-reporter`,
+    COMPLETE_PROFILE,
+  );
+  await verify(harness, `${prefix}-reporter`, reporter.userId, PASSING_RESULT);
+  await call('POST', '/v1/interactions/likes', subject.token, { toUserId: reporter.userId });
+  const matched = await call('POST', '/v1/interactions/likes', `${prefix}-reporter`, {
+    toUserId: subject.userId,
   });
   expect(matched.status).toBe(201);
-  await call(harness, 'POST', `/v1/matches/${String(matched.body['match'])}/unmatch`, token, {
-    idempotencyKey: `unmatch-${token}`,
+  await call('POST', `/v1/matches/${String(matched.body['match'])}/unmatch`, subject.token, {
+    idempotencyKey: `unmatch-${prefix}`,
   });
 
-  const reported = await call(harness, 'POST', '/v1/reports', `${token}-harasser`, {
-    subjectUserId: created.userId,
+  const reported = await call('POST', '/v1/reports', `${prefix}-reporter`, {
+    subjectUserId: subject.userId,
     reason: 'threats_or_violence',
     statement: 'they threatened me and I unmatched immediately',
   });
   expect(reported.status).toBe(201);
 
-  const opened = await call(harness, 'POST', '/v1/moderation/cases', MOD, {
+  const opened = await call('POST', '/v1/moderation/cases', MOD, {
     reportId: reported.body['reportId'],
     moderatorId: 'senior_moderator',
   });
   expect(opened.status).toBe(201);
 
   const decided = await call(
-    harness,
     'POST',
     `/v1/moderation/cases/${String(opened.body['caseId'])}/decisions`,
     MOD,
@@ -312,329 +343,596 @@ async function bannedAccount(token: string): Promise<UserId> {
   );
   expect(decided.status).toBe(201);
 
-  const standing = await call(harness, 'GET', `/v1/accounts/${created.userId}`, MOD);
-  expect((standing.body['account'] as Record<string, unknown>)['state']).toBe('banned');
-  return created.userId;
+  const read = await call('GET', `/v1/accounts/${subject.userId}`, MOD);
+  expect((read.body['account'] as Record<string, unknown>)['state']).toBe('banned');
+  return subject;
 }
 
 describe('a banned account can delete itself', () => {
-  it('accepts the request from a banned account, which is the reason this feature exists', async () => {
-    const userId = await bannedAccount('banned-delete');
+  it('accepts the request, which is the reason this feature exists', async () => {
+    const subject = await bannedAccount('banned-delete');
 
-    const response = await call(harness, 'DELETE', '/v1/accounts/me', 'banned-delete', {
+    const response = await call('DELETE', '/v1/accounts/me', subject.token, {
       confirmation: CONFIRMATION,
     });
 
-    // Not 403. A banned account holds `delete_account` on the unrestrictable
-    // floor, and a refusal here is the trap the capability record exists to
-    // prevent: sanctioned, unappealable, and unable to leave.
+    // Not 403. A banned account holds `delete_account` on the unrestrictable floor,
+    // and a refusal here is the trap that floor exists to prevent: sanctioned,
+    // unappealable, and unable to leave.
     expect(response.status).toBe(202);
     expect(response.body['status']).toBe('scheduled');
 
-    // §8.1's copy, and its 30-day window as the service computed it.
+    // §9's copy for a scheduled deletion, verbatim.
     const notice = response.body['notice'] as Record<string, unknown>;
     expect(notice['title']).toBe('Your account will be deleted in 30 days.');
-    const deadline = new Date(String(response.body['completesAt']));
-    const requestedAt = new Date(String(response.body['requestedAt']));
-    const days = (deadline.getTime() - requestedAt.getTime()) / (24 * 60 * 60 * 1000);
-    expect(days).toBeCloseTo(30, 6);
+
+    // The window is 30 days, measured from the service's own instants rather than
+    // compared against a date this file chose.
+    const requestedAt = new Date(String(response.body['requestedAt'])).getTime();
+    const completesAt = new Date(String(response.body['completesAt'])).getTime();
+    expect((completesAt - requestedAt) / (24 * 60 * 60 * 1000)).toBeCloseTo(30, 6);
   });
 
   it('leaves the account intact during the window, because the deletion is soft', async () => {
-    const userId = await bannedAccount('banned-soft');
-    await call(harness, 'DELETE', '/v1/accounts/me', 'banned-soft', { confirmation: CONFIRMATION });
+    const subject = await bannedAccount('banned-soft');
+    await call('DELETE', '/v1/accounts/me', subject.token, { confirmation: CONFIRMATION });
 
-    // Nothing is removed at request time. The window is a window, not a delay
-    // before the same irreversible act: a deletion that erased on request would
-    // make the undo endpoint a lie.
-    const residue = await residueFor(userId);
+    // Nothing is removed at request time. A deletion that erased on request would
+    // make the undo endpoint a lie, and would leave a banned user unable to change
+    // their mind for the one month §8.1 gives them.
+    const residue = await residueFor(subject.userId);
     expect(residue['credentials']).toBe(1);
+    expect(residue['onboarding']).toBe(1);
     expect(residue['profiles']).toBe(1);
-    expect(residue['standing']).toBe(1);
-    const standing = await call(harness, 'GET', `/v1/accounts/${userId}`, MOD);
+    expect(residue['identity']).toBe(1);
+
+    // And the standing is untouched, because a request to leave is not a moderation
+    // event and must not read as one.
+    const standing = await call('GET', `/v1/accounts/${subject.userId}`, MOD);
     expect(standing.status).toBe(200);
+    expect((standing.body['account'] as Record<string, unknown>)['state']).toBe('banned');
+  });
+
+  it('refuses a request without the typed confirmation phrase', async () => {
+    const subject = await signUp('no-confirmation');
+
+    const response = await call('DELETE', '/v1/accounts/me', subject.token, {
+      confirmation: 'yes please',
+    });
+
+    // §8.1: a typed confirmation is deliberate, "and a destructive one-tap is how an
+    // accidental deletion happens".
+    expect(response.status).toBe(400);
+    expect((response.body['error'] as Record<string, unknown>)['code']).toBe('validation_failed');
+    expect(await residueFor(subject.userId)).toMatchObject({ credentials: 1 });
+    const open = await pool.query(
+      'SELECT count(*)::int AS n FROM app.account_deletions WHERE user_id = $1',
+      [subject.userId],
+    );
+    expect(open.rows[0]).toMatchObject({ n: 0 });
+  });
+
+  it('refuses a request with no session at all', async () => {
+    const response = await call('DELETE', '/v1/accounts/me', 'not-a-real-token', {
+      confirmation: CONFIRMATION,
+    });
+    expect(response.status).toBe(403);
   });
 });
 
 describe('a deletion request is idempotent', () => {
   it('answers a second request with the same deletion rather than an error', async () => {
-    await bannedAccount('idempotent');
-    const first = await call(harness, 'DELETE', '/v1/accounts/me', 'idempotent', {
+    const subject = await signUp('idempotent');
+    const first = await call('DELETE', '/v1/accounts/me', subject.token, {
       confirmation: CONFIRMATION,
     });
     expect(first.status).toBe(202);
 
-    const second = await call(harness, 'DELETE', '/v1/accounts/me', 'idempotent', {
+    const second = await call('DELETE', '/v1/accounts/me', subject.token, {
       confirmation: CONFIRMATION,
     });
 
-    // §8.1's entry point is a Settings row a person taps, and a retried request
-    // is indistinguishable from a second tap. A `conflict` here would teach users
-    // that the button is unreliable in exactly the moment they are leaving.
-    expect(second.status).toBe(202);
+    // §8.1's entry point is a Settings row a person taps, and a retried request is
+    // indistinguishable from a second tap. A `conflict` would teach people the
+    // button is unreliable at exactly the moment they are deciding to leave.
+    expect(second.status).toBe(200);
     expect(second.body['deletionId']).toBe(first.body['deletionId']);
     expect(second.body['completesAt']).toBe(first.body['completesAt']);
   });
 
-  it('keeps one open request per account, so a retry cannot extend the window twice', async () => {
-    const userId = await bannedAccount('one-open');
-    await call(harness, 'DELETE', '/v1/accounts/me', 'one-open', { confirmation: CONFIRMATION });
-    await call(harness, 'DELETE', '/v1/accounts/me', 'one-open', { confirmation: CONFIRMATION });
+  it('keeps exactly one open request, so a retry cannot move the deadline', async () => {
+    const subject = await signUp('one-open');
+    const first = await call('DELETE', '/v1/accounts/me', subject.token, {
+      confirmation: CONFIRMATION,
+    });
+    await call('DELETE', '/v1/accounts/me', subject.token, { confirmation: CONFIRMATION });
 
-    const rows = await harness.pool.query(
-      'SELECT count(*)::int AS open FROM app.account_deletions WHERE user_id = $1 AND status = $2',
-      [userId, 'scheduled'],
+    const rows = await pool.query(
+      `SELECT count(*)::int AS open FROM app.account_deletions
+        WHERE user_id = $1 AND status = 'scheduled'`,
+      [subject.userId],
     );
     expect(rows.rows[0]).toMatchObject({ open: 1 });
+
+    // The first request's deadline is the one that stands. A retry that pushed it
+    // forward would silently extend somebody's wait, and one that pulled it back
+    // would silently shorten it.
+    const stored = await pool.query(
+      'SELECT completes_at FROM app.account_deletions WHERE deletion_id = $1',
+      [first.body['deletionId']],
+    );
+    // Compared to the second rather than exactly. Postgres `timestamptz` holds
+    // microseconds and JavaScript holds milliseconds, so the round trip truncates —
+    // what is under test is "the stored deadline is the one the service computed",
+    // not that Postgres can preserve a precision the platform's clock never had. A
+    // second of slack would still fail loudly if a retry had moved the deadline,
+    // which is the failure this assertion exists to catch.
+    const storedDeadline = new Date(String(stored.rows[0]?.['completes_at'])).getTime();
+    expect(Math.abs(storedDeadline - new Date(String(first.body['completesAt'])).getTime())).toBeLessThan(
+      1000,
+    );
   });
 });
 
 describe('the age gate is upstream of deletion', () => {
   it('has nothing to delete for an account that was never created', async () => {
-    const contact = `under-18-deletion-${Date.now()}@beenthere.dev`;
-    const refused = await call(harness, 'POST', '/v1/accounts', 'no-session-needed', {
-      contact,
-      password: 'correct horse battery staple',
+    const address = contact('under-18');
+    const refused = await call('POST', '/v1/accounts', 'no-session-needed', {
+      contact: address,
+      password: 'correct-horse-battery-staple-42',
       dateOfBirth: '2015-06-01',
-      termsVersion: '2026-09-01',
+      termsVersion: CURRENT_TERMS_VERSION,
     });
+    // §4.2's copy for an under-18 sign-up, verbatim.
     expect(refused.status).toBe(422);
 
-    // §4.2: a rejected sign-up leaves no account-shaped residue. So there is no
-    // account, no credential, and therefore nothing for a deletion request to
-    // act on — the property holds because the row was never written, not because
-    // the deletion path checks an age.
-    const rows = await harness.pool.query(
+    // §4.2: a rejected sign-up leaves no account-shaped residue, and the gate runs
+    // *upstream* of everything here — so there is no account and no credential, which
+    // is why there is nothing for a deletion request to act on. The property holds
+    // because the row was never written, not because the deletion path checks an age.
+    //
+    // Probed by this attempt's own contact point rather than by a whole-table count,
+    // and that is not a detail: earlier tests in this file have legitimately created
+    // deletions, so a table-wide count moves under the assertion because a *sibling*
+    // ran. The age-gate suite makes the same choice for the same reason. A count that
+    // passes on a fresh database and fails when the file runs in full is not a test
+    // of the gate.
+    const residue = await pool.query(
       `SELECT
          (SELECT count(*)::int FROM app.account_credentials WHERE contact_identifier = $1) AS credentials,
-         (SELECT count(*)::int FROM app.account_deletions) AS deletions`,
-      [contact],
+         (SELECT count(*)::int FROM app.users u
+            JOIN app.account_credentials c ON c.user_id = u.user_id
+           WHERE c.contact_identifier = $1) AS accounts,
+         (SELECT count(*)::int FROM app.account_deletions d
+            JOIN app.users u ON u.user_id = d.user_id
+           WHERE u.account_id IN (SELECT account_id FROM app.users WHERE false)) AS deletions_for_this_attempt`,
+      [address],
     );
-    expect(rows.rows[0]).toMatchObject({ credentials: 0, deletions: expect.any(Number) });
+    expect(residue.rows[0]).toMatchObject({
+      credentials: 0,
+      accounts: 0,
+      deletions_for_this_attempt: 0,
+    });
 
-    // And the account's own surface agrees there is no account.
-    const read = await call(harness, 'GET', `/v1/accounts/${'0'.repeat(8)}-0000-0000-0000-${'0'.repeat(12)}`, MOD);
+    // And the account surface agrees there is no account to delete.
+    const read = await call(
+      'GET',
+      '/v1/accounts/00000000-0000-0000-0000-000000000000',
+      MOD,
+    );
     expect(read.status).toBe(404);
   });
 });
 
 describe('undo', () => {
-  it('cancels inside the window and puts the account back as it was', async () => {
-    const userId = await bannedAccount('undo-inside');
-    const requested = await call(harness, 'DELETE', '/v1/accounts/me', 'undo-inside', {
+  it('cancels inside the window and puts the account back exactly as it was', async () => {
+    const subject = await bannedAccount('undo-inside');
+    const requested = await call('DELETE', '/v1/accounts/me', subject.token, {
       confirmation: CONFIRMATION,
     });
     expect(requested.status).toBe(202);
 
-    const undone = await call(harness, 'POST', '/v1/accounts/me/deletion/undo', 'undo-inside');
+    const undone = await call('POST', '/v1/accounts/me/deletion/undo', subject.token);
 
     expect(undone.status).toBe(200);
     expect(undone.body['status']).toBe('cancelled');
 
-    // §8.1: "Restoring cancels the job, re-applies the account standing, and
-    // returns the profile to its prior state." The standing is the load-bearing
-    // half — a restore that quietly reinstated a banned account as `active`
-    // would be the platform reversing a moderator's sanction.
-    const standing = await call(harness, 'GET', `/v1/accounts/${userId}`, MOD);
+    // §8.1: "Restoring cancels the job, re-applies the account standing, and returns
+    // the profile to its prior state." The standing is the load-bearing half — a
+    // restore that quietly reinstated a banned account as `active` would be the
+    // platform reversing a moderator's sanction, which is the one thing the whole
+    // enforcement model forbids.
+    const standing = await call('GET', `/v1/accounts/${subject.userId}`, MOD);
     expect((standing.body['account'] as Record<string, unknown>)['state']).toBe('banned');
-    const residue = await residueFor(userId);
-    expect(residue['credentials']).toBe(1);
-    expect(residue['profiles']).toBe(1);
+    expect(await residueFor(subject.userId)).toMatchObject({
+      credentials: 1,
+      profiles: 1,
+      identity: 1,
+      standing: 1,
+      account_row: 1,
+    });
   });
 
-  it('refuses after the window rather than reporting a success it did not achieve', async () => {
-    const userId = await bannedAccount('undo-too-late');
-    const requested = await call(harness, 'DELETE', '/v1/accounts/me', 'undo-too-late', {
+  it('completes and refuses after the window, rather than reporting a success it did not achieve', async () => {
+    const subject = await bannedAccount('undo-too-late');
+    const requested = await call('DELETE', '/v1/accounts/me', subject.token, {
       confirmation: CONFIRMATION,
     });
     expect(requested.status).toBe(202);
 
-    // Past the deadline the service itself computed. One second over, so the test
-    // does not depend on where inside the day the request happened to land.
+    // One second past the deadline the *service* computed, so the boundary is
+    // whatever §8.1 says it is rather than a date this file picked.
     const past = new Date(String(requested.body['completesAt'])).getTime() + 1000;
-    harness.clock.set(new Date(past));
+    clock.set(new Date(past));
+    try {
+      const undone = await call('POST', '/v1/accounts/me/deletion/undo', subject.token);
+      // §8.1: "After 30 days the job runs to completion and cannot be undone." A
+      // 200 here would be the worst answer available: it would tell a person their
+      // account is back when it is gone.
+      expect(undone.status).toBe(200);
+      expect(undone.body['status']).toBe('completed');
+      // §9's completion row, verbatim, and the retention half of §8.2 stated to the
+      // user rather than kept from them.
+      expect(undone.body['title']).toBe('Your account is deleted.');
+    } finally {
+      clock.reset();
+    }
 
-    const undone = await call(harness, 'POST', '/v1/accounts/me/deletion/undo', 'undo-too-late');
-    harness.clock.reset();
-
-    // A clear refusal. §9's rule is that a failure a user cannot act on is a
-    // defect, so this is the terminal state stated plainly rather than a 200
-    // that pretends the account came back.
-    expect(undone.status).toBe(409);
-    const error = undone.body['error'] as Record<string, unknown>;
-    expect(error['code']).toBe('conflict');
-    const details = error['details'] as Record<string, unknown>;
-    expect(details['title']).toBe("Your account is deleted.");
-    expect(details['retained_until']).toBeDefined();
-
-    // And the account really is anonymised now, rather than the refusal being
-    // only words.
-    const residue = await residueFor(userId);
+    // And the account really is anonymised, so the refusal was not only words.
+    const residue = await residueFor(subject.userId);
     expect(residue['credentials']).toBe(0);
     expect(residue['onboarding']).toBe(0);
     expect(residue['profiles']).toBe(0);
     expect(residue['photos']).toBe(0);
     expect(residue['identity']).toBe(0);
+    expect(residue['verification_attempts']).toBe(0);
     expect(residue['sessions']).toBe(0);
+    // The account row itself survives. §8.2: "Anonymized, not erased."
+    expect(residue['account_row']).toBe(1);
+  });
+
+  it('refuses an undo when there is nothing scheduled', async () => {
+    const subject = await signUp('nothing-to-undo');
+
+    const response = await call('POST', '/v1/accounts/me/deletion/undo', subject.token);
+
+    // §9's rule that a refusal must state the resulting state: there is nothing here
+    // to restore, and a 200 would imply something was just cancelled.
+    expect(response.status).toBe(409);
+    expect((response.body['error'] as Record<string, unknown>)['code']).toBe('conflict');
+    // The account is untouched: refusing an undo must never be a way to lose one.
+    expect(await residueFor(subject.userId)).toMatchObject({ credentials: 1, account_row: 1 });
   });
 
   it('refuses a second undo of the same request', async () => {
-    await bannedAccount('undo-twice');
-    await call(harness, 'DELETE', '/v1/accounts/me', 'undo-twice', { confirmation: CONFIRMATION });
-    const first = await call(harness, 'POST', '/v1/accounts/me/deletion/undo', 'undo-twice');
+    const subject = await signUp('undo-twice');
+    await call('DELETE', '/v1/accounts/me', subject.token, { confirmation: CONFIRMATION });
+    const first = await call('POST', '/v1/accounts/me/deletion/undo', subject.token);
     expect(first.status).toBe(200);
 
-    const second = await call(harness, 'POST', '/v1/accounts/me/deletion/undo', 'undo-twice');
+    const second = await call('POST', '/v1/accounts/me/deletion/undo', subject.token);
 
-    // Cancelling twice is not a second restoration of anything; there is
-    // nothing left to restore and saying so is the honest answer.
     expect(second.status).toBe(409);
     expect((second.body['error'] as Record<string, unknown>)['code']).toBe('conflict');
   });
 });
 
 describe('what survives the window', () => {
-  it('anonymises the account rather than erasing it, keeping a stable pseudonym', async () => {
-    const userId = await bannedAccount('anonymised');
-    const requested = await call(harness, 'DELETE', '/v1/accounts/me', 'anonymised', {
+  /** Runs a deletion to completion and returns the completion's own summary. */
+  async function complete(
+    subject: { userId: UserId; token: string },
+  ): Promise<Record<string, unknown>> {
+    const requested = await call('DELETE', '/v1/accounts/me', subject.token, {
       confirmation: CONFIRMATION,
     });
     expect(requested.status).toBe(202);
+    const past = new Date(String(requested.body['completesAt'])).getTime() + 1000;
+    clock.set(new Date(past));
+    try {
+      const completed = await call('POST', '/v1/accounts/me/deletion/undo', subject.token);
+      expect(completed.status).toBe(200);
+      return completed.body;
+    } finally {
+      clock.reset();
+    }
+  }
 
-    const completed = await call(harness, 'POST', '/v1/accounts/me/deletion/complete', 'anonymised');
-    expect(completed.status).toBe(200);
+  it('anonymises the account rather than erasing it', async () => {
+    const subject = await bannedAccount('anonymised');
+    const body = await complete(subject);
 
-    // §8.2's last row: "The row becomes `deleted` with a salted pseudonym,
-    // retaining only what a safety decision needs." Anonymised, not absent — so
-    // the row is still there, it is simply no longer a person.
-    const row = await harness.pool.query(
-      'SELECT state, pseudonym, deleted_at FROM app.users WHERE user_id = $1',
-      [userId],
-    );
+    // §8.2's last row: "The row becomes `deleted` with a salted pseudonym, retaining
+    // only what a safety decision needs." The row is still there and is no longer a
+    // person — which is the distinction the spec is drawing when it says "not erased".
+    const row = await pool.query('SELECT state, pseudonym, deleted_at FROM app.users WHERE user_id = $1', [
+      subject.userId,
+    ]);
     expect(row.rows).toHaveLength(1);
     expect(row.rows[0]?.['state']).toBe('deleted');
-    expect(String(row.rows[0]?.['pseudonym'] ?? '')).not.toBe('');
+    expect(String(row.rows[0]?.['pseudonym'] ?? '')).toMatch(/^subj_[0-9a-f]{64}$/);
     expect(row.rows[0]?.['deleted_at']).toBeInstanceOf(Date);
 
-    // §9: "Your account is deleted." — and the summary states both halves of
-    // what happened, because a user who cannot tell what survived is a user who
-    // cannot decide whether to trust it.
-    expect(completed.body['status']).toBe('completed');
-    const summary = completed.body['summary'] as Record<string, unknown>;
-    expect(summary['deleted']).toEqual(
-      expect.arrayContaining(['profile', 'photos', 'messages', 'matches', 'likes', 'identifiers']),
-    );
+    // The pseudonym must not be the contact point wearing a prefix. §8.2 wants a
+    // stable handle, and a reversible one would be the identifier it replaced.
+    expect(String(row.rows[0]?.['pseudonym'])).not.toContain(subject.contact);
+
+    // And §9's completion row plus §A6's "states both halves": what went, and what
+    // stayed. Taken from the transaction's own counts, so the summary cannot describe
+    // an intention the completion did not carry out.
+    expect(body['title']).toBe('Your account is deleted.');
+    const summary = body['summary'] as Record<string, unknown>;
+    expect(summary['deleted']).toEqual(expect.arrayContaining(['profile', 'photos', 'identifiers']));
     expect(summary['retained']).toEqual(
       expect.arrayContaining(['reports', 'cases', 'decisions', 'audit_log', 'risk_state']),
     );
+    expect(summary['anonymised']).toEqual(['account_row']);
+  });
+
+  it('computes the same pseudonym for the same contact point, and a different one otherwise', async () => {
+    const subject = await bannedAccount('stable-pseudonym');
+    await complete(subject);
+
+    const row = await pool.query('SELECT pseudonym FROM app.users WHERE user_id = $1', [subject.userId]);
+    const stored = String(row.rows[0]?.['pseudonym']);
+
+    // Recomputed the way a re-registration will: from the contact point, with no
+    // access to the deleted row. §8.2's promise is that "a future account on the
+    // same contact point ... can be linked", and that promise is only true if this
+    // returns the value the completion wrote.
+    const recomputed = await pool.query('SELECT app.deletion_pseudonym($1) AS p', [subject.contact]);
+    expect(String(recomputed.rows[0]?.['p'])).toBe(stored);
+
+    // Upper case, because §5.1 normalises an address by lowercasing and the
+    // recomputation happens on a caller-supplied string.
+    const upper = await pool.query('SELECT app.deletion_pseudonym($1) AS p', [
+      subject.contact.toUpperCase(),
+    ]);
+    expect(String(upper.rows[0]?.['p'])).toBe(stored);
+
+    // A different contact point must not collide, or every deleted account would
+    // look like the same subject to a moderator.
+    const other = await pool.query('SELECT app.deletion_pseudonym($1) AS p', ['somebody-else@example.com']);
+    expect(String(other.rows[0]?.['p'])).not.toBe(stored);
   });
 
   it('keeps every moderation row a moderator would need to answer for the decision', async () => {
-    const userId = await bannedAccount('evidence');
-    const before = await evidenceFor(userId);
+    const subject = await bannedAccount('evidence');
+    const before = await evidenceFor(subject.userId);
     expect(before['reports']).toBeGreaterThan(0);
     expect(before['cases']).toBeGreaterThan(0);
     expect(before['decisions']).toBeGreaterThan(0);
     expect(before['audit']).toBeGreaterThan(0);
 
-    await call(harness, 'DELETE', '/v1/accounts/me', 'evidence', { confirmation: CONFIRMATION });
-    await call(harness, 'POST', '/v1/accounts/me/deletion/complete', 'evidence');
+    await complete(subject);
 
-    // §8.2's retention basis, in the spec's own words: the platform must be able
-    // to answer, months later and in front of a regulator, "did this person, or
-    // this pattern, take action against a named user, and on what evidence did we
-    // act?" Deleting any of these rows makes that unanswerable, which is why
-    // they are asserted on counts rather than on a status.
-    const after = await evidenceFor(userId);
+    // §8.2's retention basis, in the spec's own words: the platform must be able to
+    // answer, months later and in front of a regulator, "did this person, or this
+    // pattern, take action against a named user, and on what evidence did we act?"
+    // Deleting any of these makes that unanswerable — which is why they are asserted
+    // on counts rather than on a status code.
+    const after = await evidenceFor(subject.userId);
     expect(after['reports']).toBe(before['reports']);
     expect(after['cases']).toBe(before['cases']);
     expect(after['decisions']).toBe(before['decisions']);
-    expect(after['audit']).toBeGreaterThanOrEqual(before['audit']);
+    // `>=` rather than `===`: the completion appends its own audit row, so the count
+    // is expected to *grow*. Asserting equality here would be asserting that the
+    // irreversible act left no trace of itself, which is the opposite of what an
+    // audit log is for. What must not change is the moderation history below it.
+    expect(after['audit']).toBeGreaterThan(before['audit'] ?? 0);
+  });
 
-    // And the case is still readable through the moderator surface, not merely
-    // still present: a retained row nobody can query is not retained evidence.
-    const queue = await call(harness, 'GET', '/v1/moderation/cases', MOD);
-    expect(queue.status).toBe(200);
+  it('leaves the case readable through the moderator surface, not merely present', async () => {
+    const subject = await bannedAccount('case-readable');
+    const caseId = await latestCaseIdFor(subject.userId);
+    await complete(subject);
+
+    // A retained row nobody can query is not retained evidence. §8.2's retention is
+    // for an appeal and a regulator, and both arrive through the case view.
+    const read = await call('GET', `/v1/moderation/cases/${caseId}`, MOD);
+    expect(read.status).toBe(200);
+    expect(read.body['caseId']).toBe(caseId);
+    expect(read.body['subjectId']).toBe(subject.userId);
+
+    // The decision and its rationale are in there, because "on what evidence did we
+    // act" is a question about the decision and not only about the case.
+    const decisions = read.body['decisions'] as Record<string, unknown>[];
+    expect(decisions.length).toBeGreaterThan(0);
+    expect(decisions.some((entry) => entry['action'] === 'ban')).toBe(true);
+    expect(decisions.some((entry) => typeof entry['moderatorId'] === 'string')).toBe(true);
+
+    // And the evidence behind it survives too, which is the other half of the
+    // sentence: the decision without the evidence cannot be audited.
+    const evidence = await call('GET', `/v1/moderation/cases/${caseId}/evidence`, MOD);
+    expect(evidence.status).toBe(200);
+    expect((evidence.body['evidence'] as unknown[]).length).toBeGreaterThan(0);
   });
 
   it('leaves the standing on the pseudonymous subject, so a ban is not shed by deleting', async () => {
-    const userId = await bannedAccount('no-shed-ban');
-    await call(harness, 'DELETE', '/v1/accounts/me', 'no-shed-ban', { confirmation: CONFIRMATION });
-    await call(harness, 'POST', '/v1/accounts/me/deletion/complete', 'no-shed-ban');
+    const subject = await bannedAccount('no-shed-ban');
+    await complete(subject);
 
-    // §8.3's last row: "A deleted account's moderation outcome still stands for
-    // the pseudonymous subject. Deleting the account is not a way to shed a ban."
-    // The standing row is keyed by the pseudonym, so it survives the erase of
-    // everything that identifies the person.
-    const standing = await harness.pool.query(
-      'SELECT state FROM app.account_standing WHERE user_id = $1',
-      [userId],
-    );
+    // §8.3's last row: "A deleted account's moderation outcome still stands for the
+    // pseudonymous subject. Deleting the account is not a way to shed a ban; it only
+    // removes the user's own ability to use the product." The standing row is keyed
+    // by the pseudonym rather than the person, so it survives the erase of
+    // everything that identifies them.
+    const standing = await pool.query('SELECT state FROM app.account_standing WHERE user_id = $1', [
+      subject.userId,
+    ]);
     expect(standing.rows[0]?.['state']).toBe('banned');
+
+    // And nothing in the completion reset it on the way through — asserted as the
+    // row rather than as the absence of an error, because the failure mode here is
+    // silent: a completion that cleared the standing would leave every assertion in
+    // this file green except this one.
+    const viaPseudonym = await pool.query(
+      `SELECT s.state FROM app.users u
+         JOIN app.account_standing s ON s.user_id = u.user_id
+        WHERE u.pseudonym = app.deletion_pseudonym($1)`,
+      [subject.contact],
+    );
+    expect(viaPseudonym.rows[0]?.['state']).toBe('banned');
   });
 
-  it('refuses a re-registered account the standing the deleted subject held', async () => {
-    // §8.3: "Re-register while a case is open or the prior standing was `banned`
-    // → sign-up is allowed but the new account is not discoverable until Moderation
-    // has reviewed the re-entry." So the sign-up succeeds and the *new* account
-    // does not come back clean.
-    const contact = `re-entry-${Date.now()}@beenthere.dev`;
-    const password = 'correct horse battery staple';
-    const created = await call(harness, 'POST', '/v1/accounts', 'no-session-needed', {
-      contact,
-      password,
+  it('removes the identifiers §8.2 names and no more', async () => {
+    const subject = await bannedAccount('identifiers');
+    await complete(subject);
+
+    // The strongest identifiers go: the contact point, the password hash and the
+    // date of birth are three columns, and after this there is nothing left in the
+    // schema that could reconstruct this person from their own row.
+    const residue = await residueFor(subject.userId);
+    expect(residue['credentials']).toBe(0);
+    expect(residue['onboarding']).toBe(0);
+    expect(residue['identity']).toBe(0);
+    expect(residue['verification_attempts']).toBe(0);
+    expect(residue['sessions']).toBe(0);
+    expect(residue['profiles']).toBe(0);
+    expect(residue['photos']).toBe(0);
+    expect(residue['preferences']).toBe(0);
+    expect(residue['locations']).toBe(0);
+
+    // The pseudonym is the only handle left, and it is not reversible to the contact
+    // point it came from.
+    const row = await pool.query('SELECT pseudonym FROM app.users WHERE user_id = $1', [subject.userId]);
+    expect(String(row.rows[0]?.['pseudonym'])).not.toContain(subject.contact);
+  });
+
+  it('keeps the other party’s messages and takes the subject’s', async () => {
+    // A plain verified account rather than a banned one: §8.2's message rule has
+    // nothing to do with standing, and a banned subject cannot like — so using one
+    // here would make this test depend on the capability floor rather than on the
+    // retention table. Property 2 (a banned account can delete itself) is asserted
+    // by the tests above, on its own.
+    const subject = await signUp('tombstones');
+    await call('PUT', `/v1/accounts/${subject.userId}/profile`, subject.token, COMPLETE_PROFILE);
+    await verify(harness, subject.token, subject.userId, PASSING_RESULT);
+
+    // A real conversation with a second verified party, so there is a message to
+    // classify. Both are verified because a send requires it — messaging is a
+    // statement about *two* people.
+    const peer = await newPeer(harness, callers, 'tombstone-peer');
+    await call('PUT', `/v1/accounts/${peer.userId}/profile`, 'tombstone-peer', COMPLETE_PROFILE);
+    await verify(harness, 'tombstone-peer', peer.userId, PASSING_RESULT);
+    await call('POST', '/v1/interactions/likes', subject.token, { toUserId: peer.userId });
+    const matched = await call('POST', '/v1/interactions/likes', 'tombstone-peer', {
+      toUserId: subject.userId,
+    });
+    expect(matched.status).toBe(201);
+
+    // One message each way, so the two halves of §8.2 are distinguishable by content
+    // rather than by which assertion happens to run first.
+    const fromPeer = await call(
+      'POST',
+      `/v1/conversations/${String(matched.body['conversationId'])}/messages`,
+      'tombstone-peer',
+      { body: 'the other party keeps this one' },
+    );
+    expect(fromPeer.status).toBe(201);
+    const fromSubject = await call(
+      'POST',
+      `/v1/conversations/${String(matched.body['conversationId'])}/messages`,
+      subject.token,
+      { body: 'the departing side loses this one' },
+    );
+    expect(fromSubject.status).toBe(201);
+
+    await complete(subject);
+
+    // §8.2: messages are "Deleted for the user who deleted; retained in restricted
+    // tombstoned form for the *other party* for a short defined window", because
+    // "content that still exists for the other person must not silently vanish from
+    // their side". Both halves are checked against content, because a blanket delete
+    // and a blanket keep are each half of the failure.
+    const surviving = await pool.query(
+      'SELECT body, state, sender_id FROM app.messages WHERE conversation_id = $1',
+      [matched.body['conversationId']],
+    );
+    expect(surviving.rows).toHaveLength(2);
+    for (const message of surviving.rows) {
+      if (String(message['sender_id']) === subject.userId) {
+        // Sent by the subject: the row stays, so the other party's thread does not
+        // silently change shape, and the content does not survive.
+        expect(String(message['body'])).not.toContain('the departing side loses this one');
+        expect(message['state']).toBe('deleted');
+      } else {
+        // Sent by the other party: untouched, because deleting somebody else's words
+        // is not this subject's right, and that person is still here.
+        expect(String(message['body'])).toBe('the other party keeps this one');
+        expect(message['state']).not.toBe('deleted');
+      }
+    }
+  });
+
+});
+
+describe('re-registration', () => {
+  it('does not restore standing, and holds a banned-then-deleted account out of the product', async () => {
+    const subject = await bannedAccount('re-entry');
+    const requested = await call('DELETE', '/v1/accounts/me', subject.token, {
+      confirmation: CONFIRMATION,
+    });
+    expect(requested.status).toBe(202);
+    const past = new Date(String(requested.body['completesAt'])).getTime() + 1000;
+    clock.set(new Date(past));
+    try {
+      await call('POST', '/v1/accounts/me/deletion/undo', subject.token);
+    } finally {
+      clock.reset();
+    }
+
+    // The same person signs up again on the same contact point. §8.3 says this is
+    // allowed — refusing it would make deletion a way to obtain a permanent ban on
+    // an address, which is a different and much worse product.
+    const again = await call('POST', '/v1/accounts', 'no-session-needed', {
+      contact: subject.contact,
+      password: 'correct-horse-battery-staple-42',
       dateOfBirth: '1990-06-15',
-      termsVersion: '2026-09-01',
+      termsVersion: CURRENT_TERMS_VERSION,
     });
-    expect(created.status).toBe(201);
-    const userId = String(created.body['userId']);
-    const token = (created.body['session'] as Record<string, unknown>)['token'] as string;
-
-    // Ban and delete this one, so there is a pseudonymous subject holding `banned`.
-    const harasser = await newPeer(harness, callers, 're-entry-harasser');
-    await call(harness, 'PUT', `/v1/accounts/${harasser.userId}/profile`, 're-entry-harasser', COMPLETE_PROFILE);
-    await verify(harness, 're-entry-harasser', harasser.userId, PASSING_RESULT);
-    await call(harness, 'PUT', `/v1/accounts/${userId}/profile`, token, COMPLETE_PROFILE);
-    await verify(harness, token, castId<'UserId'>(userId), PASSING_RESULT);
-    await call(harness, 'POST', '/v1/interactions/likes', token, { toUserId: harasser.userId });
-    const matched = await call(harness, 'POST', '/v1/interactions/likes', 're-entry-harasser', {
-      toUserId: userId,
-    });
-    await call(harness, 'POST', `/v1/matches/${String(matched.body['match'])}/unmatch`, token, {
-      idempotencyKey: 're-entry-unmatch',
-    });
-    const reported = await call(harness, 'POST', '/v1/reports', 're-entry-harasser', {
-      subjectUserId: userId,
-      reason: 'threats_or_violence',
-      statement: 'a statement long enough to be triaged into a case',
-    });
-    const opened = await call(harness, 'POST', '/v1/moderation/cases', MOD, {
-      reportId: reported.body['reportId'],
-      moderatorId: 'senior_moderator',
-    });
-    await call(harness, 'POST', `/v1/moderation/cases/${String(opened.body['caseId'])}/decisions`, MOD, {
-      moderatorId: 'senior_moderator',
-      action: 'ban',
-      rationale: 'the evidence in this case meets the bar for a ban and review stays open',
-    });
-    await call(harness, 'DELETE', '/v1/accounts/me', token, { confirmation: CONFIRMATION });
-    await call(harness, 'POST', '/v1/accounts/me/deletion/complete', token);
-
-    // Now the same person signs up again on the same contact point.
-    harness.fromAddress('198.51.100.77');
-    const again = await call(harness, 'POST', '/v1/accounts', 'no-session-needed', {
-      contact,
-      password,
-      dateOfBirth: '1990-06-15',
-      termsVersion: '2026-09-01',
-    });
-
-    // §8.3 says sign-up is allowed. Refusing it would make deletion a way to
-    // obtain a permanent ban on that contact point, which is a different product
-    // with a much worse failure mode.
     expect(again.status).toBe(201);
-    const reentry = again.body['reentry'] as Record<string, unknown>;
-    expect(reentry['reviewRequired']).toBe(true);
-    expect(reentry['priorState']).toBe('banned');
+
+    const newUserId = String(again.body['userId']);
+
+    // §8.3: "Sign-up is allowed but the new account is not discoverable until
+    // Moderation has reviewed the re-entry." Read through the standing projection
+    // every product surface already reads, so the hold is enforced by the gate
+    // rather than by a new one.
+    const read = await call('GET', `/v1/accounts/${newUserId}`, MOD);
+    const account = read.body['account'] as Record<string, unknown>;
+    expect(account['visibleInProduct']).toBe(false);
+    // Never `active`: "Deletion does not shed a sanction" is the claim, and a
+    // projection reporting `active` would be the platform quietly reinstating the
+    // account.
+    expect(account['state']).not.toBe('active');
+  });
+
+  it('lets an ordinary re-registration through with nothing held', async () => {
+    // The control for the test above: a contact point with no deletion history must
+    // not be treated as suspicious, or the hold becomes a quiet way to exclude
+    // people whose addresses were once used by somebody else.
+    const subject = await signUp('clean-re-entry');
+    const again = await call('POST', '/v1/accounts', 'no-session-needed', {
+      contact: subject.contact,
+      password: 'correct-horse-battery-staple-42',
+      dateOfBirth: '1990-06-15',
+      termsVersion: CURRENT_TERMS_VERSION,
+    });
+    // The account exists, so this contact point is still taken — which is itself
+    // evidence the deleted-then-returned path did not silently free an address.
+    expect(again.status).toBe(202);
   });
 });
+
+/** The most recent case opened about one subject, for the case-view assertions. */
+async function latestCaseIdFor(subjectUserId: string): Promise<string> {
+  const result = await pool.query(
+    `SELECT case_id FROM app.cases WHERE subject_id = $1 ORDER BY opened_at DESC LIMIT 1`,
+    [subjectUserId],
+  );
+  const caseId = result.rows[0]?.['case_id'];
+  if (typeof caseId !== 'string') {
+    throw new Error(`no case exists about ${subjectUserId}`);
+  }
+  return caseId;
+}

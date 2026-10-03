@@ -23,6 +23,26 @@ import {
   socketAddressOnly,
 } from './support/harness.js';
 import { type Created, COMPLETE_PROFILE, PASSING_RESULT, verify } from './support/fixtures.js';
+import { reclaimPrepared } from './support/reclaim.js';
+
+/**
+ * One teardown for the whole file, not one per `describe`.
+ *
+ * Both describes below share this process's single per-suite database — it is
+ * created once and prepared once — so a `reclaimPrepared()` in the first
+ * describe's `afterAll` drops it before the second describe's `beforeAll` runs,
+ * and that setup fails against a database that is no longer there. The
+ * teardown belongs after everything that uses it.
+ */
+const closers: (() => Promise<void>)[] = [];
+
+afterAll(async () => {
+  await Promise.all(closers.map((close) => close()));
+  // `startHarnessWith` assembles its own service and closes only its own
+  // listener and pool, so nothing outside this file drops the per-suite database
+  // it prepared. Reached whether or not any setup completed.
+  reclaimPrepared();
+});
 
 /**
  * The metrics the service serves, and the error taxonomy it serves them beside.
@@ -165,16 +185,18 @@ describe('the metrics the service serves', () => {
   const bob = member(BOB);
   const callers: Caller[] = [alice, bob];
   let harness: ServiceHarness;
+  // Recorded the moment the harness exists rather than read back out of the
+  // variable at teardown time: `harness` is unassigned when `startHarnessWith`
+  // throws — which is exactly where a migration failure surfaces — and reaching
+  // into it then throws a `TypeError` that displaces the real cause.
 
   beforeAll(async () => {
     harness = await startHarnessWith(callers);
+    closers.push(harness.close);
     alice.userId = (await signUp(harness, ALICE, 'metrics-alice')).userId;
     bob.userId = (await signUp(harness, BOB, 'metrics-bob')).userId;
   });
 
-  afterAll(async () => {
-    await harness.close();
-  });
 
   it('refuses the metrics body to a caller with no session', async () => {
     const anonymous = await call(harness, 'GET', '/v1/health/metrics', 'not-a-session');
@@ -280,6 +302,7 @@ describe('the error taxonomy in production', () => {
 
   beforeAll(async () => {
     healthy = await startHarnessWith(callers);
+    closers.push(healthy.close);
     const aliceAccount: Created = await signUp(healthy, ALICE, 'taxonomy-alice');
     const bobAccount: Created = await signUp(healthy, BOB, 'taxonomy-bob');
     alice.userId = aliceAccount.userId;
@@ -302,11 +325,13 @@ describe('the error taxonomy in production', () => {
         throw new StoreError('the connection went away mid-statement', { retryable: true });
       },
     });
+    closers.push(retryableFault.close);
     fatalFault = await startHarnessWith(callers, {
       appendLike: async () => {
         throw new StoreError('a constraint the service cannot satisfy', { retryable: false });
       },
     });
+    closers.push(fatalFault.close);
     // Thrown *after* the like and the match have been written inside the
     // request's transaction, so the request has something to lose.
     rollbackFault = await startHarnessWith(callers, {
@@ -314,11 +339,9 @@ describe('the error taxonomy in production', () => {
         throw new StoreError('the ledger could not be updated', { retryable: false });
       },
     });
+    closers.push(rollbackFault.close);
   });
 
-  afterAll(async () => {
-    await Promise.all([healthy.close(), retryableFault.close(), fatalFault.close(), rollbackFault.close()]);
-  });
 
   function like(harness: ServiceHarness, from: Caller, to: Caller) {
     return call(harness, 'POST', '/v1/interactions/likes', from.token, { toUserId: to.userId });

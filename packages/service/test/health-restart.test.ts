@@ -26,6 +26,7 @@ import {
   socketAddressOnly,
 } from './support/harness.js';
 import { COMPLETE_PROFILE, PASSING_RESULT, verify } from './support/fixtures.js';
+import { reclaimPrepared } from './support/reclaim.js';
 
 /**
  * What survives a restart, and what does not — proved by actually restarting.
@@ -357,6 +358,22 @@ describe('committed work across a process restart', () => {
 
   afterAll(async () => {
     await harness?.close();
+    // This suite assembles its own service and its close covers only the
+    // listener and the pool it made for itself, so nothing outside this file
+    // drops the per-suite database it prepared. Reached whether or not setup
+    // completed.
+    //
+    // The child processes below run against this same database, so this line
+    // depends on them having exited — they have, because `afterAll` runs after
+    // every test in the file and each waits on its child. What makes it safe
+    // anyway is the pid in the database name: `reclaimPrepared` drops only the
+    // names this process claimed, so it cannot reach a sibling process's
+    // database even while that one is still migrating. **If the names ever stop
+    // carrying the pid, or reclaim widens to names it did not create, this line
+    // becomes unsafe and the assumption has to be re-established before it
+    // moves.** The alternative is a certain leak on every passing run, which is
+    // the worse of the two.
+    reclaimPrepared();
   });
 
   function childCallers(): { token: string; userId: string }[] {

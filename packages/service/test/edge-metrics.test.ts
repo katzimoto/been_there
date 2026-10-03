@@ -17,6 +17,7 @@ import {
 import { healthRoutes } from '../src/routes/health.js';
 import type { RequestActor, ServiceDependencies } from '../src/ports.js';
 import { requireDatabaseReady } from './support/harness.js';
+import { reclaimPrepared } from './support/reclaim.js';
 
 /**
  * The edge-wide counter that keeps a safety refusal and an outage apart.
@@ -252,12 +253,22 @@ describe('a label set that would melt the backend', () => {
 describe('the counter, over a real server', () => {
   let pool: pg.Pool;
   let url: string;
+  // Assigned as soon as each resource exists rather than derived at teardown
+  // time: a setup failure leaves the variable it would have been read from
+  // unassigned, and the `TypeError` that follows displaces the failure that
+  // caused it.
+  let closePool: (() => Promise<void>) | undefined;
   let close: (() => Promise<void>) | undefined;
+  // This suite assembles its own service rather than going through
+  // `startHarness`, so nothing outside the file drops the per-suite database it
+  // prepared. Without this it leaks on every run, pass or fail.
+  let releaseDatabase: () => void = reclaimPrepared;
   /** The dedupe key of the row the faulting route writes before it fails. */
   let writtenKey: string;
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: await requireDatabaseReady() });
+    closePool = () => pool.end();
     await pool.query('SELECT 1');
     const stores = createStores(pool);
     const dependencies: ServiceDependencies = {
@@ -318,7 +329,11 @@ describe('the counter, over a real server', () => {
 
   afterAll(async () => {
     await close?.();
-    await pool.end();
+    await closePool?.();
+    // Reached whether or not the suite got as far as running. This file builds
+    // its own service, so nothing outside it drops the database it prepared,
+    // and it survived every previous run, pass or fail.
+    releaseDatabase?.();
   });
 
   it('counts a success as a completion', async () => {

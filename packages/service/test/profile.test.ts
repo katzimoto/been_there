@@ -89,6 +89,10 @@ const CONTENT = {
  * about what is under test. `beforeAll` is the only writer.
  */
 let harness: Harness;
+// Assigned the moment `startHarness` returns. `harness` is unassigned when it
+// throws — which is where a migration failure surfaces — and an `afterAll` that
+// reads it then raises a `TypeError` in place of the failure that caused it.
+let closeHarness: (() => Promise<void>) | undefined;
 
 describe('profile and preferences, over HTTP against real Postgres', () => {
   let alice: UserId;
@@ -96,6 +100,9 @@ describe('profile and preferences, over HTTP against real Postgres', () => {
 
   beforeAll(async () => {
     harness = await startHarness([]);
+    // Assigned before any of the sign-up steps below, so a failure in one of
+    // them still leaves a teardown that can reach the harness it created.
+    closeHarness = harness.close;
     const aliceAccount = await signUp('alice-profile', 'alice.profile');
     alice = aliceAccount.userId;
     aliceToken = aliceAccount.token;
@@ -110,7 +117,7 @@ describe('profile and preferences, over HTTP against real Postgres', () => {
   });
 
   afterAll(async () => {
-    await harness.close();
+    await closeHarness?.();
   });
 
   // ------------------------------------------------- completeness gates discovery --

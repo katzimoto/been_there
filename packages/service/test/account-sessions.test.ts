@@ -37,6 +37,12 @@ const PASSWORD = 'correct horse battery staple';
  */
 let pool: pg.Pool;
 let url: string;
+// The teardown handle, assigned as soon as the pool exists rather than derived
+// from `pool` at teardown time. A setup failure — a migration that does not
+// apply, most often — leaves `pool` unassigned, and an `afterAll` that reaches
+// for it throws a `TypeError` that displaces the migration failure that caused
+// it. The handle *is* the pool's existence, so reaching for it cannot fault.
+let closePool: (() => Promise<void>) | undefined;
 const messages: ContactMessage[] = [];
 
 /**
@@ -73,6 +79,9 @@ let harnessStores: ReturnType<typeof createStores>;
 
 beforeAll(async () => {
   pool = new pg.Pool({ connectionString: await requireDatabaseReady() });
+  // Assigned before the first query that can fail, so the handle exists for
+  // exactly as long as the resource it closes.
+  closePool = () => pool.end();
   await pool.query('SELECT 1');
   harnessStores = createStores(pool);
   harnessTransaction = createTransaction(pool);
@@ -100,7 +109,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await pool.end();
+  await closePool?.();
   // This suite builds its own `ServiceDependencies` rather than going through
   // `startHarness`, so nothing else drops the per-suite database it prepared.
   // Without this it leaked, and the symptom — `connection was terminated` in a

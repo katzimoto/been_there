@@ -21,13 +21,18 @@ import {
 
 let harness: Harness;
 const callers: Caller[] = [];
+// Assigned the moment `startHarness` returns. `harness` is unassigned when it
+// throws — which is where a migration failure surfaces — and an `afterAll` that
+// reads it then raises a `TypeError` in place of the failure that caused it.
+let closeHarness: (() => Promise<void>) | undefined;
 
 beforeAll(async () => {
   harness = await startHarness(callers);
+  closeHarness = harness.close;
 });
 
 afterAll(async () => {
-  await harness.close();
+  await closeHarness?.();
 });
 
 interface RecoveryAttempt {
