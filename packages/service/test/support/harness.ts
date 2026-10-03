@@ -14,7 +14,6 @@
  * the suite fails rather than skipping.
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IncomingMessage } from 'node:http';
