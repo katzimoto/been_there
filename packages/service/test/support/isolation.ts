@@ -109,6 +109,16 @@ export function isolatedDatabase(label = 'suite'): IsolatedDatabase {
     }
   };
 
+  const drop = async (): Promise<void> => {
+    if (dropped) {
+      return;
+    }
+    dropped = true;
+    await withAdmin(async (admin) => {
+      await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+    });
+  };
+
   return {
     database: name,
     connectionString,
@@ -124,6 +134,10 @@ export function isolatedDatabase(label = 'suite'): IsolatedDatabase {
         await admin.query(`CREATE DATABASE ${name}`);
       });
 
+      // Re-armed on every create, so a `create()` that failed and dropped on its
+      // way out does not leave the latch set for a retry's database: the flag
+      // tracks *this* incarnation, and a later `drop()` has to reach it.
+      dropped = false;
       const pool = new pg.Pool({ connectionString });
       try {
         for (const file of readdirSync(MIGRATIONS)
@@ -132,22 +146,37 @@ export function isolatedDatabase(label = 'suite'): IsolatedDatabase {
           // Verbatim, against the fresh database. The migrations qualify
           // `app.` themselves, which is why a separate database works and a
           // per-suite schema did not.
-          await pool.query(readFileSync(join(MIGRATIONS, file), 'utf8'));
+          try {
+            await pool.query(readFileSync(join(MIGRATIONS, file), 'utf8'));
+          } catch (error) {
+            // Named and re-thrown, because the raw error is routinely about
+            // something twenty statements earlier. Each migration is one
+            // transaction, so a failure rolls back everything before it — and
+            // what reaches the reader names the symptom rather than the cause.
+            // A missing `hmac` reads as a crypto problem when the statement that
+            // mattered was the extension it depended on.
+            throw new Error(
+              `${file} did not apply to the fresh database ${name}. The failure above is ` +
+                "that file's, and anything it created earlier in its own transaction has " +
+                `already been rolled back. Cause: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
         }
+      } catch (error) {
+        // The database is dropped before the error propagates. A suite whose
+        // migrations fail never reaches its own `afterAll` — the pool it would
+        // have been handed does not exist, and the handle that drops the
+        // database was never assigned — so without this the database survives
+        // the run that could not use it and it is invisible until someone runs
+        // out of connections. That is how one broken migration becomes several.
+        await drop();
+        throw error;
       } finally {
         await pool.end();
       }
       return connectionString;
     },
 
-    async drop() {
-      if (dropped) {
-        return;
-      }
-      dropped = true;
-      await withAdmin(async (admin) => {
-        await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
-      });
-    },
+    drop,
   };
 }

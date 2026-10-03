@@ -22,13 +22,13 @@ import type { IncomingMessage } from 'node:http';
 // its own pool, and the migrations are plain SQL files, so a TypeScript
 // module would buy nothing here.
 import { type IsolatedDatabase, isolatedDatabase } from './isolation.js';
-import { notePrepared, reclaimPrepared } from './reclaim.js';
+import { notePrepared } from './reclaim.js';
 import pg from 'pg';
 import { createStores, createTransaction } from '@been-there/database';
 import type { Principal, Role } from '@been-there/platform';
 import { type DomainError, type Result, type UserId, castId, domainError, ok } from '@been-there/core';
 import { type Stores, type Transaction } from '@been-there/contracts';
-import type { ContactMessage } from '@been-there/service';
+import type { ContactMessage, RunningService } from '@been-there/service';
 import {
   type ActorResolver,
   type RequestActor,
@@ -112,11 +112,14 @@ export async function prepareDatabase(): Promise<void> {
     return;
   }
   const database = currentIsolation();
-  await database.create();
-  // Claimed so an abandoned database is reclaimed at process exit. A suite that
-  // drops its own releases it, and the three suites that open their own service
-  // handle never release - which is exactly the case this covers.
+  // Claimed *before* the create, not after. `create()` throws when the
+  // migrations do not apply, and a name claimed only on the success path is a
+  // name absent from the set exactly when it matters most — the one case where
+  // the suite cannot reach its own `afterAll`, because the handle that would
+  // have dropped it was never assigned. Claiming a database that has not been
+  // created yet is harmless: every drop here is `IF EXISTS`.
   notePrepared(database.database);
+  await database.create();
   prepared = true;
 }
 
@@ -363,72 +366,89 @@ export async function startHarness(
   openHarnesses += 1;
   const connectionString = requireDatabase();
   const pool = new pg.Pool({ connectionString });
-  // Assert the connection rather than assuming it. A pool that cannot answer a
-  // query would otherwise surface as a confusing StoreError inside the first
-  // request instead of as "the database is not there".
-  await pool.query('SELECT 1');
-  const stores: Stores = createStores(pool);
-  const transaction = createTransaction(pool);
-  const messages: ContactMessage[] = [];
-  const dependencies: ServiceDependencies = {
-    stores,
-    transaction,
-    actors: resolverFor(callers, stores, transaction),
-    // Captures rather than sends, so a suite can read the verification code or
-    // reset link. It must not throw and must not reach a relay.
-    contacts: {
-      deliver: async (message: ContactMessage) => {
-        messages.push(message);
+  // Everything from here on can throw — `startService` builds the route table,
+  // so a bad route surfaces here and nowhere else — and a caller that threw has
+  // no harness to close, because the value carrying `close` is what never
+  // arrives. A pool left open and a database left behind are invisible until
+  // someone runs out of connections, so a partial start is unwound here rather
+  // than trusted to a teardown that cannot run.
+  let running: RunningService | undefined;
+  try {
+    // Assert the connection rather than assuming it. A pool that cannot answer a
+    // query would otherwise surface as a confusing StoreError inside the first
+    // request instead of as "the database is not there".
+    await pool.query('SELECT 1');
+    const stores: Stores = createStores(pool);
+    const transaction = createTransaction(pool);
+    const messages: ContactMessage[] = [];
+    const dependencies: ServiceDependencies = {
+      stores,
+      transaction,
+      actors: resolverFor(callers, stores, transaction),
+      // Captures rather than sends, so a suite can read the verification code or
+      // reset link. It must not throw and must not reach a relay.
+      contacts: {
+        deliver: async (message: ContactMessage) => {
+          messages.push(message);
+        },
       },
-    },
-    now: () => new Date(),
-  };
-  const trustedHop = options.trustedHop ?? true;
-  // The proxy seam, read per request rather than captured once, so a suite can
-  // change the presented address between calls. `null` falls through to the
-  // socket address, which is the direct-deployment path.
-  let presentedAddress: string | null = null;
-  const running = await startService(dependencies, {
-    routes: serviceRoutes(dependencies),
-    // Absent rather than returning `null` when the seam is switched off. A
-    // `peerAddressFrom` that answers null is still a hop the address came
-    // through, and the branch under test — `?? message.socket.remoteAddress` —
-    // would never run.
-    ...(trustedHop
-      ? {
-          peerAddressFrom: (message: IncomingMessage) =>
-            presentedAddress ?? message.socket.remoteAddress ?? null,
-        }
-      : {}),
-  });
-  return {
-    url: running.url,
-    stores,
-    pool,
-    transaction,
-    /** Every message the service tried to deliver, newest last. */
-    messages,
-    /**
-     * Presents every subsequent request as arriving from `address`, or refuses:
-     * a harness with no trusted hop has no seam to present one through, and a
-     * silently-ignored call would let a suite believe it was varying the address
-     * when every request was arriving from the same socket.
-     */
-    fromAddress: trustedHop
-      ? (address: string | null) => {
-          presentedAddress = address;
-        }
-      : socketAddressOnly,
-    close: async () => {
-      await running.close();
-      await pool.end();
-      // The database goes with the harness. Not doing this leaked 161 of them
-      // during development, which is invisible until someone runs out of
-      // connections or disk — and a leaked database still holds its rows, so a
-      // later run against it would quietly see old data.
-      await dropDatabase();
-    },
-  };
+      now: () => new Date(),
+    };
+    const trustedHop = options.trustedHop ?? true;
+    // The proxy seam, read per request rather than captured once, so a suite can
+    // change the presented address between calls. `null` falls through to the
+    // socket address, which is the direct-deployment path.
+    let presentedAddress: string | null = null;
+    running = await startService(dependencies, {
+      routes: serviceRoutes(dependencies),
+      // Absent rather than returning `null` when the seam is switched off. A
+      // `peerAddressFrom` that answers null is still a hop the address came
+      // through, and the branch under test — `?? message.socket.remoteAddress` —
+      // would never run.
+      ...(trustedHop
+        ? {
+            peerAddressFrom: (message: IncomingMessage) =>
+              presentedAddress ?? message.socket.remoteAddress ?? null,
+          }
+        : {}),
+    });
+    return {
+      url: running.url,
+      stores,
+      pool,
+      transaction,
+      /** Every message the service tried to deliver, newest last. */
+      messages,
+      /**
+       * Presents every subsequent request as arriving from `address`, or
+       * refuses: a harness with no trusted hop has no seam to present one
+       * through, and a silently-ignored call would let a suite believe it was
+       * varying the address when every request was arriving from the same
+       * socket.
+       */
+      fromAddress: trustedHop
+        ? (address: string | null) => {
+            presentedAddress = address;
+          }
+        : socketAddressOnly,
+      close: async () => {
+        await running.close();
+        await pool.end();
+        // The database goes with the harness. Not doing this leaked 161 of them
+        // during development, which is invisible until someone runs out of
+        // connections or disk — and a leaked database still holds its rows, so a
+        // later run against it would quietly see old data.
+        await dropDatabase();
+      },
+    };
+  } catch (error) {
+    // Unwound in reverse: the listener, then the pool, then the database, so
+    // nothing downstream of a half-built harness outlives the attempt.
+    await running?.close();
+    await pool.end();
+    await dropDatabase();
+    throw error;
+  }
 }
 
 /**

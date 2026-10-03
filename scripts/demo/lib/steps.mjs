@@ -46,27 +46,17 @@ export const STEPS = [
       say(`HTTP POST /v1/accounts (date of birth 2015) -> 422 ${JSON.stringify(at(refused.body, 'error.code'))}`);
       say(`details.reason ${JSON.stringify(detailsOf(refused)['reason'])} — the gate refuses and writes nothing`);
 
-      const alice = await signUp(
-        client,
-        { name: 'Alice', contact: CONTACTS.alice, dateOfBirth: '1990-06-15' },
-        say,
-      );
+      const alice = await signUp(client, { name: 'Alice', contact: CONTACTS.alice, dateOfBirth: '1990-06-15' }, say);
       people.alice = alice;
-
-      // The band is derived from the date of birth, not a stored constant and not
-      // something the client chose. Printing it proves only that *a* band came
-      // back, so a second sign-up with a different date of birth has to produce a
-      // different one. Cheap — one account in a throwaway database — and it turns
-      // "ageBand 33-37" from an observation into a claim.
-      const older = await signUp(
-        client,
-        { name: 'BandProbe', contact: CONTACTS.bandProbe, dateOfBirth: '1960-01-01' },
-        () => {},
-      );
+      // The band is derived from the date of birth. Printing `ageBand 33-37`
+      // proves only that a band came back, so a second date of birth has to
+      // produce a different one — one extra account in a throwaway database,
+      // which turns an observation into a claim.
+      const older = await signUp(client, { name: 'BandProbe', contact: CONTACTS.bandProbe, dateOfBirth: '1960-01-01' }, () => {});
       if (older.ageBand === alice.ageBand) {
         throw new Error(
-          `two date of births 1960-01-01 and 1990-06-15 both produced ageBand ` +
-            `${JSON.stringify(alice.ageBand)}, so the band is not derived from the date`,
+          `1990-06-15 and 1960-01-01 both produced ageBand ${JSON.stringify(alice.ageBand)}, ` +
+            'so the band is not derived from the date',
         );
       }
       say(

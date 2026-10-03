@@ -153,6 +153,26 @@ function refuseIfStopping(what) {
 // shell's code for "interrupted", so a caller piping this can tell the two
 // apart, and a cleanup that did not finish says so and names the database
 // rather than exiting with a code that looks identical either way.
+//
+// A closed stdout is a killed pipeline too, and a less obvious one: piping the
+// walk into `head` or `less` closes the pipe, the next write raises EPIPE, and
+// Node terminates the process without unwinding anything. That leaves a service
+// process running and its database behind — which is what an orphan with ppid 1
+// and a `t_journey_*` database is. Handled here for the same reason the signals
+// are: the walk's resources do not belong to whoever reads its output.
+process.stdout.on('error', (error) => {
+  if (error.code !== 'EPIPE' || teardownOnce !== undefined) {
+    return;
+  }
+  void teardown().then(
+    () => exit(0),
+    () => exit(1),
+  );
+});
+// equivalent, registered as early as the module graph allows. 130 is the
+// shell's code for "interrupted", so a caller piping this can tell the two
+// apart, and a cleanup that did not finish says so and names the database
+// rather than exiting with a code that looks identical either way.
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
     if (teardownOnce !== undefined) {
