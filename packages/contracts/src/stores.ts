@@ -691,6 +691,20 @@ export interface RiskStore {
    * `compareSignals` uses — so a replayed ledger folds to the same result as an
    * in-memory one. Taking the *oldest* N and truncating would hide the most
    * recent behaviour, which is the opposite of what a safety system should do.
+   *
+   * **Rows are returned as stored, including ones no replay can use.** A row
+   * written before migration 007 carries no author and no actor; a row whose
+   * detector this build no longer runs cannot be re-declared at all. Neither is
+   * filtered here, because a store that silently dropped them would make the
+   * evidence log disagree with itself — and a caller could not tell a short
+   * history from a hidden one. `replaySignals` in `@been-there/trust-safety`
+   * skips those rows, counts them, and reports the per-reason tally; that is
+   * where the decision belongs, because only the domain knows what a `Signal`
+   * requires.
+   *
+   * `limit` bounds rows **read**, so a window containing skipped rows yields a
+   * ledger shorter than `limit`. A caller that needs the full history has to
+   * read the skips, not infer the shortfall from the result's length.
    */
   findSignalsFor(subjectId: SubjectId, limit: number, tx: Transaction): Promise<readonly Readonly<Record<string, unknown>>[]>;
   /** Includes `generation`, so a stale write is detectable. */

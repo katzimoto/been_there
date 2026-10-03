@@ -23,7 +23,21 @@ import type { RiskState } from '@been-there/core';
  * Reliability discounts the score in the policy layer; a `low` detector can
  * still accumulate risk over time, it just cannot do it in one observation.
  */
-export type DetectorReliability = 'low' | 'medium' | 'high';
+/**
+ * Every reliability, as data and not only as a type.
+ *
+ * A closed vocabulary that exists only as a union cannot be checked at
+ * runtime, so a value read back out of storage has to be tested against
+ * something. `replay.ts` needs exactly that: a row's stored `reliability` is
+ * `text` in the database, and narrowing it to this union is the difference
+ * between skipping the row and folding a reliability nobody declared.
+ *
+ * Declared before the type so the type is derived from it, the same way
+ * `BEHAVIOUR_KINDS` produces `BehaviourKind` in `signal.ts`.
+ */
+export const RELIABILITIES = ['low', 'medium', 'high'] as const;
+
+export type DetectorReliability = (typeof RELIABILITIES)[number];
 
 /**
  * Whether a detector may move a subject on its own evidence.
@@ -41,7 +55,10 @@ export type DetectorReliability = 'low' | 'medium' | 'high';
  * `createSignal` refuses the declaration otherwise. A detector cannot hold this
  * status and quietly never fire.
  */
-export type EscalationStatus = 'corroboration_only' | 'self_escalating';
+/** As data for the same reason as `RELIABILITIES`, and derived the same way. */
+export const ESCALATION_STATUSES = ['corroboration_only', 'self_escalating'] as const;
+
+export type EscalationStatus = (typeof ESCALATION_STATUSES)[number];
 
 /**
  * How much a detector's declared weight counts for. A `low` reliability detector

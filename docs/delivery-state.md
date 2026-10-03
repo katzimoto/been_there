@@ -54,11 +54,16 @@ stuck, because it is indistinguishable from detection working.
 
 Two related gaps are known and not fixed:
 
-- **`risk_signals` cannot faithfully replay a ledger.** There is no column for a
-  signal's author or its actor, yet `corroborate` reads the actor to count a
-  mass-report campaign's *distinct reporters*. Corroboration state is therefore
-  process-local: **a restart forgets it**, which contradicts the durability
-  issue #18 asks for.
+- **`risk_signals` can replay a ledger, and says how much of it it could not
+  use.** Migration 007 added the author and actor columns, and `replaySignals`
+  rebuilds a `SignalLedger` from the log through `createSignal` — so corroboration
+  now survives a restart. A row the domain cannot accept is **skipped and
+  counted** per reason, never backfilled: a null author is reported as
+  `no_author` rather than given a reliability derived from its detector name, and
+  `SafetyRecorder.replays()` exposes the tally to the caller. A subject scored on
+  a partial history is therefore visible instead of silent. What is still
+  process-local is the observation window behind `createSafetySeam`, not the
+  ledger.
 - **`report_against` has no producer**, so the mass-report quarantine in
   `assessSignal` is unreachable from any detector. The domain logic is built and
   tested; nothing can reach it.

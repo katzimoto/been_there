@@ -8,6 +8,7 @@ export * from './pipeline.js';
 export * from './ids.js';
 export * from './time.js';
 export * from './correlation.js';
+export * from './replay.js';
 export * from './friction.js';
 export * from './review.js';
 export * from './policy.js';

@@ -4,13 +4,24 @@ import { type DetectorReliability, ESCALATION_GATE, type EscalationStatus, unaid
 /** Every `DomainError` this domain raises carries this name. */
 export const TRUST_SAFETY_DOMAIN = 'trust-safety';
 
+/**
+ * Every category, as data and not only as a type.
+ *
+ * `BEHAVIOUR_KINDS` below derives its type from an array for exactly this
+ * reason, and the categories need the same treatment: a stored `category` is
+ * `text` in `risk_signals`, so `replay.ts` has to check it against a runtime
+ * vocabulary rather than cast it into the union and hope.
+ */
+export const SIGNAL_CATEGORIES = [
+  'velocity',
+  'interaction',
+  'identity',
+  'network',
+  'report_pattern',
+] as const;
+
 /** What kind of behaviour the signal describes. Used for friction selection. */
-export type SignalCategory =
-  | 'velocity'
-  | 'interaction'
-  | 'identity'
-  | 'network'
-  | 'report_pattern';
+export type SignalCategory = (typeof SIGNAL_CATEGORIES)[number];
 
 export const BEHAVIOUR_KINDS = [
   'unmatch_then_report',

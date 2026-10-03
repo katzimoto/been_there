@@ -190,7 +190,45 @@ describe('RiskStore, against Postgres', () => {
     ]);
   });
 
-  it('keeps one subject signals out of another subject window', async () => {
+  it('round-trips a row with no author without inventing one', async () => {
+    // The shape a row written before migration 007 has. The store's job is to
+    // return what is stored: a replay decides whether the row is usable, and it
+    // can only skip-and-count a gap that is still visible here. A store that
+    // filled these columns in would make the evidence log disagree with itself,
+    // and the gap would be invisible to the very code meant to report it.
+    const subject = await newSubject();
+    await append(
+      signal(subject, { reliability: null, category: null, escalation: null }),
+    );
+
+    const [row] = await signalsOf(subject);
+
+    expect(row?.reliability).toBeNull();
+    expect(row?.category).toBeNull();
+    expect(row?.escalation).toBeNull();
+  });
+
+  it('round-trips a null actor, which is what a deleted account leaves behind', async () => {
+    // `actor_id` is `ON DELETE SET NULL`, so anonymisation produces exactly this
+    // row in a live database rather than only in a pre-migration history. The
+    // evidence survives the account; the fact that it cannot say who acted does
+    // not get papered over either.
+    const subject = await newSubject();
+    const reporter = await newSubject();
+    await append(signal(subject, { actorId: reporter, behaviour: 'report_against' }));
+
+    await raw.query('UPDATE app.risk_signals SET actor_id = NULL WHERE subject_id = $1', [
+      subject,
+    ]);
+    await raw.query('DELETE FROM app.users WHERE user_id = $1', [reporter]);
+
+    const [row] = await signalsOf(subject);
+
+    expect(row?.actorId).toBeNull();
+    expect(row?.behaviour).toBe('report_against');
+  });
+
+  it('keeps a subject signals out of another subject window', async () => {
     const mine = await newSubject();
     const theirs = await newSubject();
     const base = Date.parse('2026-03-05T00:00:00.000Z');
