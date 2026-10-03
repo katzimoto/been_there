@@ -255,25 +255,53 @@ public enum ClientGate {
 
     /// Whether onboarding is finished, and the single next thing to do.
     ///
-    /// Mirrors the server's discoverability predicate — verified AND account
-    /// visible AND profile complete AND preferences set — so "you're nearly
-    /// there" and "you are discoverable" are the same computation. Two copies of
-    /// this rule would drift, which is why the server's is the authority and this
-    /// one is a mirror that reports disagreement rather than acting on it.
+    /// ## The order is read, not restated
+    ///
+    /// This walks `OnboardingReadiness.Step.allCases` — which *is* the server's
+    /// `ONBOARDING_ORDER` as the client received it — and returns the first step
+    /// it can see is outstanding. It used to be an `if` chain that checked
+    /// identity before contact: a second, independent copy of an order that
+    /// already existed, disagreeing with it. For a fresh sign-up that chain said
+    /// `identity_verification` where the server said `contact_verification`, so a
+    /// member was sent to verify an identity before the contact the spec makes
+    /// blocking — §3 says the funnel "may never skip 1–4", and §5.2 says an
+    /// unverified contact is blocking because it is what makes recovery possible.
+    ///
+    /// ## What it deliberately does not see
+    ///
+    /// `age_gate`, `terms` and `photo_screening` have no counterpart in
+    /// `OnboardingSnapshot`, so they are skipped rather than guessed at. That is
+    /// what keeps this a *narrow* mirror rather than a wrong one: it names the
+    /// first outstanding step among the four it can see, and the server stays
+    /// free to be more specific. `OnboardingViewModel.reportsStepDisagreement`
+    /// is where that difference is reported instead of being smoothed over.
     public static func onboardingNextStep(_ snapshot: OnboardingSnapshot) -> OnboardingStep {
-        if snapshot.identity != .verified {
-            return .verifyIdentity
-        }
-        if !snapshot.contactVerified {
-            return .verifyContact
-        }
-        if !snapshot.profileComplete {
-            return .completeProfile
-        }
-        if !snapshot.preferencesSet {
-            return .setPreferences
+        for serverStep in OnboardingReadiness.Step.allCases {
+            if let outstanding = snapshot.outstandingMirror(for: serverStep) {
+                return outstanding
+            }
         }
         return .discoverable
+    }
+
+    /// The steps this mirror carries, and the phrase the client uses for each.
+    ///
+    /// The three that are absent are the ones `OnboardingSnapshot` cannot speak
+    /// to at all. Membership here is what "the mirror can see this step" means
+    /// everywhere else, so it is stated once rather than in each caller.
+    static let mirroredSteps: [OnboardingReadiness.Step: OnboardingStep] = [
+        .contactVerification: .verifyContact,
+        .identityVerification: .verifyIdentity,
+        .profile: .completeProfile,
+        .preferences: .setPreferences,
+    ]
+
+    /// The server step a mirror step stands for, or `nil` for `.discoverable`.
+    ///
+    /// The inverse of `mirroredSteps` and derived from it rather than written out
+    /// a second time, so the two directions cannot drift apart.
+    static func serverStep(for mirror: OnboardingStep) -> OnboardingReadiness.Step? {
+        mirroredSteps.first { $0.value == mirror }?.key
     }
 }
 
@@ -293,6 +321,30 @@ public struct OnboardingSnapshot: Sendable, Equatable {
         self.contactVerified = contactVerified
         self.profileComplete = profileComplete
         self.preferencesSet = preferencesSet
+    }
+}
+
+extension OnboardingSnapshot {
+    /// Whether this step is outstanding, in the client's own vocabulary.
+    ///
+    /// One switch over `ClientGate.mirroredSteps`, so "which fact decides this
+    /// step" is written once and the walk in `ClientGate` stays a walk. A step
+    /// the mirror does not carry returns `nil`, which is not the same as
+    /// "complete" — it means the mirror has no opinion, and the walk keeps
+    /// looking.
+    func outstandingMirror(for step: OnboardingReadiness.Step) -> OnboardingStep? {
+        switch step {
+        case .contactVerification:
+            return contactVerified ? nil : .verifyContact
+        case .identityVerification:
+            return identity == .verified ? nil : .verifyIdentity
+        case .profile:
+            return profileComplete ? nil : .completeProfile
+        case .preferences:
+            return preferencesSet ? nil : .setPreferences
+        case .ageGate, .terms, .photoScreening:
+            return nil
+        }
     }
 }
 

@@ -171,12 +171,16 @@ extension OnboardingViewModel {
 
     /// Whether the server's `nextStep` agrees with the client mirror.
     ///
-    /// `ClientGate.onboardingNextStep` is the narrow mirror: identity, contact,
-    /// profile, preferences. The server's list is wider — it also carries
-    /// `age_gate` and `terms` — so the two can differ legitimately. They differ
-    /// *defectively* when the mirror names a step the server does not consider
-    /// next, which means one of them is out of step with the other and the
-    /// checklist would send the member somewhere the server did not ask for.
+    /// `ClientGate.onboardingNextStep` is the narrow mirror: contact, identity,
+    /// profile, preferences — the four steps it holds a fact for. It walks
+    /// `OnboardingReadiness.Step.allCases`, which is the server's own order, so
+    /// the two cannot disagree about *which* step comes first; what is left is
+    /// only whether each side considers it outstanding. The server's list is
+    /// wider — it also carries `age_gate` and `terms` — so the two can still
+    /// differ legitimately. They differ *defectively* when the mirror names a
+    /// step the server does not consider next, which means one of them is out of
+    /// step with the other and the checklist would send the member somewhere the
+    /// server did not ask for.
     ///
     /// A mirror step the server has no equivalent for is not a disagreement: the
     /// server is strictly more specific and `age_gate`/`terms` have no mirror
@@ -194,7 +198,7 @@ extension OnboardingViewModel {
             )
         )
         guard let server = readiness.nextStep,
-              let mirror = OnboardingViewModel.serverStep(for: mirrored)
+              let mirror = ClientGate.serverStep(for: mirrored)
         else {
             // One side reached its terminal state while the other still has an
             // outstanding step.
@@ -203,18 +207,4 @@ extension OnboardingViewModel {
         return server != mirror
     }
 
-    /// `ClientGate.OnboardingStep` expressed in the server's vocabulary.
-    ///
-    /// A `CUT`-level mapping, not a rule: each case names which server step the
-    /// mirror stands for, and `nil` means "the mirror is in a state the server's
-    /// vocabulary does not name".
-    static func serverStep(for mirror: OnboardingStep) -> OnboardingReadiness.Step? {
-        switch mirror {
-        case .verifyContact: return .contactVerification
-        case .verifyIdentity: return .identityVerification
-        case .completeProfile: return .profile
-        case .setPreferences: return .preferences
-        case .discoverable: return nil
-        }
-    }
 }

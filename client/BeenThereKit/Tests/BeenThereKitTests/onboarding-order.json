@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "The onboarding step order, in the order the product asks for the steps.",
+    "Read by both sides so neither writes it down twice:",
+    "packages/service/test/onboarding-order.test.ts asserts ONBOARDING_ORDER in",
+    "packages/service/src/accounts/onboarding.ts equals this list, and",
+    "OnboardingOrderingTests asserts the Swift `OnboardingReadiness.Step` case",
+    "order equals this list. `ClientGate.onboardingNextStep` walks the Swift enum,",
+    "so if this file and the two orderings ever disagree, a test goes red rather",
+    "than a member being sent to the wrong step.",
+    "",
+    "The order is not a preference. docs/features/account-and-onboarding.md §3",
+    "lists contact verification as step 2 and blocking, identity verification as",
+    "step 6 and deferrable, and states the funnel 'may never skip 1-4'."
+  ],
+  "steps": [
+    "contact_verification",
+    "age_gate",
+    "terms",
+    "identity_verification",
+    "profile",
+    "preferences",
+    "photo_screening"
+  ]
+}

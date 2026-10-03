@@ -156,18 +156,33 @@ final class ClientGateTests: XCTestCase {
 
     // MARK: Onboarding
 
+    /// The mirror walks the server's own step order, so the earliest missing
+    /// step is the earliest in `ONBOARDING_ORDER` — contact before identity,
+    /// because §3 makes contact verification blocking and identity deferrable.
+    ///
+    /// The first case is the one that used to be wrong. It asserted
+    /// `.verifyIdentity` for a fresh sign-up, where the server says
+    /// `contact_verification`; that assertion *was* the drift, and keeping it
+    /// would have kept the client telling people to verify an identity before
+    /// the contact without which they cannot be recovered.
     func testOnboardingGivesOneNextStepAndItIsTheEarliestMissing() {
         XCTAssertEqual(
             ClientGate.onboardingNextStep(
                 .init(identity: .unverified, contactVerified: false, profileComplete: false, preferencesSet: false)
             ),
-            .verifyIdentity
+            .verifyContact
         )
         XCTAssertEqual(
             ClientGate.onboardingNextStep(
                 .init(identity: .verified, contactVerified: false, profileComplete: false, preferencesSet: false)
             ),
             .verifyContact
+        )
+        XCTAssertEqual(
+            ClientGate.onboardingNextStep(
+                .init(identity: .unverified, contactVerified: true, profileComplete: false, preferencesSet: true)
+            ),
+            .verifyIdentity
         )
         XCTAssertEqual(
             ClientGate.onboardingNextStep(
@@ -181,6 +196,64 @@ final class ClientGateTests: XCTestCase {
             ),
             .discoverable
         )
+    }
+
+    /// An identity state the user cannot act on is still outstanding.
+    ///
+    /// `outstandingSteps` treats every non-`verified` state alike because none
+    /// of them is one a user reaches discovery from, and a checklist that
+    /// called them done would be lying about the one thing it reports. The
+    /// mirror treats them alike for the same reason, and
+    /// `OnboardingViewModel.waitingState` is what distinguishes the *screen*.
+    func testEveryNonVerifiedIdentityStateIsOutstandingAndSaysVerifyIdentity() {
+        for state in IdentityState.allCases where state != .verified {
+            XCTAssertEqual(
+                ClientGate.onboardingNextStep(
+                    .init(identity: state, contactVerified: true, profileComplete: false, preferencesSet: false)
+                ),
+                .verifyIdentity,
+                "\(state.rawValue) must still be outstanding"
+            )
+        }
+    }
+
+    /// Contact outranks identity whenever both are outstanding, whatever the
+    /// identity state.
+    ///
+    /// This is the whole of the ordering rule the drift broke, stated over the
+    /// states rather than one case: §3 lists contact verification as step 2 and
+    /// blocking, identity verification as step 6 and deferrable, and says the
+    /// funnel "may never skip 1–4".
+    func testContactOutranksIdentityWheneverBothAreOutstanding() {
+        for state in IdentityState.allCases where state != .verified {
+            XCTAssertEqual(
+                ClientGate.onboardingNextStep(
+                    .init(identity: state, contactVerified: false, profileComplete: false, preferencesSet: false)
+                ),
+                .verifyContact,
+                "with \(state.rawValue) unverified and contact unconfirmed, contact is next"
+            )
+        }
+    }
+
+    /// The mirror's vocabulary is a subset of the server's, and the two are one
+    /// table read in both directions.
+    ///
+    /// `age_gate`, `terms` and `photo_screening` are absent because
+    /// `OnboardingSnapshot` holds no fact about them. If one appeared here
+    /// without a fact to decide it, the walk would be guessing.
+    func testTheMirrorCarriesOnlyTheStepsItHasAFactFor() {
+        let expected: Set<OnboardingReadiness.Step> = [
+            .contactVerification, .identityVerification, .profile, .preferences,
+        ]
+        XCTAssertEqual(Set(ClientGate.mirroredSteps.keys), expected)
+
+        // Every mapping round-trips, so `serverStep(for:)` — derived from this
+        // same table — cannot answer with a step the mirror does not name.
+        for (server, mirror) in ClientGate.mirroredSteps {
+            XCTAssertEqual(ClientGate.serverStep(for: mirror), server)
+        }
+        XCTAssertNil(ClientGate.serverStep(for: .discoverable))
     }
 
     func testAVerifiedUserWithoutPreferencesIsNotYetDiscoverable() {
