@@ -475,6 +475,9 @@ export async function startHarness(
           }
         : socketAddressOnly,
       close: async () => {
+        if (running === undefined) {
+          throw domainError('internal', 'harness.close', 'harness closed before the service started');
+        }
         await running.close();
         await pool.end();
         // The database goes with the harness. Not doing this leaked 161 of them

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { type Result, type VerificationId, castId, ok } from '@been-there/core';
 import {
+  type ProviderMode,
   type ProviderSession,
   type ProviderSessionRequest,
   type ProviderVerificationResult,
@@ -28,6 +29,11 @@ function succeeded<T, E extends { code: string }>(result: Result<T, E>): T {
  */
 class VendorNeutralAdapter implements VerificationProvider {
   readonly label = 'primary';
+  /**
+   * A test double is a stub by definition, and the port requires the mode be
+   * stated rather than defaulted — the same honesty the production stub owes.
+   */
+  readonly mode: ProviderMode = 'stub';
   readonly requests: ProviderSessionRequest[] = [];
   readonly polled: string[] = [];
   readonly released: string[] = [];

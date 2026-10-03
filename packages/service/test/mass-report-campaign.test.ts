@@ -124,7 +124,7 @@ describe('a mass-report campaign opens cases about the reporters', () => {
     const all = await queue();
 
     expect(all.map((row) => row.subjectId)).not.toContain(target);
-    const row = await harness.transaction.run((tx) => harness.stores.risk.findAssessment(target, tx));
+    const row = await harness.transaction.run((tx) => harness.stores.risk.findAssessment(castId<'SubjectId'>(String(target)), tx));
     expect(row === null ? 'normal' : row['state']).toBe('normal');
   });
 

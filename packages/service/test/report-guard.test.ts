@@ -42,6 +42,11 @@ const UNMATCH_DETECTOR = 'interaction.unmatch_by_counterparty';
 
 const CAMPAIGN_SIZE = 20;
 
+/**
+ * Honest shape of what `findAssessment` returns: the store contract is an
+ * `unknown` record, so the columns this suite reads are checked here, not
+ * everywhere it is used as a `RiskRecord`.
+ */
 interface RiskRecord {
   readonly state: string | null;
   readonly detectors: readonly string[];
@@ -248,9 +253,15 @@ describe('a report must not move the reported account', () => {
           .filter((signal) => String(signal['detector']) === REPORT_DETECTOR)
           .map((signal) => String(signal['actorId'])),
       );
+      /** `findAssessment` returns an opaque record; only trusted columns are read here. */
+      const columns = (assessment ?? {}) as Readonly<Record<string, unknown>>;
+      const state = typeof columns['state'] === 'string' ? columns['state'] : null;
+      const detectors = Array.isArray(columns['contributingDetectors'])
+        ? (columns['contributingDetectors'] as readonly string[])
+        : [];
       return {
-        state: assessment?.state ?? null,
-        detectors: assessment?.contributingDetectors ?? [],
+        state: assessment === null ? null : state,
+        detectors,
         byDetector,
         distinctReportActors: reportActors.size,
       };

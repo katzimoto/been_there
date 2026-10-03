@@ -331,7 +331,10 @@ describe('GoalStore, against Postgres', () => {
     // column exists. Without it this reconstruction is impossible — and it is the
     // *store's* guarantee rather than the domain's, since `DateCorrection` carries
     // no such field and the route drops the column on the way in.
-    const claimed = [ledger[0]?.occurredOn];
+    // `occurredOn` seeds from an optional chain and `supersededOn` is
+    // `string | null` on the row, so the walk is typed to carry both rather
+    // than narrowing by hand before the assertion has spoken.
+    const claimed: (string | null | undefined)[] = [ledger[0]?.occurredOn];
     for (const stored of ledger[0]?.corrections.slice().reverse() ?? []) {
       claimed.push(stored.supersededOn);
     }

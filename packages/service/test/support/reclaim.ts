@@ -42,7 +42,7 @@ import { fileURLToPath } from 'node:url';
  * carry the pid.
  */
 
-function readEnv(name) {
+function readEnv(name: string) {
   const fromEnv = process.env[name];
   if (fromEnv !== undefined) {
     return fromEnv;

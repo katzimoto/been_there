@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { castId } from '@been-there/core';
+import { castId, type UserId } from '@been-there/core';
 import { type Caller, type Harness, call, member, moderator, startHarness } from './support/harness.js';
 import { COMPLETE_PROFILE, PASSING_RESULT, createAccount, newPeer, verify } from './support/fixtures.js';
 
