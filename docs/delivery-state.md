@@ -66,6 +66,21 @@ Two related gaps are known and not fixed:
 
 ## What is decided but not built
 
+**Account deletion completes on the account's own next undo attempt, not on a
+clock.** `DELETE /v1/accounts/me` is a real request with a 30-day window, and
+the completion path — anonymise to a pseudonym, tombstone the subject's own
+messages, retain moderation evidence — is implemented and tested. But **no
+scheduler exists in this repository**, so an account whose owner never returns is
+never completed. The spec's "after 30 days the job runs to completion" is
+therefore not true of this build.
+
+The partial index `account_deletions_due` is in place for a real sweeper, and the
+sweeper was left unwritten deliberately rather than approximated. Two things
+someone writing it must know: `delete_account` being on
+`UNRESTRICTABLE_CAPABILITIES` is correct for *requesting* deletion and must not
+be unrestrictable for a background process completing one irreversibly; and the
+sweeper must not complete a deletion whose subject has an open case or appeal.
+
 **#48–#53, social events**, deferred to a later version by decision. The safety
 model they need is already written, because they are the first change that
 removes the match gate — see
@@ -174,6 +189,8 @@ for, and to let it be the oracle for the things a local run cannot see.
 | Whether existing event conversations stay writable after an event ends | `event-chat-safety.md` — **decided: read-only** | Was genuinely open |
 | Evidence retention period per market | `review-findings.md` | Regulatory, not technical |
 | Whether `limited` states compose or are a strict ladder | `00-overview.md` §9 | Product, currently a ladder by decision |
+| Whether identity verification is ever backed by a real vendor, and what a user is told when it is not | `verification-boundary.md` | **The provider is a stub by decision.** The score is a fixture; the machine and its 0.9 floor are real. Shipping this without saying so would be a claim the code cannot support |
+| Whether a moderator authenticates as a person or as a role | `staff-identity.md` | Today a static bearer token stands in for a human, so **no real person can reach a moderation queue in a deployment.** Everything else — evidence retention, restricted accounts, capability floors — is unreachable by anyone not holding a hardcoded string |
 
 ## Next in the delivery order
 
