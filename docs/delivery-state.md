@@ -24,7 +24,7 @@ Where each link stands:
 | Like → match | **built** | reciprocal like creates exactly one match |
 | Chat | **built** | through the communication gate; refusal is symmetric |
 | Block & report | **built** | a report after an unmatch works — evidence is retained independently |
-| Risk detection | **wired, but the metric cannot move** | routes now emit observations and `createServiceSafety` feeds the risk store — but every detector is `corroboration_only` against a `0.7` gate, so **nothing escalates a subject on its own**. `safety.detected_before_first_report` is structurally stuck, not merely unwired |
+| Risk detection | **wired, but the metric cannot move** | routes now emit observations and `createServiceSafety` feeds the risk store — but every detector is `corroboration_only` against a `0.5` gate, so **nothing escalates a subject on its own**. `safety.detected_before_first_report` is structurally stuck, not merely unwired |
 | Moderation | **built** | a decision with no named human, or by an automated actor, is refused |
 | Enforcement | **built** | restrictions cannot strip `report` or `block` |
 
@@ -34,7 +34,7 @@ around* it — onboarding, profiles, the moderator's view — not in the safety 
 ### Why the safety metric is stuck, and why that may be correct
 
 Every detector in `packages/trust-safety/src/detectors.ts` is
-`corroboration_only`, and the escalation gate is `0.7`. The arithmetic: no single
+`corroboration_only`, and the escalation gate is `0.5` (`ESCALATION_GATE`, `escalation.ts`). The arithmetic: no single
 detector carries a subject from `normal` past `elevated`. Only
 `interaction.unmatch_report` (score `0.6`, `high` reliability) can, and it
 requires `moderation.report_pairing` — which is emitted **only when
