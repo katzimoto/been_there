@@ -249,6 +249,12 @@ reference `../core`; `identity`, `communication`, `platform` import it without a
 project reference, which works because `core` is a workspace symlink — worth
 noting but not a boundary violation.
 
+> **Later, and not enforced at the time.** This finding was a grep, not a gate: the
+> layering it describes was clean and nothing re-checked it. A dating-to-moderation
+> import was then measured passing `tsc --build`, all 176 dating tests and all four
+> other checks in `make check`. `scripts/dev/check-domain-boundaries.mjs` now runs in
+> `make check` and in CI. See [`../status.md`](../status.md) §4.2.
+
 Also checked and clean: no domain reads another's storage; the only cross-domain
 data shapes are `IdentityStatusProjection` (identity, six fields, `discoverable`
 derived from the kernel predicate), `AccountStandingProjection` (dating, no
