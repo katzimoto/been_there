@@ -51,6 +51,9 @@ const MAPPING = [
   { step: 'Check documentation links', target: 'docs' },
   { step: 'Check research tool', target: 'research-check' },
   { step: 'Check for stale artefacts', target: 'stale-artifacts' },
+  // The house rule no Map/Set for static lookups is written in AGENTS.md and was
+  // enforced by nothing; a static source check is the only thing that can.
+  { step: 'Check no Map or Set is used for static lookups', target: 'no-static-map-set' },
   { step: 'Check the lockfile covers every workspace package', target: 'lockfile' },
   // The schema has to exist before the suites run, or every database test skips
   // on a missing table and the job is green for the wrong reason.

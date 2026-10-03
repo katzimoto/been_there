@@ -88,6 +88,12 @@ jobs:
       - name: Check for stale artefacts
         run: node scripts/dev/check-stale-artifacts.mjs
 
+      # The house rule that no Map or Set stands in for a Record over static keys
+      # was written down in AGENTS.md and read by nothing. A rule that is not
+      # checked is a rule the next person re-breaks without ever being told.
+      - name: Check no Map or Set is used for static lookups
+        run: node scripts/dev/check-no-static-map-set.mjs
+
       - name: Check the lockfile covers every workspace package
         run: node scripts/dev/check-workspace-lockfile.mjs
 

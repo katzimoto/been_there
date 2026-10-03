@@ -1,0 +1,33 @@
+{
+  "note": "Occurrences that predate scripts/dev/check-no-static-map-set.mjs. Each is a real violation of the AGENTS.md house rule: a Map or Set whose keys are all written down in the source, used only through has/get, never mutated, and never read for .size. They are listed rather than converted because the conversion is a diff in code this check does not own, and the human decides. A baselined entry is reported by the check and does not fail it; an entry that stops matching a real finding does fail, because this list is only allowed to shrink. Delete an entry once the Record has replaced the Map.",
+  "entries": [
+    {
+      "key": "scripts/demo/bundle.mjs#EXCLUDED_DIRECTORIES",
+      "reason": "Directory-name to reason table, read only through .has() and .get() in exclusionReason and in the archive walk. Converts to Record<string, string> with no behaviour change; left for the author of the bundler."
+    },
+    {
+      "key": "scripts/demo/bundle.mjs#EXCLUDED_FILES",
+      "reason": "Basename to reason table, read only through .has() and .get(). One entry, so the Map is pure ceremony. Converts to Record<string, string>; left for the author of the bundler."
+    },
+    {
+      "key": "scripts/demo/bundle.mjs#EXCLUDED_PATHS",
+      "reason": "Root-relative path to reason table, read only through .has() and .get(). Converts to Record<string, string>; left for the author of the bundler."
+    },
+    {
+      "key": "scripts/demo/bundle.mjs#RENAMES",
+      "reason": "Repository path to archive path table, read through .get(). Converts to Record<string, string>; the order of the single entry is not relied on anywhere. Left for the author of the bundler."
+    },
+    {
+      "key": "scripts/dev/check-stale-artifacts.mjs#SKIP_DIRS",
+      "reason": "Directory-name membership set, read only through .has(). Converts to Record<string, true> keyed by name; left for the author of the stale-artefact check."
+    },
+    {
+      "key": "scripts/dev/check-stale-artifacts.mjs#COMPILED_EXTENSIONS",
+      "reason": "File-extension membership set, read only through .has(). Converts to Record<string, true>; left for the author of the stale-artefact check."
+    },
+    {
+      "key": "web/server.mjs#HOP_BY_HOP",
+      "reason": "HTTP hop-by-hop header membership set, read only through .has(). The correct Record form for the same file is the CONTENT_TYPES literal fifteen lines below it. Converts to Record<string, true>; left for the author of the demo web server."
+    }
+  ]
+}

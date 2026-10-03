@@ -73,7 +73,7 @@ docs: ## Check that documentation links resolve
 research-check: ## Check the research tool still runs
 	node scripts/research/search.mjs --help > /dev/null
 
-check: workflow typecheck typecheck-tests test docs research-check stale-artifacts lockfile migrate seed client-test client-ios parity ## Everything CI runs, in CI order
+check: workflow typecheck typecheck-tests test docs research-check stale-artifacts no-static-map-set lockfile migrate seed client-test client-ios parity ## Everything CI runs, in CI order
 ci: install check ## The whole CI sequence as one command
 
 lockfile: ## Assert the lockfile covers every workspace package
@@ -81,6 +81,9 @@ lockfile: ## Assert the lockfile covers every workspace package
 
 stale-artifacts: ## Assert no compiled output sits beside the source it was built from
 	node scripts/dev/check-stale-artifacts.mjs
+
+no-static-map-set: ## Assert no Map or Set stands in for a Record over static keys
+	node scripts/dev/check-no-static-map-set.mjs
 
 parity: ## Assert the local targets above run exactly what CI runs
 	node scripts/dev/check-ci-parity.mjs
