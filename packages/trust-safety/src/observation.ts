@@ -129,6 +129,7 @@ export type ReducibleEventType =
   | 'communication.message_sent'
   | 'identity.status_changed'
   | 'moderation.report_pairing'
+  | 'moderation.report_submitted'
   | 'verification.attempt.started';
 
 /**
@@ -189,6 +190,14 @@ export const OBSERVATION_REDUCTION: Readonly<Record<ReducibleEventType, Reductio
     entity: 'payload:verificationId',
     relevance:
       'A verification attempt, as an opaque id. The attempt is the only part of Identity a detector may see: the capture, the document and the reason never cross.',
+  },
+  'moderation.report_submitted': {
+    kind: 'moderation.report_submitted',
+    actor: 'payload:reporterId',
+    subject: 'payload:reportedUserId',
+    entity: 'payload:reportId',
+    relevance:
+      'That a report was filed, and by whom. The only reduction carrying a reporter distinct from the account reported, and it exists for one detector: recognising a mass-reporting campaign means counting *distinct reporters*, which is impossible from a fact naming only the victim. It names the reporter because this fact can never implicate the account reported — `assessSignal` discards every `report_against` signal, so the worst this row can produce is a case about the reporters. An anonymous report carries no reporter, so it reduces to nothing a campaign count can use.',
   },
   'moderation.report_pairing': {
     kind: 'moderation.report_pairing',

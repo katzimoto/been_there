@@ -63,6 +63,17 @@ const EVIDENCE: Readonly<Record<string, readonly Observation[]>> = {
   'dating.profile_churn': repeats(10, () => observation('profile.state_changed')),
   'interaction.unmatch_by_counterparty': [unmatched('u-9', 'match-1')],
   'identity.reuse': [attempt(at(0, 5)), stateChange(at(0, 1))],
+  // A report filed against the account under evaluation. The reporter is a
+  // different account: `createSignal` refuses `report_against` when the actor
+  // and the subject are the same, so evidence that cannot produce a legal signal
+  // is not evidence this detector can be driven with.
+  'report.pattern.coordinated_target': [
+    observation('moderation.report_submitted', {
+      actorId: subject('u-9'),
+      subjectId: subject('u-1'),
+      entityId: 'report-1',
+    }),
+  ],
 };
 
 describe('velocity detectors', () => {
@@ -221,7 +232,15 @@ describe('what the catalogue declares about escalating', () => {
           detector: name,
           current,
           next: current,
-          reason: 'corroboration_required',
+          // Two different refusals, and the difference is the point. A
+          // `corroboration_only` detector is scored and then declined for lack of
+          // a second detector. A `report_against` signal is never scored at all:
+          // `assessSignal` returns before any arithmetic, because a report is an
+          // accusation and the account reported keeps whatever risk state it
+          // had. Both leave the state exactly where it was found.
+          reason: name === 'report.pattern.coordinated_target'
+            ? 'report_not_risk_bearing'
+            : 'corroboration_required',
         });
       }
     }

@@ -16,3 +16,4 @@ export * from './observability.js';
 export * from './integration.js';
 export * from './telemetry.js';
 export * from './safety-metric.js';
+export * from './deletion.js';

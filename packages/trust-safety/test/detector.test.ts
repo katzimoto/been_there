@@ -22,6 +22,7 @@ const unmatchThenReport: Detector = {
   reliability: 'high',
   category: 'interaction',
   escalation: 'corroboration_only',
+  dependsOnReports: true,
   detect: (input, context) =>
     context.observations
       .filter((entry) => entry.kind === 'unmatch.performed' && entry.actorId === input.subjectId)

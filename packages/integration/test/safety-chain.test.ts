@@ -155,6 +155,7 @@ function signalFrom(detector: string, weight = 0.8) {
         // No behavioural detector may escalate a subject on its own, at any
         // weight or repetition count. See docs/architecture/detector-escalation-policy.md.
         escalation: 'corroboration_only',
+        dependsOnReports: true,
       },
     ),
   );

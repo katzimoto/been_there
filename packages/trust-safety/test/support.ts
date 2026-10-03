@@ -35,6 +35,10 @@ export const DEFAULT_AUTHOR: SignalAuthor = {
   reliability: 'high',
   category: 'interaction',
   escalation: 'corroboration_only',
+  // The default author is a report-derived detector, which is the only kind in
+  // the catalogue that can reach `high`; tests about the metric's
+  // unreachability depend on that being the declared default here.
+  dependsOnReports: true,
 };
 
 export interface SignalOverrides extends Partial<SignalInput> {
@@ -42,6 +46,7 @@ export interface SignalOverrides extends Partial<SignalInput> {
   readonly reliability?: DetectorReliability;
   readonly category?: SignalCategory;
   readonly escalation?: EscalationStatus;
+  readonly dependsOnReports?: boolean;
 }
 
 /**
@@ -57,12 +62,13 @@ export function selfEscalating(overrides: SignalOverrides = {}): Signal {
 
 /** A well-formed signal; tests override exactly the field under examination. */
 export function makeSignal(overrides: SignalOverrides = {}): Signal {
-  const { detector, reliability, category, escalation, ...input } = overrides;
+  const { detector, reliability, category, escalation, dependsOnReports, ...input } = overrides;
   const author: SignalAuthor = {
     detector: detector ?? DEFAULT_AUTHOR.detector,
     reliability: reliability ?? DEFAULT_AUTHOR.reliability,
     category: category ?? DEFAULT_AUTHOR.category,
     escalation: escalation ?? DEFAULT_AUTHOR.escalation,
+    dependsOnReports: dependsOnReports ?? DEFAULT_AUTHOR.dependsOnReports,
   };
   const subjectId = input.subjectId ?? subject('s-1');
   return succeeded(

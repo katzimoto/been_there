@@ -10,6 +10,7 @@ import {
   type UserId,
   castId,
 } from '@been-there/core';
+import { accountMachine, capabilitiesFor } from '@been-there/core';
 import {
   type AccountStandingProjection,
   type BlockRecord,
@@ -111,11 +112,15 @@ export function standing(
     state: overrides.identityState ?? 'verified',
     generation: 1,
   };
+  const capabilities = overrides.capabilities ?? ['browse_discovery', 'like', 'send_message'];
   const account: AccountStandingProjection = {
     projectionVersion: STANDING_PROJECTION_VERSION,
     state: overrides.accountState ?? 'active',
-    capabilities: overrides.capabilities ?? ['browse_discovery', 'like', 'send_message'],
+    capabilities,
+    baselineCapabilities: capabilitiesFor(accountMachine.initial),
+    removedCapabilities: capabilitiesFor(accountMachine.initial).filter((entry) => !capabilities.includes(entry)),
     visibleInProduct: overrides.visibleInProduct ?? overrides.accountState !== 'banned',
+    caseId: null,
   };
   return {
     userId: user,

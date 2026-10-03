@@ -405,6 +405,16 @@ async function foldSignal(
           facts: { ...signal.facts },
           weight: signal.weight,
           occurredAt: signal.occurredAt,
+          // The signal's author and performer, so the log can be folded back
+          // into a ledger after a restart (migration 007). Without these the row
+          // is not a `Signal`: `corroborate` reads the actor to count a
+          // campaign's *distinct reporters*, and the policy layer reads the
+          // declaration to score it. A column nobody writes is the same false
+          // claim as a detector nobody can fire.
+          actorId: String(signal.actorId),
+          reliability: signal.reliability,
+          category: signal.category,
+          escalation: signal.escalation,
         },
         tx,
       );

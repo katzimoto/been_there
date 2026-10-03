@@ -40,6 +40,27 @@ export type RiskSignalInput = {
   /** 0 < weight <= 1, as the column constrains it. */
   readonly weight: number;
   readonly occurredAt: Date;
+  /**
+   * Who performed the behaviour. Differs from `subjectId` only for
+   * `report_against`, where somebody else filed the report — `signal.ts` makes
+   * every other kind self-attributed, so passing this is how a mass-report
+   * campaign becomes countable by distinct reporters rather than a row count.
+   *
+   * Optional because the column is nullable, not because it is unknown: the
+   * column exists (migration 007) so corroboration survives a restart, and a
+   * writer that omits it writes an unreplayable row.
+   */
+  readonly actorId?: string | null;
+  /**
+   * The signal's declared author. Required, because these are what the policy
+   * layer reads to decide what a signal is worth — a stored row without them is
+   * not a `Signal` and cannot be folded back into a ledger. `null` marks a row
+   * written before migration 007 rather than guessing a declaration from the
+   * detector name, which would fabricate a reliability nobody claimed.
+   */
+  readonly reliability?: string | null;
+  readonly category?: string | null;
+  readonly escalation?: string | null;
 };
 
 /** One row of the signal log, oldest-first when read in bulk. */
@@ -60,6 +81,19 @@ export type RiskSignalRow = {
    * arrival.
    */
   readonly seq: number;
+  /**
+   * Who performed the behaviour, and who authored the signal. Null for a row
+   * written before migration 007, which is what makes such a row *unreplayable*
+   * rather than merely old: `corroborate` needs the actor to count distinct
+   * reporters, and the policy layer needs the declaration to score a signal.
+   * A caller replaying a ledger must skip these rows and say how many it
+   * skipped — silently folding a partial history is how a subject ends up
+   * under-scored after a restart with nothing in the logs to explain it.
+   */
+  readonly actorId: string | null;
+  readonly reliability: string | null;
+  readonly category: string | null;
+  readonly escalation: string | null;
 };
 
 /** The current derived risk state for a subject. */
@@ -160,7 +194,8 @@ function asSequence(value: unknown, context: string): number {
 }
 
 const SIGNAL_COLUMNS =
-  'signal_id, subject_id, detector, behaviour, entity_id, facts, weight, occurred_at, seq';
+  'signal_id, subject_id, detector, behaviour, entity_id, facts, weight, occurred_at, seq, ' +
+  'actor_id, reliability, category, escalation';
 /** `seq` is assigned by the sequence on insert, so it is never bound. */
 const INSERT_COLUMNS = SIGNAL_COLUMNS.replace(', seq', '');
 
@@ -175,6 +210,10 @@ type SignalDbRow = {
   readonly weight: number;
   readonly occurred_at: unknown;
   readonly seq: unknown;
+  readonly actor_id: string | null;
+  readonly reliability: string | null;
+  readonly category: string | null;
+  readonly escalation: string | null;
 };
 
 function toSignalRow(row: SignalDbRow): RiskSignalRow {
@@ -188,6 +227,10 @@ function toSignalRow(row: SignalDbRow): RiskSignalRow {
     weight: row.weight,
     occurredAt: asDate(row.occurred_at, 'risk_signals.occurred_at'),
     seq: asSequence(row.seq, 'risk_signals.seq'),
+    actorId: row.actor_id,
+    reliability: row.reliability,
+    category: row.category,
+    escalation: row.escalation,
   };
 }
 
@@ -228,7 +271,7 @@ export class PgRiskStore implements RiskStore {
     try {
       await clientOf(tx).query(
         `INSERT INTO app.risk_signals (${INSERT_COLUMNS})
-         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12)
          ON CONFLICT (signal_id) DO NOTHING`,
         [
           signal.signalId,
@@ -239,6 +282,10 @@ export class PgRiskStore implements RiskStore {
           JSON.stringify(facts),
           signal.weight,
           signal.occurredAt,
+          signal.actorId ?? null,
+          signal.reliability ?? null,
+          signal.category ?? null,
+          signal.escalation ?? null,
         ],
       );
     } catch (error) {

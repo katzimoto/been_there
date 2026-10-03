@@ -37,6 +37,9 @@ import type {
   AnalyticsEventRow,
   ContactVerificationRow,
   CredentialRow,
+  DeletedSubjectRow,
+  DeletionOutcome,
+  DeletionRequestRow,
   NoticeRow,
   OnboardingRow,
   RateLimitBucket,
@@ -48,14 +51,17 @@ import type { UserId } from '@been-there/core';
 import {
   CREDENTIAL_COLUMNS,
   CONTACT_COLUMNS,
+  DELETION_COLUMNS,
   NOTICE_COLUMNS,
   ONBOARDING_COLUMNS,
   RECOVERY_COLUMNS,
   SESSION_COLUMNS,
   decodeAnalyticsEvent,
+  readDeletionInstant,
   readInteger,
   toContactVerificationRow,
   toCredentialRow,
+  toDeletionRow,
   toNoticeRow,
   toOnboardingRow,
   toRecoveryRow,
@@ -540,5 +546,277 @@ export class PgAccountPlatformStore implements AccountPlatformStore {
       [userId],
     );
     return found.map(toNoticeRow);
+  }
+
+  // --- Account deletion (§8) -----------------------------------------------------
+  //
+  // The request is soft and lives in one small table. The completion is where the
+  // work is, and where the design decision that matters is written down: **the
+  // users row is never deleted.** Every table in §8.2's retained column hangs off
+  // `app.users` by `ON DELETE CASCADE`, so deleting it would delete the moderation
+  // history with the person — which is the exact outcome §8.2 refuses when it says
+  // "Anonymized, not erased". The row is rewritten instead, and the retained tables
+  // keep pointing at a row that is still there.
+
+  /**
+   * Schedules a deletion, or returns the one already open.
+   *
+   * `ON CONFLICT DO NOTHING` followed by a read, rather than a read-then-write: the
+   * partial unique index `account_deletions_one_open` is what decides, so two
+   * concurrent requests cannot both insert and the loser gets the winner's row.
+   *
+   * The re-read is not a redundancy. `RETURNING` yields nothing when the insert is
+   * skipped, so without it a concurrent second request would report "no row" for an
+   * account that very much has one open — and the caller would answer a retry with
+   * a 404, which is the opposite of §8.1's idempotence.
+   */
+  async scheduleDeletion(
+    row: DeletionRequestRow,
+    tx: Transaction,
+  ): Promise<{ readonly request: DeletionRequestRow; readonly created: boolean }> {
+    const inserted = await rows(
+      'scheduleDeletion',
+      tx,
+      `INSERT INTO app.account_deletions
+         (deletion_id, user_id, status, requested_at, completes_at, cancelled_at, completed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT DO NOTHING
+       RETURNING ${DELETION_COLUMNS}`,
+      [row.deletionId, row.userId, row.status, row.requestedAt, row.completesAt, row.cancelledAt, row.completedAt],
+    );
+    if (inserted[0] !== undefined) {
+      return { request: toDeletionRow(inserted[0]), created: true };
+    }
+    const existing = await this.findOpenDeletionFor(row.userId, tx);
+    if (existing === null) {
+      // The insert lost to something and there is no open row to show for it, which
+      // means another transaction inserted and completed or cancelled between the
+      // two statements. Reported rather than papered over: the caller's next move
+      // differs depending on which, and guessing would complete a deletion on the
+      // strength of a conflict nobody can see.
+      throw new StoreError(
+        'scheduleDeletion: the insert was skipped and no open deletion exists for this account',
+        { retryable: true },
+      );
+    }
+    return { request: existing, created: false };
+  }
+
+  async findOpenDeletionFor(userId: UserId, tx: Transaction): Promise<DeletionRequestRow | null> {
+    const found = await rows(
+      'findOpenDeletionFor',
+      tx,
+      `SELECT ${DELETION_COLUMNS} FROM app.account_deletions
+        WHERE user_id = $1 AND status = 'scheduled'`,
+      [userId],
+    );
+    return found[0] === undefined ? null : toDeletionRow(found[0]);
+  }
+
+  async findDeletion(deletionId: string, tx: Transaction): Promise<DeletionRequestRow | null> {
+    const found = await rows(
+      'findDeletion',
+      tx,
+      `SELECT ${DELETION_COLUMNS} FROM app.account_deletions WHERE deletion_id = $1`,
+      [deletionId],
+    );
+    return found[0] === undefined ? null : toDeletionRow(found[0]);
+  }
+
+  async updateDeletion(row: DeletionRequestRow, tx: Transaction): Promise<boolean> {
+    return (
+      (await affected(
+        'updateDeletion',
+        tx,
+        `UPDATE app.account_deletions
+            SET status = $2, cancelled_at = $3, completed_at = $4
+          WHERE deletion_id = $1`,
+        [row.deletionId, row.status, row.cancelledAt, row.completedAt],
+      )) > 0
+    );
+  }
+
+  /**
+   * The pseudonym for a contact point, computed by the database.
+   *
+   * Delegated to `app.deletion_pseudonym()` so this and `completeDeletion` cannot
+   * produce different values for the same contact — §8.2's promise that a future
+   * account on the same contact point can be linked is a promise about *one*
+   * function, and a second implementation is how it stops being true.
+   *
+   * `null` when the salt row is missing, which is a corrupt installation rather
+   * than a normal answer: the migration seeds it, so its absence means the schema
+   * was applied without section 3.
+   */
+  async deletionPseudonym(contactIdentifier: string, tx: Transaction): Promise<string | null> {
+    const found = await rows(
+      'deletionPseudonym',
+      tx,
+      `SELECT app.deletion_pseudonym($1) AS pseudonym
+         FROM app.deletion_pseudonym_salt WHERE salt_id`,
+      [contactIdentifier],
+    );
+    const value = found[0]?.['pseudonym'];
+    return typeof value === 'string' && value.length > 0 ? value : null;
+  }
+
+  async findDeletedSubject(
+    contactIdentifier: string,
+    tx: Transaction,
+  ): Promise<DeletedSubjectRow | null> {
+    const pseudonym = await this.deletionPseudonym(contactIdentifier, tx);
+    if (pseudonym === null) {
+      return null;
+    }
+    const found = await rows(
+      'findDeletedSubject',
+      tx,
+      `SELECT u.pseudonym,
+              s.state AS prior_state,
+              u.deleted_at,
+              EXISTS (
+                SELECT 1 FROM app.cases c
+                 WHERE c.subject_id = u.user_id AND c.resolution_decision_id IS NULL
+              ) AS open_case
+         FROM app.users u
+         LEFT JOIN app.account_standing s ON s.user_id = u.user_id
+        WHERE u.pseudonym = $1 AND u.state = 'deleted'`,
+      [pseudonym],
+    );
+    const row = found[0];
+    if (row === undefined) {
+      return null;
+    }
+    return {
+      pseudonym,
+      priorState: typeof row['prior_state'] === 'string' ? (row['prior_state'] as string) : null,
+      openCase: row['open_case'] === true,
+      deletedAt: readDeletionInstant(row['deleted_at'], 'users', 'deleted_at'),
+    };
+  }
+
+  /**
+   * §8.2, statement by statement.
+   *
+   * Two halves, and the order is not arbitrary.
+   *
+   * **Removed** — every table of content about a person. Each hangs off
+   * `app.users` by `ON DELETE CASCADE`, and the users row is deliberately never
+   * deleted, so a completion that forgot one of them would leave that data behind
+   * with nothing left to find it by. Enumerating them here is what makes an omission
+   * visible in a diff rather than discovered by a user.
+   *
+   * **Retained** — reports, cases, decisions, the audit log, risk signals and the
+   * standing. Nothing in this method touches them. That is not an oversight: §8.2's
+   * basis is that the platform must be able to answer, months later and in front of
+   * a regulator, "did this person, or this pattern, take action against a named
+   * user, and on what evidence did we act?" — and the whole reason the users row
+   * survives is so these keep pointing at something.
+   *
+   * Messages are the one class that is not a plain delete. §8.2 keeps them "in
+   * restricted tombstoned form for the other party", because content that still
+   * exists for the other person must not silently vanish from their side. So a
+   * message *sent* by the subject is blanked and kept; a message the subject
+   * *received* is the other party's content and is left alone, because the subject
+   * is gone and cannot read it either way.
+   */
+  async completeDeletion(
+    userId: UserId,
+    pseudonym: string,
+    at: Date,
+    tx: Transaction,
+  ): Promise<DeletionOutcome> {
+    const deleted: Record<string, number> = {};
+    // Each statement carries its own parameters. That is not uniformity for its own
+    // sake: Postgres refuses a parameter a statement does not reference, so binding
+    // `at` to every statement fails the single-parameter ones. A shared `$1`
+    // convention would remove the mistake class, but it costs more than it saves —
+    // the two statements that need `$2` say so themselves.
+    const removals: readonly {
+      readonly name: string;
+      readonly sql: string;
+      readonly params: readonly unknown[];
+    }[] = [
+      { name: 'credentials', sql: 'DELETE FROM app.account_credentials WHERE user_id = $1', params: [userId] },
+      { name: 'onboarding', sql: 'DELETE FROM app.account_onboarding WHERE user_id = $1', params: [userId] },
+      { name: 'sessions', sql: 'DELETE FROM app.account_sessions WHERE user_id = $1', params: [userId] },
+      { name: 'recoveries', sql: 'DELETE FROM app.account_recoveries WHERE user_id = $1', params: [userId] },
+      { name: 'contact_verifications', sql: 'DELETE FROM app.contact_verifications WHERE user_id = $1', params: [userId] },
+      { name: 'notices', sql: 'DELETE FROM app.account_notices WHERE user_id = $1', params: [userId] },
+      { name: 'identity', sql: 'DELETE FROM app.identity_state WHERE user_id = $1', params: [userId] },
+      { name: 'verification_attempts', sql: 'DELETE FROM app.verification_attempts WHERE user_id = $1', params: [userId] },
+      { name: 'profile', sql: 'DELETE FROM app.profiles WHERE user_id = $1', params: [userId] },
+      { name: 'photos', sql: 'DELETE FROM app.profile_photos WHERE user_id = $1', params: [userId] },
+      { name: 'preferences', sql: 'DELETE FROM app.preferences WHERE user_id = $1', params: [userId] },
+      { name: 'locations', sql: 'DELETE FROM app.location_anchors WHERE user_id = $1', params: [userId] },
+      { name: 'goals', sql: 'DELETE FROM app.dating_goals WHERE owner_id = $1', params: [userId] },
+      { name: 'completed_dates', sql: 'DELETE FROM app.completed_dates WHERE owner_id = $1', params: [userId] },
+      { name: 'likes', sql: 'DELETE FROM app.likes WHERE from_user_id = $1 OR to_user_id = $1', params: [userId] },
+      { name: 'passes', sql: 'DELETE FROM app.passes WHERE from_user_id = $1 OR to_user_id = $1', params: [userId] },
+      // A block is deleted because it is the *subject's* protection and the subject
+      // is gone; the person they blocked keeps their own rows and their own blocks.
+      { name: 'blocks', sql: 'DELETE FROM app.blocks WHERE blocker_id = $1', params: [userId] },
+      // §8.2 says matches are deleted and messages are *retained* tombstoned, and
+      // those two rows are in tension in this schema: `messages.conversation_id` and
+      // `conversations.match_id` both cascade, so deleting either takes the messages
+      // with it and the other party's history silently vanishes — the exact failure
+      // §8.2's own reason column names when it says content "must not silently vanish
+      // from their side".
+      //
+      // So the coupling goes and the thread stays. Ending a match removes it from
+      // every live-match read, which is what "no residual discovery coupling" means;
+      // leaving the conversation row is what retaining the other party's view means.
+      // Both rows hold, and this is the one place they had to be reconciled.
+      {
+        name: 'matches',
+        sql: `UPDATE app.matches SET ended_at = $2, ended_cause = 'account_deleted'
+                WHERE $1 = ANY (participants) AND ended_at IS NULL`,
+        params: [userId, at],
+      },
+      {
+        name: 'conversations',
+        sql: `UPDATE app.conversations SET state = 'ended', state_changed_at = $2
+                WHERE $1 = ANY (participants) AND state <> 'ended'`,
+        params: [userId, at],
+      },
+      // Tombstoned, not removed — see the method comment. The body is blanked and
+      // `state` carries the fact, which is why the column's CHECK has always allowed
+      // `'deleted'`: the schema was built for this and nothing used it.
+      {
+        name: 'messages_sent',
+        sql: `UPDATE app.messages SET body = '[removed]', state = 'deleted' WHERE sender_id = $1`,
+        params: [userId],
+      },
+    ];
+    for (const statement of removals) {
+      deleted[statement.name] = await affected(
+        'completeDeletion',
+        tx,
+        statement.sql,
+        statement.params,
+      );
+    }
+
+    const retained: Record<string, number> = {};
+    const retainedCounts: readonly [string, string][] = [
+      ['reports', 'SELECT count(*)::int AS n FROM app.reports WHERE subject_id = $1 OR reporter_id = $1'],
+      ['cases', 'SELECT count(*)::int AS n FROM app.cases WHERE subject_id = $1'],
+      ['decisions', 'SELECT count(*)::int AS n FROM app.decisions WHERE subject_id = $1'],
+      ['audit', 'SELECT count(*)::int AS n FROM app.audit_log WHERE subject_id = $1'],
+      ['risk', 'SELECT count(*)::int AS n FROM app.risk_signals WHERE subject_id = $1'],
+    ];
+    for (const [name, statement] of retainedCounts) {
+      const found = await rows('completeDeletion', tx, statement, [userId]);
+      retained[name] = Number(found[0]?.['n'] ?? 0);
+    }
+
+    // §8.2's last row. The row survives; the person does not.
+    await affected(
+      'completeDeletion',
+      tx,
+      `UPDATE app.users SET state = 'deleted', pseudonym = $2, deleted_at = $3 WHERE user_id = $1`,
+      [userId, pseudonym, at],
+    );
+    return { pseudonym, deleted, retained };
   }
 }

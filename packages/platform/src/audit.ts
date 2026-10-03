@@ -54,6 +54,16 @@ export type AuditAction =
   | 'account.enforcement_applied'
   | 'account.restriction_lifted'
   | 'account.ban_lifted'
+  // Account deletion (§8). Three actions rather than one, because the three are
+  // three different facts about a person and an appeal needs to tell them apart: a
+  // request is a decision to leave, a cancellation is a decision to stay, and a
+  // completion is the irreversible one. Collapsing them into a single
+  // `account.deletion` would leave a log that says an account was deleted without
+  // saying whether the person asked, and "was this their choice or ours" is exactly
+  // the question an appeal opens with.
+  | 'account.deletion_requested'
+  | 'account.deletion_cancelled'
+  | 'account.deletion_completed'
   | 'report.submitted'
   | 'report.triaged'
   | 'report.merged'
@@ -118,6 +128,14 @@ export const AUDIT_ACTIONS: Readonly<Record<AuditAction, AuditPolicy>> = {
   'account.enforcement_applied': { sensitivity: 'restricted', readsAreIndividuallyLogged: false, complete: true, rationale: 'Automation never enforces, so every enforcement fact is a human decision with a case.' },
   'account.restriction_lifted': { sensitivity: 'restricted', readsAreIndividuallyLogged: false, complete: true, rationale: 'Lifting is a decision about a person; it is as auditable as applying.' },
   'account.ban_lifted': { sensitivity: 'restricted', readsAreIndividuallyLogged: false, complete: true, rationale: 'Reversing an irreversible-looking action needs a named human on the record.' },
+  // Deletion is `restricted` rather than `user` for the reason the moderation
+  // families are: "who deleted their account, and when" is a list of people in a
+  // specific kind of difficulty, and the standing left behind is moderation data.
+  // `restricted` also scopes the pseudonym to exactly the clearance that may link a
+  // subject to a case, which is §8.2's stated purpose for keeping it at all.
+  'account.deletion_requested': { sensitivity: 'restricted', readsAreIndividuallyLogged: false, complete: true, rationale: 'A decision to leave is a fact about a person that a later appeal or a support conversation turns on.' },
+  'account.deletion_cancelled': { sensitivity: 'restricted', readsAreIndividuallyLogged: false, complete: true, rationale: 'The person chose to stay, and this record is what distinguishes that from a deletion that never happened.' },
+  'account.deletion_completed': { sensitivity: 'restricted', readsAreIndividuallyLogged: false, complete: true, rationale: 'The irreversible act, and the one whose surviving moderation evidence must stay attributable to the subject it was taken from.' },
   'report.submitted': { sensitivity: 'restricted', readsAreIndividuallyLogged: false, complete: true, rationale: 'A report names a person; the record is the intake fact and it outlives the case.' },
   'report.triaged': { sensitivity: 'restricted', readsAreIndividuallyLogged: false, complete: true, rationale: 'Triage is where an allegation becomes a named human judgement about a person.' },
   'report.merged': { sensitivity: 'restricted', readsAreIndividuallyLogged: false, complete: true, rationale: 'Merging hides one report inside another; the link is the only trace of the first reporter.' },

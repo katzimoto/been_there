@@ -17,9 +17,10 @@
  * `verifyDataset` (run by `make seed-verify`) says so rather than printing a
  * confident summary over it.
  *
- * The dataset is built in process. There is no database behind it yet — this
- * repository has no schema, so `make seed` refuses instead of pretending to have
- * loaded anything. See docs/development/local-environment.md.
+ * The dataset is built in process and then persisted: `packages/seed/scripts/load.mjs`
+ * runs the domain to produce this state and writes it through the stores the HTTP
+ * routes use. See `make seed`, which is a CI step so that a loader which cannot
+ * reach a database fails the build rather than the next person to run `make setup`.
  *
  * The scenario, for a reader who would rather skip the code:
  *
@@ -99,6 +100,12 @@ export function loadDevelopmentDataset() {
   const auditLog = new InMemoryAuditLog();
   const audit = createAuditRecorder(auditLog, now);
 
+  // Every verification the domain planned, in the order the people reached for
+  // one. The identity state a person ends up with is the machine's *answer*;
+  // this is the attempt that produced it, and it is the row a store persists.
+  // It travels with the dataset rather than being reconstructed downstream.
+  const attempts = [];
+
   // --- Identity: the provider decides who is verified. ----------------------
 
   const verified = verifiedPeople.map(([userId, displayName, confidence]) => {
@@ -115,6 +122,7 @@ export function loadDevelopmentDataset() {
       ],
       { correlation: `corr-${userId}` },
     );
+    attempts.push(outcome.attempt);
     return activeUser(userId, displayName, {
       identityState: outcome.state,
       verificationId: asVerification(`ver-${userId}`),
@@ -126,6 +134,7 @@ export function loadDevelopmentDataset() {
   // discoverable. No event would make this user verified but for a result that
   // has not come back.
   const casey = startVerification('u-casey', now());
+  attempts.push(casey.attempt);
 
   // A borderline provider result: routed to a human, never auto-resolved.
   const devon = verificationThroughProvider(
@@ -140,6 +149,7 @@ export function loadDevelopmentDataset() {
     },
     now(),
   );
+  attempts.push(devon.attempt);
   audit(
     'identity.verification_changed',
     'system',
@@ -222,7 +232,10 @@ export function loadDevelopmentDataset() {
 
   // --- The block, and what it ends. ----------------------------------------
 
-  const { block, match: endedMatch } = blockAndEnd(
+  // The ledger comes back with the block: a block withdraws the pair's likes,
+  // and a loader that only had the pre-block ledger would persist two live
+  // likes over a match the domain has already ended.
+  const { block, match: endedMatch, ledger: endedLedger } = blockAndEnd(
     'u-riley',
     'u-frankie',
     'block-riley-frankie',
@@ -395,6 +408,10 @@ export function loadDevelopmentDataset() {
       person.accountTrail = frankieTrail;
     }
     person.capabilities = capabilitiesFor(person.accountState, person.accountContext);
+    // Read back through the same helper the pre-enforcement standings came
+    // from, so `visibleInProduct` and the capability set are the standing
+    // rule's own answer rather than a second spelling of it.
+    person.standing = standingFor(person);
     person.discoverable = isDiscoverableIdentity({
       state: person.identityState,
       latestVerificationId: person.verificationId,
@@ -450,7 +467,11 @@ export function loadDevelopmentDataset() {
   return {
     epoch: SEED_EPOCH,
     users,
+    attempts,
     riskAssessments,
+    // Both ledgers, in their final state: the block has already withdrawn the
+    // likes it ended, and that withdrawal is a fact about the dataset.
+    likes: [...abLikes.ledger.likes, ...endedLedger.likes],
     matches: [abMatch, endedMatch],
     conversations: [{ ...conversation, messages }],
     passes: abLikes.passes,

@@ -15,9 +15,9 @@
  * refuses, with the reason, rather than the CLI deciding on its own what a
  * support agent is allowed to see.
  *
- * The dataset is loaded in process. There is no schema behind it, so nothing is
- * written anywhere; `make seed` is the target that will load it, and it refuses
- * until a schema exists.
+ * This script prints and checks the dataset; it does not load it. `make seed`
+ * (`packages/seed/scripts/load.mjs`) is the loader: it runs the same domain code,
+ * asserts these same invariants, and persists the result through the stores.
  */
 import { CLEARANCE_BY_ROLE, authorize, readAuditRecord } from '@been-there/platform';
 import { loadDevelopmentDataset } from './development-dataset.mjs';
@@ -31,7 +31,7 @@ const USAGE = `usage: node scripts/seed/development-seed.mjs [options]
   --audit                   read the seeded audit log through the domain's authorisation
   --as <role>               the role to read as: ${Object.keys(CLEARANCE_BY_ROLE).join(', ')}
 
-Nothing is written to a database: this repository has no schema yet.`;
+Nothing is written to a database here. 'make seed' is what loads it.`;
 
 function parseArguments(argv) {
   const options = { format: 'summary', check: false, audit: false, role: 'senior_moderator' };

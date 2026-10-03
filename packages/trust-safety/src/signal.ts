@@ -116,6 +116,29 @@ export interface SignalAuthor {
    * chooses, and a detector added without choosing does not compile.
    */
   readonly escalation: EscalationStatus;
+  /**
+   * Whether this detector can only ever fire *after* somebody has already
+   * reported the subject.
+   *
+   * This is a fact about the detector's **inputs**, not about how loud it is,
+   * and it is what makes `safety.detected_before_first_report` a measurement
+   * rather than a hope. That metric counts a subject whose risk reached `high`
+   * or `critical` *before* the first report naming them. A detector whose only
+   * evidence is a report is causally downstream of that report, so it can raise
+   * the state but can never be the reason the state rose first — it contributes
+   * to the denominator of that comparison and can never fill its numerator.
+   *
+   * Declared per detector, in the same required-field idiom as `escalation`, so
+   * a new detector cannot join the catalogue without answering the question.
+   * It is read by `detectionReachability` to compute whether the metric is
+   * measurable at all, rather than being asserted in a comment that no test
+   * checks and that drifts the first time a detector is added.
+   *
+   * `interaction.unmatch_report` is the only detector that sets it: it requires
+   * a `moderation.report_pairing` observation, which moderation publishes only
+   * when a report naming the subject is submitted.
+   */
+  readonly dependsOnReports: boolean;
 }
 
 /**

@@ -140,6 +140,10 @@ describe('a declaration nobody can back is an error, not a detector that never f
     reliability: 'medium',
     category: 'identity',
     escalation: 'self_escalating',
+    // A provider anomaly is the shape of evidence that is a fact about a
+    // person rather than a pattern, and it is *not* downstream of a report —
+    // which is exactly what `safety.detected_before_first_report` would need.
+    dependsOnReports: false,
   } as const satisfies SignalAuthor;
 
   /** The provider attributes this anomaly at 0.4, which is 0.34 after the discount. */
@@ -216,6 +220,7 @@ describe('repetition is a different axis from corroboration', () => {
         reliability: 'high',
         category: 'interaction',
         escalation: 'self_escalating',
+        dependsOnReports: false,
       }),
     );
     const support = corroborate(ledger, loudest);

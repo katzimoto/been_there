@@ -18,6 +18,7 @@ import type {
   AnalyticsEventRow,
   ContactVerificationRow,
   CredentialRow,
+  DeletionRequestRow,
   NoticeRow,
   OnboardingRow,
   RecoveryRow,
@@ -258,4 +259,52 @@ export function decodeAnalyticsEvent(raw: QueryResultRow): AnalyticsEventRow {
     correlationId: readText(raw['correlation_id'], 'account_analytics_events', 'correlation_id'),
     properties: readJsonObject(raw['properties'], 'account_analytics_events', 'properties'),
   };
+}
+
+/**
+ * The deletion statuses, validated on read.
+ *
+ * A row carrying a status nothing recognises is refused here rather than passed
+ * on: `isWithinUndoWindow` answers "no" for any status that is not `scheduled`,
+ * which the service reads as "the window has closed" and completes the deletion
+ * on. So an unrecognised status would delete somebody's account early rather
+ * than raising — the worst possible direction for a corrupt row to fail in.
+ */
+const DELETION_STATUSES: readonly string[] = ['scheduled', 'cancelled', 'completed'];
+
+export const DELETION_COLUMNS =
+  'deletion_id, user_id, status, requested_at, completes_at, cancelled_at, completed_at';
+
+export function toDeletionRow(raw: QueryResultRow): DeletionRequestRow {
+  const status = readText(raw['status'], 'account_deletions', 'status');
+  if (!DELETION_STATUSES.includes(status)) {
+    throw malformed('account_deletions', 'status', `"${status}" is not a deletion status`);
+  }
+  return {
+    deletionId: readText(raw['deletion_id'], 'account_deletions', 'deletion_id'),
+    userId: readText(raw['user_id'], 'account_deletions', 'user_id') as UserId,
+    status,
+    requestedAt: readTimestamp(raw['requested_at'], 'account_deletions', 'requested_at'),
+    completesAt: readTimestamp(raw['completes_at'], 'account_deletions', 'completes_at'),
+    cancelledAt: readNullableTimestamp(raw['cancelled_at'], 'account_deletions', 'cancelled_at'),
+    completedAt: readNullableTimestamp(raw['completed_at'], 'account_deletions', 'completed_at'),
+  };
+}
+
+/**
+ * A non-null timestamp from a row that claims to be deleted.
+ *
+ * Separate from `readTimestamp` because the thing it refuses is specific:
+ * `users.deleted_at` is `NOT NULL` whenever `state = 'deleted'`, by
+ * `users_deleted_shape`. A null here means the query matched a row that says it
+ * was deleted without saying when, and substituting the current clock for it
+ * would make a corrupted row read as a deletion that happened just now — a much
+ * harder thing to notice later than a loud failure now.
+ */
+export function readDeletionInstant(value: unknown, table: string, column: string): Date {
+  const instant = readTimestamp(value, table, column);
+  if (instant === null) {
+    throw malformed(table, column, 'is null on a row that claims to be deleted');
+  }
+  return instant;
 }

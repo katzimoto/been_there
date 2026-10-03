@@ -1,6 +1,7 @@
 import { type Detector, MAX_SIGNALS_PER_RUN, type SignalDraft } from './detector.js';
 import { type Observation, type ObservationKind } from './observation.js';
 import type { PairingMatcher } from './pairing.js';
+import { type DetectionReachability, detectionReachability, highestReachableFromNormal } from './escalation.js';
 
 /**
  * The detectors that exist, as code rather than as a table in a document.
@@ -67,11 +68,30 @@ export const PROFILE_CHURN_THRESHOLD = 10;
  */
 const IDENTITY_REUSE_WINDOW_MINUTES = WIDE_WINDOW_MINUTES;
 
+/**
+ * The weight each detector's signal carries, in one place.
+ *
+ * These are named rather than inline literals because two things need them: the
+ * draft a detector emits, and `safetyDetectorReach`, which asks how loud each
+ * detector is in order to work out what the catalogue can reach. A literal in
+ * both places would let the reachability answer describe weights the detectors
+ * no longer use — which is exactly the kind of drift that leaves a metric
+ * stuck and unexplained.
+ */
+const LIKE_BURST_WEIGHT = 0.35;
+const MESSAGE_BURST_WEIGHT = 0.4;
+const PROFILE_CHURN_WEIGHT = 0.3;
+const UNMATCH_BY_COUNTERPARTY_WEIGHT = 0.5;
+const IDENTITY_REUSE_WEIGHT = 0.45;
+const UNMATCH_REPORT_WEIGHT = 0.6;
+const REPORT_AGAINST_WEIGHT = 0.5;
+
 const likeBurst: Detector = {
   detector: 'velocity.like_burst',
   reliability: 'low',
   category: 'velocity',
   escalation: 'corroboration_only',
+  dependsOnReports: false,
   detect: (input, context) => {
     const outbound = withinWindow(
       context.observations,
@@ -89,7 +109,7 @@ const likeBurst: Detector = {
         actorId: input.subjectId,
         behaviour: { kind: 'like_velocity', entityId: input.subjectId },
         occurredAt: evidenceAt(outbound, input.now),
-        weight: 0.35,
+        weight: LIKE_BURST_WEIGHT,
         facts: {
           occurrences: outbound.length,
           windowMinutes: LIKE_BURST_WINDOW_MINUTES,
@@ -105,6 +125,7 @@ const messageBurst: Detector = {
   reliability: 'medium',
   category: 'velocity',
   escalation: 'corroboration_only',
+  dependsOnReports: false,
   detect: (input, context) => {
     const bursts = withinWindow(
       context.observations,
@@ -125,7 +146,7 @@ const messageBurst: Detector = {
         actorId: input.subjectId,
         behaviour: { kind: 'message_velocity', entityId: bursts[0]?.entityId ?? input.subjectId },
         occurredAt: evidenceAt(bursts, input.now),
-        weight: 0.4,
+        weight: MESSAGE_BURST_WEIGHT,
         facts: {
           occurrences: Math.max(...bursts.map((entry) => entry.count ?? 0)),
           windowMinutes: 60,
@@ -141,6 +162,7 @@ const profileChurn: Detector = {
   reliability: 'low',
   category: 'velocity',
   escalation: 'corroboration_only',
+  dependsOnReports: false,
   detect: (input, context) => {
     const edits = withinWindow(
       context.observations,
@@ -158,7 +180,7 @@ const profileChurn: Detector = {
         actorId: input.subjectId,
         behaviour: { kind: 'profile_churn', entityId: input.subjectId },
         occurredAt: evidenceAt(edits, input.now),
-        weight: 0.3,
+        weight: PROFILE_CHURN_WEIGHT,
         facts: {
           occurrences: edits.length,
           windowMinutes: WIDE_WINDOW_MINUTES,
@@ -188,6 +210,7 @@ const unmatchByCounterparty: Detector = {
   reliability: 'low',
   category: 'interaction',
   escalation: 'corroboration_only',
+  dependsOnReports: false,
   detect: (input, context) => {
     const received = withinWindow(
       context.observations,
@@ -205,7 +228,7 @@ const unmatchByCounterparty: Detector = {
         actorId: input.subjectId,
         behaviour: { kind: 'unmatch_by_counterparty', entityId: entry.entityId ?? input.subjectId },
         occurredAt: entry.occurredAt,
-        weight: 0.5,
+        weight: UNMATCH_BY_COUNTERPARTY_WEIGHT,
         facts: { occurrences: 1, direction: 'inbound' },
       }));
   },
@@ -223,6 +246,7 @@ const identityReuse: Detector = {
   reliability: 'medium',
   category: 'identity',
   escalation: 'corroboration_only',
+  dependsOnReports: false,
   detect: (input, context) => {
     const attempts = withinWindow(
       context.observations,
@@ -256,7 +280,7 @@ const identityReuse: Detector = {
         actorId: input.subjectId,
         behaviour: { kind: 'identity_reuse', entityId: first.entityId ?? input.subjectId },
         occurredAt: evidenceAt(followed, input.now),
-        weight: 0.45,
+        weight: IDENTITY_REUSE_WEIGHT,
         facts: {
           occurrences: followed.length,
           windowMinutes: IDENTITY_REUSE_WINDOW_MINUTES,
@@ -264,6 +288,62 @@ const identityReuse: Detector = {
         },
       },
     ];
+  },
+};
+
+/**
+ * Reports filed against this account, one signal per reporter.
+ *
+ * This detector exists in order to be *discarded*. `assessSignal` treats a
+ * `report_against` signal as evidence about the reporters rather than about the
+ * account reported, and returns `next: current` with `discarded: true` before
+ * any score is computed — so no report, and no number of reports, can move the
+ * victim's risk state. What the signals are *for* is `corroborate`, which
+ * counts their distinct actors; at `MASS_REPORT_CLUSTER_SIZE` distinct
+ * reporters the campaign itself becomes a cluster review candidate, and the
+ * campaign is what goes in front of a human.
+ *
+ * The subject is the account reported and the actor is whoever filed it, which
+ * is the only attribution `createSignal` accepts for this behaviour kind
+ * (`signal.ts`: `report_against` requires `actorId !== subjectId`). A detector
+ * therefore cannot file a report against itself and land a risk state, and a
+ * self-report does not reach `corroborate` as a second reporter.
+ *
+ * One signal per report rather than a single aggregate, because `corroborate`
+ * counts distinct actors: an aggregate would arrive as one actor, and a
+ * campaign of three would count as one reporter rather than three.
+ *
+ * The weight is modest on purpose. This signal is never scored; the only place
+ * its weight is read is a cluster candidate's `confidence` — how sure the system
+ * is that a campaign exists at all. It is surer of that than of anything else
+ * it reports, but it is still only counting reports.
+ */
+const reportAgainst: Detector = {
+  detector: 'report.pattern.coordinated_target',
+  reliability: 'medium',
+  category: 'report_pattern',
+  escalation: 'corroboration_only',
+  dependsOnReports: true,
+  detect: (input, context) => {
+    const reports = withinWindow(
+      context.observations,
+      'moderation.report_submitted',
+      input.subjectId,
+      input.now,
+      WIDE_WINDOW_MINUTES,
+    ).filter((entry) => entry.subjectId === input.subjectId && entry.actorId !== input.subjectId);
+    return reports
+      .slice(0, MAX_SIGNALS_PER_RUN)
+      .map<SignalDraft>((entry) => ({
+        subjectId: input.subjectId,
+        // The reporter, not the subject: this is the one behaviour kind where
+        // the two differ, and `createSignal` refuses the attribution if equal.
+        actorId: entry.actorId,
+        behaviour: { kind: 'report_against', entityId: input.subjectId },
+        occurredAt: entry.occurredAt,
+        weight: REPORT_AGAINST_WEIGHT,
+        facts: { occurrences: 1, windowMinutes: WIDE_WINDOW_MINUTES, direction: 'inbound' },
+      }));
   },
 };
 
@@ -277,6 +357,7 @@ export const SAFETY_DETECTORS: readonly Detector[] = [
   profileChurn,
   unmatchByCounterparty,
   identityReuse,
+  reportAgainst,
 ];
 
 /**
@@ -309,6 +390,7 @@ function unmatchReport(pairing: PairingMatcher): Detector {
     reliability: 'high',
     category: 'interaction',
     escalation: 'corroboration_only',
+    dependsOnReports: true,
     detect: (input, context) => {
       const reports = withinWindow(
         context.observations,
@@ -361,7 +443,7 @@ function unmatchReport(pairing: PairingMatcher): Detector {
             actorId: input.subjectId,
             behaviour: { kind: 'unmatch_then_report', entityId: matchId },
             occurredAt: report.occurredAt,
-            weight: 0.6,
+            weight: UNMATCH_REPORT_WEIGHT,
             facts: { occurrences: 1, windowMinutes: WIDE_WINDOW_MINUTES, direction: 'inbound' },
           });
           if (drafts.length === MAX_SIGNALS_PER_RUN) {
@@ -386,4 +468,52 @@ function unmatchReport(pairing: PairingMatcher): Detector {
  */
 export function createSafetyDetectors(pairing: PairingMatcher): readonly Detector[] {
   return [...SAFETY_DETECTORS, unmatchReport(pairing)];
+}
+
+/**
+ * What this catalogue can actually detect *before* anyone reports a subject.
+ *
+ * Computed from the running detectors rather than declared in a document, so
+ * the answer tracks the catalogue: adding a `self_escalating` detector that
+ * does not depend on reports turns this measurable with no other edit. The
+ * service reads it to decide whether `safety.detected_before_first_report`
+ * can be non-zero, and serves that answer alongside the metric rather than
+ * letting a permanent zero read as broken detection.
+ */
+
+/**
+ * The weight each detector's signals carry, keyed by name.
+ *
+ * The constants above are what the detectors emit; this is how the
+ * reachability question below finds them, since a `Detector` publishes no
+ * weight of its own — the weight belongs to the draft, not the author. A
+ * detector added without a row here is refused loudly rather than assumed
+ * silent, because a missing row would otherwise under-report its reach.
+ */
+const DETECTOR_WEIGHTS: Readonly<Record<string, number>> = {
+  'velocity.like_burst': LIKE_BURST_WEIGHT,
+  'velocity.message_burst': MESSAGE_BURST_WEIGHT,
+  'dating.profile_churn': PROFILE_CHURN_WEIGHT,
+  'interaction.unmatch_by_counterparty': UNMATCH_BY_COUNTERPARTY_WEIGHT,
+  'identity.reuse': IDENTITY_REUSE_WEIGHT,
+  'interaction.unmatch_report': UNMATCH_REPORT_WEIGHT,
+  'report.pattern.coordinated_target': REPORT_AGAINST_WEIGHT,
+};
+
+export function safetyDetectorReach(detectors: readonly Detector[]): DetectionReachability {
+  return detectionReachability(
+    detectors.map((detector) => {
+      const weight = DETECTOR_WEIGHTS[detector.detector];
+      if (weight === undefined) {
+        throw new Error(
+          `detector "${detector.detector}" has no declared weight, so its reach cannot be computed`,
+        );
+      }
+      return {
+        detector: detector.detector,
+        dependsOnReports: detector.dependsOnReports,
+        highestReachable: highestReachableFromNormal(weight, detector.reliability),
+      };
+    }),
+  );
 }

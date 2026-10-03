@@ -28,7 +28,15 @@ POSTGRES_DB ?= been_there
 POSTGRES_PORT ?= 55432
 DATABASE_URL ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(POSTGRES_PORT)/$(POSTGRES_DB)
 
-export COMPOSE_PROJECT_NAME POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB POSTGRES_PORT DATABASE_URL
+# The report/unmatch pairing secret. A local-only placeholder, identical to the
+# value documented in .env.example, so `make demo` runs the full six-detector
+# catalogue on a clean checkout with no .env at all. It does not make
+# `safety.detected_before_first_report` move — see .env.example for why that
+# metric is unreachable whatever this is set to — it enables the one detector
+# that can carry a subject to `high` and open a human-review case.
+RISK_PAIRING_SECRET ?= been_there_local_pairing_only
+
+export COMPOSE_PROJECT_NAME POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB POSTGRES_PORT DATABASE_URL RISK_PAIRING_SECRET
 
 # Which role reads the seeded audit log. Named `AUDIT_AS` rather than `AS`
 # because `AS` is a built-in make variable holding the assembler command, so

@@ -1,3 +1,5 @@
+import type { RiskState } from '@been-there/core';
+
 /**
  * What a detector declares about its own standing, and the one arithmetic both
  * of those declarations are read through.
@@ -70,4 +72,110 @@ export const ESCALATION_GATE = 0.5;
  */
 export function unaidedScore(weight: number, reliability: DetectorReliability): number {
   return weight * RELIABILITY_DISCOUNT[reliability];
+}
+
+/** The risk states §3.6's detection metric counts a subject reaching. */
+export type DetectionCountedState = 'high' | 'critical';
+
+/** The states that count, in ascending order. */
+const COUNTED_STATES: readonly DetectionCountedState[] = ['high', 'critical'];
+
+export interface DetectorReach {
+  readonly detector: string;
+  /** True when the detector's only evidence is a report about the subject. */
+  readonly dependsOnReports: boolean;
+  /**
+   * The highest state this detector can reach from `normal` on its own numbers,
+   * with full corroboration and repeats at their cap. Computed through the
+   * policy layer rather than asserted, so a weight edit cannot leave a stale
+   * claim here.
+   */
+  readonly highestReachable: RiskState;
+}
+
+export interface DetectionReachability {
+  readonly detectors: readonly DetectorReach[];
+  /**
+   * Whether `safety.detected_before_first_report` can be non-zero at all.
+   *
+   * True only when some detector both reaches a counted state **and** can fire
+   * without a prior report. A detector that reaches `high` only after a report
+   * is downstream of the very event the metric compares against, so it can
+   * never be the *first* thing to raise the state — which is the whole
+   * definition of the metric.
+   */
+  readonly measurable: boolean;
+  /** The detectors whose reach is bounded below the counted states. */
+  readonly belowThreshold: readonly string[];
+  /** The detectors that reach a counted state, and why they cannot fill it. */
+  readonly reportDependent: readonly string[];
+}
+
+/**
+ * Whether this catalogue can detect anything *before* a report.
+ *
+ * This is the answer to "the metric reads zero — is that a wiring failure or
+ * the arithmetic?", and it is computed from the catalogue rather than written
+ * down. The failure this exists to prevent is a number that sits at zero
+ * forever and is read as broken detection when it is in fact a property of the
+ * catalogue: with the verification provider a stub, the only detectors loud
+ * enough to reach `high` are downstream of a report, so the metric's
+ * comparison is unsatisfiable. Declared as data, a new `self_escalating`
+ * detector flips this to `true` on its own, with nothing else to remember.
+ */
+export function detectionReachability(
+  detectors: readonly Pick<DetectorReach, 'detector' | 'dependsOnReports' | 'highestReachable'>[],
+): DetectionReachability {
+  const belowThreshold: string[] = [];
+  const reportDependent: string[] = [];
+  for (const entry of detectors) {
+    if (!COUNTED_STATES.includes(entry.highestReachable as DetectionCountedState)) {
+      belowThreshold.push(entry.detector);
+    } else if (entry.dependsOnReports) {
+      reportDependent.push(entry.detector);
+    }
+  }
+  const measurable = detectors.some(
+    (entry) =>
+      !entry.dependsOnReports && COUNTED_STATES.includes(entry.highestReachable as DetectionCountedState),
+  );
+  return { detectors, measurable, belowThreshold: belowThreshold.sort(), reportDependent: reportDependent.sort() };
+}
+
+/** Repetitions are capped; the cap is the most a detector can ever be paid. */
+const MAX_REPEAT_MULTIPLIER = 1.25;
+
+/** Two independent detectors multiplying together, as the policy layer does. */
+const CORROBORATED_MULTIPLIER = 1.15;
+
+/** The shared table's own guards, restated because this module sits below it. */
+const STATE_GATE: Readonly<Record<'elevated' | 'high' | 'critical', number>> = {
+  elevated: 0.5,
+  high: 0.7,
+  critical: 0.9,
+};
+
+/**
+ * The highest state one detector can move a fresh subject to.
+ *
+ * This asks "what would the policy layer decide at this detector's best legal
+ * moment?" rather than keeping a second table of which detector is loud
+ * enough. Best legal means two independent corroborating detectors and repeats
+ * at their cap — a `corroboration_only` detector is granted all of it, so
+ * anything it still cannot reach is genuinely unreachable.
+ *
+ * The multipliers and gates are restated rather than imported from
+ * `policy.ts`, which imports this module and would make a cycle. A test in
+ * `test/escalation.test.ts` asserts they equal the policy layer's own
+ * constants, so the duplication cannot quietly rot.
+ */
+export function highestReachableFromNormal(weight: number, reliability: DetectorReliability): RiskState {
+  const score = Math.min(unaidedScore(weight, reliability) * MAX_REPEAT_MULTIPLIER * CORROBORATED_MULTIPLIER, 1);
+  if (score >= STATE_GATE.critical) {
+    return 'critical';
+  }
+  if (score >= STATE_GATE.high) {
+    return 'high';
+  }
+  return score >= STATE_GATE.elevated ? 'elevated' : 'normal';
 }
