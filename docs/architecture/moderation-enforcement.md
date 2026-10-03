@@ -243,9 +243,9 @@ Two rules carry the weight:
   deliberate exception: `openCase` accepts `openedBy: 'system'`, because opening
   a case is not a judgement about a person.
 
-### The three intake paths
+### The four intake paths
 
-All three produce the same `Case` record. Only `origin` differs — which is
+All four produce the same `Case` record. Only `origin` differs — which is
 exactly why "we only act on user reports" and "we act on what we find" are one
 auditable process rather than two that drift apart.
 
@@ -254,6 +254,7 @@ auditable process rather than two that drift apart.
 | User report | `openCase({source:'user_report', report})` | The report's own captured evidence, captured at submission | `safety` | Strongest priority its reasons imply |
 | Trust & safety | `openCase({source:'trust_safety_review', riskAssessmentId, riskState, detectors})` | A `risk_assessment` record: *"Risk critical raised by velocity, duplicate_device"* | `safety` | From the risk state: `elevated→normal`, `high→high`, `critical→urgent` |
 | Identity anomaly | `openCase({source:'identity_anomaly', verificationId, anomaly})` | An `identity_anomaly` record — **redacted**, because a moderator may know an anomaly exists and must not see the result | `identity_integrity` | `high`, never lower |
+| Mass-report campaign | `openCase({source:'mass_report_campaign', subjectId: aReporter, clusterKey, targetId, reporters, detectors})` | A `risk_assessment` record naming the campaign, against **the reporter** — the account reported is not a party to it | `safety` | `high`, never lower: the reporters are at `normal` by construction, so there is no risk state to map it from |
 
 Guards on intake:
 
@@ -262,10 +263,14 @@ Guards on intake:
 - a case with no evidence is a validation failure — there is nothing to review;
 - a report must be `triaged` before it opens a case, and a report already merged
   into a case can never open a second one.
+- a campaign case's subject must be one of the reporters, the account reported
+  must not be among them, and the reporters must be distinct — so a report can
+  never reach the queue as a case about the person it was aimed at, and one
+  account filing many reports cannot manufacture a cohort out of itself;
 
-`test/case.test.ts` asserts that the three paths produce the same record and
+`test/case.test.ts` asserts that the four paths produce the same record and
 that the case-operation audit chain — opened → assigned → review started →
-decision recorded → resolved — is byte-identical across all three.
+decision recorded → resolved — is byte-identical across all four.
 
 ### Queue and priority
 

@@ -16,6 +16,7 @@ import {
 import type { Stores, Transaction } from '@been-there/contracts';
 import { type PairingKey, createPairingMatcher, type PairingMatcher, openCase } from '@been-there/moderation';
 import {
+  type BehaviourKey,
   type DetectionReachability,
   type IdFactory,
   SAFETY_DETECTORS,
@@ -222,6 +223,11 @@ interface FoldedAssessment {
   readonly generation: number | null;
 }
 
+/** Campaign cases already opened by this process; see `raiseReviewCandidate`. */
+interface RaisedCampaigns {
+  readonly opened: Set<string>;
+}
+
 /**
  * The recorder. One per running service, injected through `ServiceDependencies`.
  */
@@ -245,6 +251,7 @@ export function createSafetyRecorder(wiring: SafetyWiring): SafetyRecorder {
   /** Folded state and evidence, per subject, for this process's lifetime. */
   const ledgers = new Map<SubjectId, SignalLedger>();
   const folded = new Map<SubjectId, FoldedAssessment>();
+  const campaigns: RaisedCampaigns = { opened: new Set<string>() };
 
   return {
     refusals: () => seam.refusals(),
@@ -260,7 +267,7 @@ export function createSafetyRecorder(wiring: SafetyWiring): SafetyRecorder {
           warn(`${failure.code} ${failure.message}`, subject);
         }
         for (const signal of run.signals) {
-          await foldSignal(wiring, subject, signal, ledgers, folded, ids, tx);
+          await foldSignal(wiring, subject, signal, ledgers, folded, ids, tx, campaigns);
         }
       }
     },
@@ -382,6 +389,7 @@ async function foldSignal(
   folded: Map<SubjectId, FoldedAssessment>,
   ids: IdFactory,
   tx: Transaction,
+  campaigns: RaisedCampaigns,
 ): Promise<void> {
   const at = signal.occurredAt;
   const correlationId = castId<'CorrelationId'>(randomUUID());
@@ -443,7 +451,16 @@ async function foldSignal(
       // open `payload` will not accept them as they stand.
       await wiring.events.publish({ ...event, payload: { ...event.payload } });
     }
-    await raiseReviewCandidate(wiring, subjectId, transition.value.record, transition.value.raised, correlationId, tx);
+
+    await raiseReviewCandidate(
+      wiring,
+      subjectId,
+      transition.value.record,
+      transition.value.raised,
+      correlationId,
+      tx,
+      campaigns,
+    );
     return;
   }
   warn(`gave up folding ${signal.detector} after ${MAX_FOLD_ATTEMPTS} attempts`, subjectId);
@@ -501,9 +518,14 @@ async function readAssessment(
  * the only way a detected account reaches a moderator — the automation enforces
  * nothing, which is commitment 2 and the reason this function exists at all.
  *
- * A cluster candidate — the mass-reporting campaign — is left alone on purpose.
- * `openCase` intakes about one account, and a campaign is about several reporters
- * at once; an intake invented for it here would be a second moderation path.
+ * A cluster candidate — the mass-reporting campaign — is the other half of the
+ * same promise. It is about several reporters at once rather than one account,
+ * so it is opened as one case *per reporter*, each about that reporter: the
+ * campaign is a finding about who filed, and the account the reports were
+ * aimed at is not a party to it. The safety layer raises the candidate while
+ * folding the *reported* account's record, which is why `record` is not read on
+ * that path — it describes the victim, and nothing about a campaign may be
+ * derived from the victim's record.
  */
 async function raiseReviewCandidate(
   wiring: SafetyWiring,
@@ -512,8 +534,31 @@ async function raiseReviewCandidate(
   candidate: ReviewCandidate | null,
   correlationId: CorrelationId,
   tx: Transaction,
+  /**
+   * Campaign cases this process has already opened, keyed `clusterKey|reporter`.
+   *
+   * Process-local on purpose, and for a reason rather than by omission: the
+   * candidate that produces these cases is itself only raised while this
+   * process holds the corroboration ledger, so a process that has forgotten it
+   * opened a case has equally forgotten the campaign — the two have the same
+   * lifetime by construction, not by luck. A durable de-duplication would need
+   * a query the `ModerationStore` port does not have.
+   */
+  campaigns: RaisedCampaigns,
 ): Promise<void> {
-  if (candidate === null || candidate.target.kind !== 'account') {
+  if (candidate === null) {
+    return;
+  }
+  if (candidate.target.kind === 'cluster') {
+    if (candidate.origin !== 'mass_report_attack') {
+      // The only cluster candidate the policy layer raises today. A future one
+      // would be reported rather than dressed up as a mass-report campaign,
+      // because a case whose origin says "campaign" and whose intake says
+      // something else is a case nobody can reason about on appeal.
+      warn(`cluster candidate of origin '${candidate.origin}' has no case path`, subjectId);
+      return;
+    }
+    await raiseCampaignCases(wiring, candidate, correlationId, tx, campaigns);
     return;
   }
   const { context, pending } = requestModerationContext(record.updatedAt, { publish: wiring.events });
@@ -534,6 +579,87 @@ async function raiseReviewCandidate(
   }
   await wiring.stores.moderation.insertCase(caseRowOf(opened.value.moderationCase), tx);
   await flushAudit(pending, auditAppender((row, auditTx) => wiring.stores.moderation.appendAudit(row, auditTx)), tx);
+}
+
+/**
+ * One case per reporter in the campaign.
+ *
+ * The cluster candidate carries the whole cohort, and every report that arrives
+ * afterwards re-raises it — the detector re-reads every report in the window on
+ * each pass, so the same campaign is offered to this function once per report.
+ * Without the `campaigns` record a five-report campaign would open fifteen cases
+ * about five accounts; with it, each reporter is cased exactly once and a
+ * reporter who joins later is cased when they do.
+ */
+async function raiseCampaignCases(
+  wiring: SafetyWiring,
+  candidate: ReviewCandidate,
+  correlationId: CorrelationId,
+  tx: Transaction,
+  campaigns: RaisedCampaigns,
+): Promise<void> {
+  if (candidate.target.kind !== 'cluster') {
+    return;
+  }
+  const clusterKey = campaignClusterKey(candidate.target.key);
+  const targetId = castId<'UserId'>(candidate.target.key.entityId);
+  const reporters = candidate.target.members.map((member) => castId<'UserId'>(String(member)));
+  const digest = campaignDigest(targetId, reporters, candidate.detectors);
+
+  for (const reporter of reporters) {
+    const offered = `${clusterKey}|${reporter}`;
+    if (campaigns.opened.has(offered)) {
+      continue;
+    }
+    // Each case gets its own context so that its id and its evidence are minted
+    // for it: sharing one would make two cases claim the same evidence record.
+    const { context, pending } = requestModerationContext(candidate.raisedAt, { publish: wiring.events });
+    const opened = openCase(context, {
+      source: 'mass_report_campaign',
+      subjectId: reporter,
+      clusterKey,
+      targetId,
+      reporters,
+      detectors: candidate.detectors,
+      digest,
+      openedBy: 'system',
+      correlationId,
+    });
+    if (!opened.ok) {
+      warn(`campaign case refused: ${opened.error.code} ${opened.error.message}`, subjectOf(reporter));
+      continue;
+    }
+    await wiring.stores.moderation.insertCase(caseRowOf(opened.value.moderationCase), tx);
+    // The audit rows the domain buffered — the evidence capture and the case
+    // opening — are written inside the same transaction as the case. Without
+    // this a campaign case would exist with no appeal record of how it came to
+    // exist, which is the one thing the audit table is for.
+    await flushAudit(pending, auditAppender((row, auditTx) => wiring.stores.moderation.appendAudit(row, auditTx)), tx);
+    campaigns.opened.add(offered);
+  }
+}
+
+/**
+ * The campaign's behaviour key, with the entity digested.
+ *
+ * A `report_against` behaviour is keyed on the account the reports were aimed
+ * at, so writing that entity into the key would make `clusterKey` an account id
+ * wearing a label. The digest groups the campaign — every reporter's case
+ * carries the same string — without the key resolving to the account reported,
+ * which `targetId` names in the field whose job is to name it.
+ */
+function campaignClusterKey(key: BehaviourKey): string {
+  return `${key.kind}:${createHash('sha256').update(key.entityId).digest('hex')}`;
+}
+
+/** A content hash of the campaign the case freezes, so the intake is auditable. */
+function campaignDigest(
+  targetId: UserId,
+  reporters: readonly UserId[],
+  detectors: readonly string[],
+): string {
+  const material = JSON.stringify({ targetId, reporters: [...reporters].sort(), detectors: [...detectors].sort() });
+  return `sha256:${createHash('sha256').update(material).digest('hex')}`;
 }
 
 /** A content hash of the assessment the case freezes, so the intake is auditable. */
