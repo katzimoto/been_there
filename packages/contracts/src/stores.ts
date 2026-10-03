@@ -622,6 +622,95 @@ export interface CaseRow {
   readonly updatedAt: Date;
 }
 
+/** Dating: the owner's personal goal, and the dates they have been on. */
+/**
+ * The persisted shape of `DatingGoal`. A row is a target and an instant, and
+ * there is no count column here either — the port repeats the domain's shape so
+ * a store cannot be handed a count to overwrite.
+ */
+export interface DatingGoalRow {
+  readonly profileId: string;
+  readonly ownerId: UserId;
+  readonly target: number;
+  readonly updatedAt: Date;
+}
+
+/**
+ * One persisted completed date. `entryId` is the caller's retry token rather
+ * than an id of anything, and the store's uniqueness on it is what makes a
+ * retried record count once rather than twice.
+ */
+export interface CompletedDateRow {
+  readonly entryId: string;
+  /** `null` for a date with someone met outside the product. */
+  readonly counterpartId: UserId | null;
+  /** The effective day, ISO `YYYY-MM-DD`. */
+  readonly occurredOn: string;
+  readonly recordedAt: Date;
+}
+
+/**
+ * One appended correction. Never updated and never deleted: the `supersededOn`
+ * column is what a restatement preserved, and dropping the row would drop the
+ * answer to "what did this entry say before".
+ */
+export interface DateCorrectionRow {
+  readonly entryId: string;
+  readonly key: string;
+  readonly kind: 'withdrawn' | 'restated';
+  readonly at: Date;
+  /** Only on `restated`: the day the entry now says. */
+  readonly occurredOn: string | null;
+  /** Only on `restated`: the day it said before, kept so the log is a history. */
+  readonly supersededOn: string | null;
+}
+
+/**
+ * A completed date and everything appended to it, which is the unit the domain
+ * folds: `isCounted` is a question about `corrections`, so corrections have to
+ * arrive with the record or the count would be computed over a lie.
+ */
+export interface CompletedDateEntryRow extends CompletedDateRow {
+  readonly corrections: readonly DateCorrectionRow[];
+}
+
+/**
+ * `GoalStore`: the goal is keyed by **profile**, the ledger by **user**.
+ *
+ * Two aggregates with two lifetimes, and the port is where that is visible. A
+ * profile is a card that can be deleted and recreated; a date is a fact about a
+ * person's life. So `findGoal` takes a `profileId`, `findLedger` takes a
+ * `userId`, and no method on this port can reach from one to the other — which
+ * is what makes "changing the target cannot touch the count" and "deleting a
+ * profile cannot take the history with it" properties of the interface rather
+ * than of a migration somebody has to remember.
+ */
+export interface GoalStore {
+  findGoal(profileId: string, tx: Transaction): Promise<DatingGoalRow | null>;
+  upsertGoal(row: DatingGoalRow, tx: Transaction): Promise<void>;
+
+  /** The owner's whole history, oldest first, each entry with its corrections. */
+  findLedger(ownerId: UserId, tx: Transaction): Promise<readonly CompletedDateEntryRow[]>;
+
+  /**
+   * Appends a date, or returns the existing row untouched when the same
+   * `entryId` is replayed. Idempotence is the store's job for the same reason it
+   * is the like store's: a double-tap and a transport retry are
+   * indistinguishable here.
+   */
+  appendCompletedDate(row: CompletedDateRow, ownerId: UserId, tx: Transaction): Promise<{ created: boolean }>;
+
+  /**
+   * Appends a correction. There is no update and no delete on this port, which
+   * is the append-only rule as a type rather than as a convention.
+   *
+   * Returns `{ applied: false }` for a replayed key — a retry is a no-op, and
+   * `ON CONFLICT DO NOTHING` is what makes that true without aborting the
+   * caller's transaction.
+   */
+  appendDateCorrection(row: DateCorrectionRow, ownerId: UserId, tx: Transaction): Promise<{ applied: boolean }>;
+}
+
 /** Everything the service needs, in one object so wiring is explicit. */
 export interface Stores {
   readonly users: UserStore;
@@ -636,6 +725,8 @@ export interface Stores {
   readonly verificationAttempts: VerificationAttemptStore;
   /** Credentials, the age gate, terms, sessions, recovery, contact verification. */
   readonly accounts: AccountPlatformStore;
+  /** The personal dating goal and the completed-date history (#48, #49). */
+  readonly goals: GoalStore;
 }
 
 import type { ActorId } from '@been-there/core';

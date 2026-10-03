@@ -22,6 +22,7 @@ import type { IncomingMessage } from 'node:http';
 // its own pool, and the migrations are plain SQL files, so a TypeScript
 // module would buy nothing here.
 import { type IsolatedDatabase, isolatedDatabase } from './isolation.js';
+import { claimDatabase, releaseDatabase } from './reclaim.js';
 import pg from 'pg';
 import { createStores, createTransaction } from '@been-there/database';
 import type { Principal, Role } from '@been-there/platform';
@@ -110,7 +111,12 @@ export async function prepareDatabase(): Promise<void> {
   if (prepared) {
     return;
   }
-  await currentIsolation().create();
+  const database = currentIsolation();
+  await database.create();
+  // Claimed so an abandoned database is reclaimed at process exit. A suite that
+  // drops its own releases it, and the three suites that open their own service
+  // handle never release - which is exactly the case this covers.
+  claimDatabase(database.database);
   prepared = true;
 }
 
@@ -155,6 +161,7 @@ export async function dropDatabase(): Promise<void> {
   }
   const dropping = isolation;
   isolation = undefined;
+  releaseDatabase(dropping.database);
   await dropping.drop();
 }
 

@@ -11,6 +11,7 @@ import { moderationRoutes } from './routes/moderation.js';
 import { moderatorWorkspaceRoutes } from './routes/moderation-workspace.js';
 import { reportRoutes } from './routes/reports.js';
 import { profileRoutes } from './routes/profile.js';
+import { goalRoutes } from './routes/goal.js';
 import { verificationRoutes } from './routes/verification.js';
 
 export * from './ports.js';
@@ -41,6 +42,7 @@ export function serviceRoutes(dependencies: ServiceDependencies): readonly Route
     ...verificationRoutes(dependencies),
     ...profileRoutes(dependencies),
     ...discoveryRoutes(dependencies),
+    ...goalRoutes(dependencies),
     ...interactionRoutes(dependencies),
     ...matchRoutes(dependencies),
     ...conversationRoutes(dependencies),

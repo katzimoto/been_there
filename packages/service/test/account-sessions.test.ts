@@ -9,6 +9,7 @@ import {
 } from '@been-there/service';
 import { requireDatabaseReady, type JsonResponse } from './support/harness.js';
 import { createSessionActorResolver } from '../src/accounts/session-resolver.js';
+import { reclaim } from './support/reclaim.js';
 
 /**
  * Sign-in, refresh, logout and recovery, over real HTTP against the real
@@ -100,6 +101,11 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await pool.end();
+  // This suite builds its own `ServiceDependencies` rather than going through
+  // `startHarness`, so nothing else drops the per-suite database it prepared.
+  // Without this it leaked, and the symptom — `connection was terminated` in a
+  // neighbouring suite — reads as a flake rather than as an exhausted pool.
+  reclaim();
 });
 
 /** One request, the same shape `startHarness`'s `call` has. */

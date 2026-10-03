@@ -23,6 +23,7 @@ import {
   socketAddressOnly,
 } from './support/harness.js';
 import { type Created, COMPLETE_PROFILE, PASSING_RESULT, verify } from './support/fixtures.js';
+import { reclaim } from './support/reclaim.js';
 
 /**
  * The metrics the service serves, and the error taxonomy it serves them beside.
@@ -175,6 +176,10 @@ describe('the metrics the service serves', () => {
   afterAll(async () => {
     await harness.close();
   });
+  // A belt to the braces above: these suites start a second service of their
+  // own, so nothing else is holding the per-suite database if this file ends
+  // without reaching its own teardown.
+  reclaim();
 
   it('refuses the metrics body to a caller with no session', async () => {
     const anonymous = await call(harness, 'GET', '/v1/health/metrics', 'not-a-session');
