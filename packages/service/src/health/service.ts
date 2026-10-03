@@ -1,4 +1,5 @@
 import type { ServiceDependencies } from '../ports.js';
+import { createServiceSafety } from '../wiring/safety.js';
 import { type LifecyclePhase, ServiceLifecycle, type ShutdownStep } from './lifecycle.js';
 import { ServiceMetrics } from './metrics.js';
 import { type ReadinessReport, checkDatabase } from './readiness.js';
@@ -16,8 +17,22 @@ export class ServiceHealth {
   readonly metrics = new ServiceMetrics();
   readonly lifecycle = new ServiceLifecycle();
 
-  constructor(private readonly dependencies: ServiceDependencies) {}
-
+  constructor(private readonly dependencies: ServiceDependencies) {
+    // The §3.6 reduction is a function of the event stream and nothing else, so
+    // this process's events have to reach it from wherever they are produced. It
+    // is subscribed here rather than at each producer, and `startService` always
+    // constructs this surface, so a running service's detectors and its metrics
+    // endpoint read one stream rather than a registry only the endpoint knows.
+    // `restricted` deliberately: §3.6 is decided by `moderation.report_submitted`
+    // as much as by `risk.changed`, and a reduction that never saw the reports
+    // would score every detected account as "detected before anyone reported
+    // them". The clearance is safe because the reduction keeps two timestamps
+    // per subject and the instrument that leaves the process carries a count and
+    // no subject id.
+    createServiceSafety(dependencies).events.subscribe({ upTo: 'restricted' }, (event) => {
+      this.metrics.observe(event);
+    });
+  }
   /**
    * Ready means "send this process traffic", which is two things and not one:
    * the lifecycle has to be serving, and the transactional store has to answer.

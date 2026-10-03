@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { UserId } from '@been-there/core';
+import { randomUUID } from 'node:crypto';
 import { castId } from '@been-there/core';
 import { type Caller, type Harness, call, member, moderator, startHarness } from './support/harness.js';
 import { COMPLETE_PROFILE, PASSING_RESULT, createAccount, newPeer, verify } from './support/fixtures.js';
@@ -155,6 +155,50 @@ describe('reports, the moderator queue, and decisions', () => {
     // restriction can never take away the ability to report or block.
     expect(capabilities).toContain('report');
     expect(capabilities).toContain('block');
+  });
+
+  it('publishes what a restriction removed and which case decided it, to the account owner', async () => {
+    // The decision above restricted Erin, so the standing row exists and carries
+    // the case that produced it. Erin is the owner and reads her own account.
+    const owner = await call(harness, 'GET', `/v1/accounts/${reportedUserId}`, ERIN);
+    expect(owner.status).toBe(200);
+    const account = owner.body['account'] as Record<string, unknown>;
+
+    // Version 2 is what tells a client these three fields are here at all, and
+    // the Swift decoder refuses anything else.
+    expect(account['projectionVersion']).toBe(2);
+
+    // The assertion is that the removed set is exactly the difference against the
+    // published baseline — not that it matches a list this test also wrote, which
+    // would pass against a client holding its own copy of the capability table.
+    const baseline = account['baselineCapabilities'] as string[];
+    const granted = account['capabilities'] as string[];
+    const removed = account['removedCapabilities'] as string[];
+    expect(baseline).toContain('like');
+    expect(removed).toContain('like');
+    expect([...baseline].filter((entry) => !granted.includes(entry)).sort()).toEqual([...removed].sort());
+
+    // The case reference is what the member contests the decision on.
+    expect(account['caseId']).toEqual(expect.any(String));
+    // And nothing else about the decision travels with it. A reason, a moderator
+    // or a report would each be somebody else's data; owner-visible stops at the
+    // reference and no further.
+    for (const forbidden of ['reason', 'rationale', 'moderatorId', 'reportId', 'evidence']) {
+      expect(account[forbidden]).toBeUndefined();
+    }
+  });
+
+  it('does not publish one account’s standing — or its case reference — to another member', async () => {
+    // `caseId` is owner-visible. A projection any member could read about
+    // *anybody* would publish the existence of a moderation case about an
+    // identifiable person, which is the first fact the `restricted` clearance
+    // exists to withhold.
+    const foreign = await call(harness, 'GET', `/v1/accounts/${reportedUserId}`, BOB);
+    expect(foreign.status).toBe(404);
+    // And the refusal is indistinguishable from "no such account", because a
+    // `403` would confirm the account is real and turn the id into an oracle.
+    const missing = await call(harness, 'GET', `/v1/accounts/${randomUUID()}`, BOB);
+    expect(missing.status).toBe(404);
   });
 });
 

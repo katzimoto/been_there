@@ -320,12 +320,17 @@ final class LiveServiceTests: XCTestCase {
         XCTAssertTrue(ClientGate.canReport(viewer))
         XCTAssertTrue(ClientGate.canBlock(viewer))
 
-        // The published projection carries no removed set, and that is reported
-        // rather than invented.
+        // A live, never-sanctioned account: the published baseline is the granted
+        // set, the removed set is therefore empty, and there is no deciding case.
+        // The decoder requires all three keys, so this is the server's answer
+        // rather than a client default — which is the whole point of the change.
         XCTAssertTrue(viewer.account.removedCapabilities.isEmpty)
-        let restricted = RestrictedAccountViewModel(standing: viewer.account)
-        XCTAssertFalse(restricted.removed.isKnown)
-        XCTAssertNil(restricted.caseReference)
+        XCTAssertTrue(viewer.account.removedSetAgreesWithBaseline)
+        XCTAssertFalse(viewer.account.baselineCapabilities.isEmpty)
+        XCTAssertNil(viewer.account.caseId)
+        let screen = RestrictedAccountViewModel(standing: viewer.account)
+        XCTAssertEqual(screen.removed, [])
+        XCTAssertNil(screen.caseReference)
     }
 
     // MARK: Onboarding, and the checklist built from it

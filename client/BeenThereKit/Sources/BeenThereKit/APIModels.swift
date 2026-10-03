@@ -240,8 +240,9 @@ public struct AccountView: Codable, Sendable, Equatable {
     public let accountId: String
     public let createdAt: String
     public let identity: IdentityStatus
-    /// `AccountStandingProjection`. Note what is *absent*: `removedCapabilities`
-    /// and any case reference. See `RestrictedAccountViewModel`.
+    /// `AccountStandingProjection` at version 2, which carries the unrestricted
+    /// baseline, the removed set and the deciding case. All three are owner
+    /// visible and none carries a reason, a moderator or anybody else's data.
     public let account: AccountStanding
 
     public init(

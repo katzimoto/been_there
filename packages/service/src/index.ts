@@ -23,6 +23,7 @@ export * from './wiring/attempts.js';
 export * from './wiring/dating.js';
 export * from './wiring/moderation.js';
 export * from './wiring/standing.js';
+export * from './wiring/safety.js';
 
 /**
  * Every endpoint, in one table.

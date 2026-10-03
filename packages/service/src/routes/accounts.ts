@@ -265,10 +265,30 @@ export function accountRoutes(dependencies: ServiceDependencies): readonly Route
       });
     }),
 
+    /**
+     * The owner's own standing, and a staff reader's view of somebody else's.
+     *
+     * The projection carries `removedCapabilities` and `caseId`, and both are
+     * owner-visible: a member who cannot name the deciding case cannot contest
+     * the decision. Owner-visible is the whole of the claim — a projection any
+     * member could read about *anybody* would publish the existence of a
+     * moderation case about an identifiable person, which is the first fact the
+     * `restricted` clearance exists to withhold.
+     *
+     * So a member reading another member is refused, and refused as `404` for
+     * the reason the readiness route below already gives: a `403` would confirm
+     * the account exists, which turns a guessable id into an existence oracle.
+     * Staff are exempt — a senior moderator working a case needs exactly this
+     * projection, and they already hold the clearance that opens the case it
+     * names.
+     */
     route('GET', '/v1/accounts/:userId', async (request) => {
       const userId = userIdOf(request.params['userId']);
       if (!userId.ok) {
         return userId;
+      }
+      if (request.actor.role === 'user' && request.actor.userId !== userId.value) {
+        return NOT_FOUND('account');
       }
       const [user, identity, account] = await Promise.all([
         dependencies.stores.users.find(userId.value, request.tx),

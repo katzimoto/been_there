@@ -29,6 +29,7 @@ import { okResponse, route, type HttpResponse, type Route, type RouteRequest } f
 import type { ServiceDependencies } from '../ports.js';
 import { userIdOf } from './accounts.js';
 import { blocksBetween, ledgersFor, matchRecordOf } from '../wiring/dating.js';
+import { createServiceSafety } from '../wiring/safety.js';
 import { subjectStandingFor } from '../wiring/standing.js';
 
 /**
@@ -297,6 +298,15 @@ async function recordLikeFor(
       state: recorded.state,
       supersededPassId: recorded.supersededPassId,
     },
+    request.tx,
+  );
+
+  // The like is written, so it is observed. The safety layer is told *what
+  // happened*, not what it means: whether 25 of these in an hour is a burst is
+  // `velocity.like_burst`'s question, and a route that answered it would be a
+  // second copy of the detector catalogue.
+  await createServiceSafety(dependencies).recorder.observe(
+    { kind: 'like.recorded', from: actorId, to: counterpartId, at: request.now },
     request.tx,
   );
   if (recorded.supersededPassId !== null) {

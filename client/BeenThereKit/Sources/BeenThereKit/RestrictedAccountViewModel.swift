@@ -2,58 +2,43 @@ import Foundation
 
 /// What the product says to a member whose account is not `active`.
 ///
-/// ## The server is the authority, and this file does not paper over its gaps
+/// ## Every field here is the server's
 ///
-/// Every field is read from `AccountStanding`, which is
+/// The screen is built from `AccountStanding`, which is
 /// `AccountStandingProjection` — the same projection `evaluateEligibility` and
-/// `canSend` consume. There is no copy of the capability table here and no
-/// reason-naming: that projection carries a state, a capability list and a
-/// visibility bit and nothing else, because a projection carrying a reason would
+/// `canSend` consume. There is no copy of the capability table in this file and
+/// no reason-naming: the projection carries a state, capability sets and a case
+/// reference and nothing else, because a projection carrying a reason would
 /// turn a dating client into a moderation surface.
 ///
-/// ## The gap this file refuses to fill
+/// ## What the server now publishes, and what this file used to work around
 ///
 /// `ClientGate`'s own comment says an honest restriction explanation needs
 /// `removedCapabilities` and `caseReference` — "this restriction came from case
 /// X" is the basis on which a member can contest it. **The server publishes
-/// neither.** `AccountStandingRow` carries `caseId` and `decisionId`, but no
-/// response body includes them: `accountProjectionFor` builds its projection from
-/// `state`, `capabilities` and `visibleInProduct`, and that is the whole of what
-/// any endpoint publishes about standing.
+/// both now.** `AccountStandingProjection` carries `baselineCapabilities`,
+/// `removedCapabilities` and `caseId` (version 2).
 ///
-/// Naming what was removed needs the unrestricted baseline to subtract from, and
-/// the projection publishes no baseline either — a client cannot reconstruct
-/// `CAPABILITIES_BY_ACCOUNT_STATE` without copying the kernel's table, which is
-/// precisely the second copy this repository exists to prevent. So
-/// `RemovedCapabilities` is a closed enum whose real case is `.notPublished`, and
-/// `caseReference` is `nil`. Both are typed so a caller cannot mistake "the
-/// server does not send this" for "the client forgot to implement it".
+/// This file previously answered with a `RemovedCapabilities.notPublished` case
+/// and a `nil` `caseReference`, because `AccountStandingRow` carried `caseId`
+/// and no response body included it, and because naming the removed set needed an
+/// unrestricted baseline the projection did not publish — so the only way to
+/// compute it here would have been a second copy of `CAPABILITIES_BY_ACCOUNT_STATE`,
+/// which is the drift this repository exists to prevent. Both are gone. What is
+/// here now is a readback of what the server said.
 public struct RestrictedAccountViewModel: Sendable, Equatable {
 
-    /// What was taken away — which the server does not publish.
+    /// What was taken away, as the server computed it.
     ///
-    /// `.notPublished` is not a placeholder. It is the only answer the projection
-    /// supports, and it is what the screen renders: the member is told what is
-    /// switched off in words, without a machine list that would have to be
-    /// derived from a table the client does not hold.
-    public enum RemovedCapabilities: Sendable, Equatable {
-        /// `AccountStandingProjection` publishes neither the removed set nor the
-        /// unrestricted baseline it would be subtracted from.
-        case notPublished
-
-        /// Whether the client can name the removed set. False today.
-        public var isKnown: Bool {
-            if case .notPublished = self { return false }
-            return true
-        }
-    }
-
+    /// Read, never derived: the server subtracts the granted set from
+    /// `capabilitiesFor(accountMachine.initial)` and publishes the difference, so
+    /// a client that re-derived it would be holding a second copy of the kernel's
+    /// capability table. `removedSetAgreesWithBaseline` is the check that the
+    /// two published fields describe the same account.
+    public let removed: [String]
     /// The member-facing screen.
     public let title: String
     public let body: String
-    /// Always `.notPublished` today. Typed rather than omitted so the absence is
-    /// a finding rather than an oversight.
-    public let removed: RemovedCapabilities
     /// The capabilities that survive every restriction, restated to the member.
     ///
     /// `UNRESTRICTABLE_CAPABILITIES` in the kernel is `report`, `block` and
@@ -63,11 +48,15 @@ public struct RestrictedAccountViewModel: Sendable, Equatable {
     /// server that stopped granting one would make them vanish from the screen
     /// rather than being contradicted by it.
     public let alwaysAvailable: [String]
-    /// `nil` because no endpoint publishes the deciding case.
+    /// The case whose decision produced this standing.
+    ///
+    /// `nil` when no decision has been taken, which is what an account that was
+    /// never sanctioned says. Never `nil` merely because the client could not
+    /// find it: the decoder refuses a response that omits the key, so a nil here
+    /// is the server's answer rather than this client's gap.
     public let caseReference: String?
     /// The one action the screen must never withhold.
     public let primaryAction: PrimaryAction
-
     /// What a restricted member is still allowed to do next.
     public enum PrimaryAction: Sendable, Equatable {
         /// A restriction the member cannot lift themselves. Nothing is actionable,
@@ -86,13 +75,13 @@ public struct RestrictedAccountViewModel: Sendable, Equatable {
 
     /// Builds the screen from the published standing.
     ///
-    /// The copy for each state names, in words, what the member cannot do. That
-    /// is the one thing `state` alone supports: `state` is in the projection, so
-    /// the sentence about it is grounded, while a list of the individual
-    /// capabilities that went with it would not be.
+    /// Every value below is read off `AccountStanding`. The copy for each state
+    /// still names, in words, what the member cannot do — `state` supports that
+    /// sentence on its own — but the machine list beside it is now the server's
+    /// `removedCapabilities` rather than a sentence that stands in for one.
     public init(standing: AccountStanding) {
-        self.caseReference = nil
-        self.removed = .notPublished
+        self.removed = standing.removedCapabilities
+        self.caseReference = standing.caseId
         self.alwaysAvailable = RestrictedAccountViewModel.alwaysAvailable(from: standing)
 
         switch standing.state {

@@ -5,6 +5,8 @@ import {
   type Result,
   type UserId,
   castId,
+  accountMachine,
+  capabilitiesFor,
 } from '@been-there/core';
 import type { BlockRecord } from '../src/blocks.js';
 import { type BlockId, type IdempotencyKey, type LikeId, type PassId, castDatingId } from '../src/ids.js';
@@ -135,12 +137,16 @@ export function standing(user: UserId, overrides: StandingOverrides = {}): Subje
     state: overrides.identityState ?? 'verified',
     generation: overrides.generation ?? 1,
   };
+  const capabilities =
+    overrides.capabilities ?? (overrides.accountState === 'suspended' ? ['report', 'block'] : ['browse_discovery', 'like', 'send_message']);
   const account: AccountStandingProjection = {
     projectionVersion: STANDING_PROJECTION_VERSION,
     state: overrides.accountState ?? 'active',
-    capabilities:
-      overrides.capabilities ?? (overrides.accountState === 'suspended' ? ['report', 'block'] : ['browse_discovery', 'like', 'send_message']),
+    capabilities,
+    baselineCapabilities: capabilitiesFor(accountMachine.initial),
+    removedCapabilities: capabilitiesFor(accountMachine.initial).filter((capability) => !capabilities.includes(capability)),
     visibleInProduct: overrides.visibleInProduct ?? overrides.accountState !== 'banned',
+    caseId: null,
   };
   const preferences: DatingPreferences = { ...UNSET_PREFERENCES, ...overrides.preferences };
   return { userId: user, profile, identity, account, preferences };

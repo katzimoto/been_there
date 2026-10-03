@@ -24,12 +24,45 @@ Where each link stands:
 | Like → match | **built** | reciprocal like creates exactly one match |
 | Chat | **built** | through the communication gate; refusal is symmetric |
 | Block & report | **built** | a report after an unmatch works — evidence is retained independently |
-| Risk detection | **domain only — not wired** | the corroboration policy is built and tested, but **no service route feeds it**: `packages/service` does not import `trust-safety`, and nothing writes the risk store over HTTP |
+| Risk detection | **wired, but the metric cannot move** | routes now emit observations and `createServiceSafety` feeds the risk store — but every detector is `corroboration_only` against a `0.7` gate, so **nothing escalates a subject on its own**. `safety.detected_before_first_report` is structurally stuck, not merely unwired |
 | Moderation | **built** | a decision with no named human, or by an automated actor, is refused |
 | Enforcement | **built** | restrictions cannot strip `report` or `block` |
 
 **The chain runs end to end through the service.** The gaps are in the *product
 around* it — onboarding, profiles, the moderator's view — not in the safety core.
+
+### Why the safety metric is stuck, and why that may be correct
+
+Every detector in `packages/trust-safety/src/detectors.ts` is
+`corroboration_only`, and the escalation gate is `0.7`. The arithmetic: no single
+detector carries a subject from `normal` past `elevated`. Only
+`interaction.unmatch_report` (score `0.6`, `high` reliability) can, and it
+requires `moderation.report_pairing` — which is emitted **only when
+`RISK_PAIRING_SECRET` is set**. The repository ships no value for it.
+
+So the wiring can be perfect and the metric still read zero, forever.
+
+**This may be the correct policy, not a defect.** "Two accounts behaving like
+this is a pattern; one is an anecdote" is the reason every detector is
+corroboration-only. A single detector is never trusted to move a person. That is
+the same commitment as *automation never enforces*: the system is built so that
+one noisy signal cannot act on its own.
+
+What must not happen is a threshold lowered so the number moves. A safety metric
+that reads non-zero because the bar was lowered is worse than one that is visibly
+stuck, because it is indistinguishable from detection working.
+
+Two related gaps are known and not fixed:
+
+- **`risk_signals` cannot faithfully replay a ledger.** There is no column for a
+  signal's author or its actor, yet `corroborate` reads the actor to count a
+  mass-report campaign's *distinct reporters*. Corroboration state is therefore
+  process-local: **a restart forgets it**, which contradicts the durability
+  issue #18 asks for.
+- **`report_against` has no producer**, so the mass-report quarantine in
+  `assessSignal` is unreachable from any detector. The domain logic is built and
+  tested; nothing can reach it.
+
 
 ## What is decided but not built
 

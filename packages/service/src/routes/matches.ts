@@ -8,6 +8,8 @@ import {
   ok,
 } from '@been-there/core';
 import { castDatingId, unmatch } from '@been-there/dating';
+import { createServiceSafety } from '../wiring/safety.js';
+import { subjectOf } from '../wiring/standing.js';
 import { MISSING_FIELD, NOT_FOUND } from '../http/failure.js';
 import { readString } from '../http/body.js';
 import { okResponse, route, type Route } from '../http/router.js';
@@ -98,6 +100,23 @@ export function matchRoutes(dependencies: ServiceDependencies): readonly Route[]
           );
         }
       }
+      // The unmatch is observed for both accounts: the one who ended the match
+      // performed it, and the one who was unmatched is the account a detector
+      // runs for. Publishing only the performer's side would leave
+      // `interaction.unmatch_by_counterparty` permanently silent, which is the
+      // reduction's documented answer to an unmatch it cannot place.
+      const other =
+        match.participants[0] === actorId ? match.participants[1] : match.participants[0];
+      await createServiceSafety(dependencies).recorder.observe(
+        {
+          kind: 'unmatch.performed',
+          actorId,
+          subjectId: subjectOf(other),
+          matchId,
+          at: request.now,
+        },
+        request.tx,
+      );
       // The conversation is closed and *kept*. The right to report outlives the
       // relationship — commitment 4 — so this route ends a conversation and
       // deletes nothing.

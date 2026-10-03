@@ -2,36 +2,38 @@ import Foundation
 
 // MARK: - Reading the projections the server actually publishes
 //
-// `ClientGate.swift` is not edited by this file and its `AccountStanding` is used
-// exactly as written. What is added here is only the coding that type needs.
+// `ClientGate.swift` declares the types; what is added here is only the coding
+// they need, because Swift's synthesised `Decodable` and the server's declared
+// field set do not agree on one point: `AccountStandingProjection` publishes
+// `baselineCapabilities`, `removedCapabilities` and `caseId` as *required*
+// members, with `caseId` nullable but always present. The compiler's guess
+// would make them all optional and silently default, which is the exact failure
+// this file was first written to prevent.
 //
-// ## The defect this file works around
+// ## Why the tolerance is gone
 //
-// `ClientGate.AccountStanding` declares `removedCapabilities: [String] = []`. Swift's
-// synthesised `Decodable` ignores a default value in an `init` and requires the key
-// on the wire. The server's `AccountStandingProjection` has **no**
-// `removedCapabilities` field — `accountProjectionFor` builds it from `state`,
-// `capabilities` and `visibleInProduct`, and those three are the whole
-// projection.
-//
-// Without this file `AccountView` would not decode a single real response, so the
-// client could not be tested against the running service at all. The `[]` default
-// in the declared initialiser is the author's statement that the field is
-// optional; this decoder honours that statement rather than the compiler's
-// synthesised guess.
-//
-// ## What it does not do
-//
-// It does not invent a removed set. An absent `removedCapabilities` decodes as
-// `[]`, which means "the server did not say", and `RestrictedAccountViewModel`
-// reads it as exactly that rather than as "nothing was removed".
+// This file used to decode an absent `removedCapabilities` as `[]` and leave
+// `caseReference` nil, because the server published neither. That was a
+// documented workaround, and `RestrictedAccountViewModel` carried a
+// `.notPublished` case to keep a caller from mistaking it for "nothing was
+// removed". Both are now real assertions: `STANDING_PROJECTION_VERSION` is 2,
+// the projection carries all three fields, and a response missing one fails to
+// decode rather than producing a screen that says a restriction removed
+// nothing.
 
 extension AccountStanding {
 
-    /// Decoding `AccountStandingProjection`, with `removedCapabilities` optional.
+    /// Decoding `AccountStandingProjection`, strictly.
     ///
-    /// `state` and `capabilities` are required, so a row missing one fails loudly
-    /// rather than decoding as a standing the member does not have.
+    /// Every field the projection declares is required. `state` and
+    /// `capabilities` fail loudly rather than decoding as a standing the member
+    /// does not have; `removedCapabilities` and `baselineCapabilities` fail
+    /// loudly because a missing one used to decode as "nothing was removed",
+    /// which is the specific false statement a restriction screen must not make;
+    /// and `caseId` is required as a *key* while remaining nullable, so a
+    /// server that stopped sending it is a failure and a server that sent `null`
+    /// is the honest "no decision has been taken".
+    ///
     /// `projectionVersion` is checked rather than discarded: the projection's own
     /// doc comment says a consumer that has not been rebuilt against a new
     /// version must see a refusal rather than a mis-read, and refusing is the
@@ -43,14 +45,25 @@ extension AccountStanding {
         )
         self.state = try container.decode(AccountState.self, forKey: .state)
         self.capabilities = try container.decode([String].self, forKey: .capabilities)
-        self.removedCapabilities = try container.decodeIfPresent(
-            [String].self,
-            forKey: .removedCapabilities
-        ) ?? []
-        self.visibleInProduct = try container.decodeIfPresent(
-            Bool.self,
-            forKey: .visibleInProduct
-        ) ?? true
+        self.removedCapabilities = try container.decode([String].self, forKey: .removedCapabilities)
+        self.baselineCapabilities = try container.decode([String].self, forKey: .baselineCapabilities)
+        self.visibleInProduct = try container.decode(Bool.self, forKey: .visibleInProduct)
+        guard container.contains(.caseId) else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.caseId,
+                .init(
+                    codingPath: container.codingPath,
+                    debugDescription: """
+                    the account standing projection has no `caseId` key. It is \
+                    nullable — a null is how the server says no decision has been \
+                    taken — but it is always present, and its absence means the \
+                    server is not publishing the reference this client needs in \
+                    order to let a member contest the decision.
+                    """
+                )
+            )
+        }
+        self.caseId = try container.decodeIfPresent(String.self, forKey: .caseId)
     }
 
     /// Encoded with the projection's own field names, so a standing this client
@@ -61,7 +74,21 @@ extension AccountStanding {
         try container.encode(state, forKey: .state)
         try container.encode(capabilities, forKey: .capabilities)
         try container.encode(removedCapabilities, forKey: .removedCapabilities)
+        try container.encode(baselineCapabilities, forKey: .baselineCapabilities)
         try container.encode(visibleInProduct, forKey: .visibleInProduct)
+        try container.encodeIfPresent(caseId, forKey: .caseId)
+    }
+
+    /// Whether the server's removed set agrees with its own baseline.
+    ///
+    /// A readback, not a rule: `removedCapabilities` is what the screen renders,
+    /// and this is the check that the two published fields describe the same
+    /// account. It can only be false if the server changed one without the other,
+    /// which is a real disagreement worth tripping over rather than silently
+    /// preferring one of the two numbers.
+    public var removedSetAgreesWithBaseline: Bool {
+        let difference = baselineCapabilities.filter { !capabilities.contains($0) }
+        return difference.sorted() == removedCapabilities.sorted()
     }
 
     /// Throws when the projection is built at a version this build cannot read.
@@ -86,13 +113,15 @@ extension AccountStanding {
         case state
         case capabilities
         case removedCapabilities
+        case baselineCapabilities
         case visibleInProduct
+        case caseId
     }
 }
 
 /// `STANDING_PROJECTION_VERSION` in `packages/dating/src/read-models.ts`.
 public enum SupportedStandingProjectionVersion {
-    public static let value = 1
+    public static let value = 2
 }
 
 /// The same tolerance and the same version check for `AccountView`'s identity

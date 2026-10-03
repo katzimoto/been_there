@@ -36,23 +36,45 @@ public enum AccountState: String, Codable, Sendable, CaseIterable {
     case banned
 }
 
-/// The standing projection, as `AccountStateChangedPayload` publishes it.
+/// The standing projection, as `AccountStandingProjection` publishes it.
+///
+/// `removedCapabilities`, `baselineCapabilities` and `caseId` are read from the
+/// server, never computed here. That is the point of this change: the client
+/// used to declare `removedCapabilities` with an empty default and leave
+/// `caseReference` nil because the projection published neither, which meant an
+/// honest restriction screen had to name what was removed in prose or hold a
+/// second copy of `CAPABILITIES_BY_ACCOUNT_STATE`. The server now publishes all
+/// three and `AccountStandingDecoding.swift` requires them on the wire.
 public struct AccountStanding: Codable, Sendable, Equatable {
     public let state: AccountState
     public let capabilities: [String]
+    /// What was taken away, as the server computed it by subtracting the granted
+    /// set from the unrestricted baseline. Owner-visible, and carrying no reason
+    /// and nobody else's data.
     public let removedCapabilities: [String]
+    /// The unrestricted grant, published so the subtraction above is checkable
+    /// from both ends rather than being a second copy of the kernel's table.
+    public let baselineCapabilities: [String]
     public let visibleInProduct: Bool
+    /// The case whose decision produced this standing, or `nil` when no decision
+    /// has. Opaque, owner-visible, and the basis on which a member contests the
+    /// decision.
+    public let caseId: String?
 
     public init(
         state: AccountState,
         capabilities: [String],
         removedCapabilities: [String] = [],
-        visibleInProduct: Bool = true
+        baselineCapabilities: [String] = [],
+        visibleInProduct: Bool = true,
+        caseId: String? = nil
     ) {
         self.state = state
         self.capabilities = capabilities
         self.removedCapabilities = removedCapabilities
+        self.baselineCapabilities = baselineCapabilities
         self.visibleInProduct = visibleInProduct
+        self.caseId = caseId
     }
 }
 

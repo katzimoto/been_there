@@ -26,6 +26,7 @@ import { readString } from '../http/body.js';
 import { okResponse, route, type Route, type RouteRequest } from '../http/router.js';
 import type { ServiceDependencies } from '../ports.js';
 import { blocksBetween, matchRecordOf } from '../wiring/dating.js';
+import { createServiceSafety } from '../wiring/safety.js';
 import { subjectStandingFor } from '../wiring/standing.js';
 
 /**
@@ -136,6 +137,14 @@ export function conversationRoutes(dependencies: ServiceDependencies): readonly 
         // One bit, never a capability list: see the module comment.
         canSendMessages: peerStanding.standing.account.capabilities.includes(MESSAGE_CAPABILITY),
       };
+      // The producer's own count of messages in this conversation in the last
+      // hour, taken from the page this request already read. `sendMessage` rates
+      // the send against it, and the safety reduction takes the same number — one
+      // count and two readers, rather than two counts that could disagree.
+      const messagesLastHour = history.items.filter(
+        (message) => request.now.getTime() - message.createdAt.getTime() < 3_600_000,
+      ).length;
+
       const sent = sendMessage(
         {
           conversation,
@@ -153,9 +162,7 @@ export function conversationRoutes(dependencies: ServiceDependencies): readonly 
           recentConversationStarts: [conversation.openedAt],
           previousMessageAt: conversation.lastMessageAt,
           messagesInConversation: history.total,
-          messagesLastHour: history.items.filter(
-            (message) => request.now.getTime() - message.createdAt.getTime() < 3_600_000,
-          ).length,
+          messagesLastHour,
         },
       );
       if (!sent.ok) {
@@ -169,6 +176,23 @@ export function conversationRoutes(dependencies: ServiceDependencies): readonly 
           body: sent.value.message.body,
           createdAt: sent.value.message.createdAt,
           state: sent.value.message.state,
+        },
+        request.tx,
+      );
+      // Observed after the append, and with the count the send produced rather
+      // than the count before it: the message that was just sent is itself one
+      // of the messages in the last hour, and the reduction refuses a count below
+      // one. The count is the producer's own — it is already computed here for
+      // `sendMessage`'s own rate rules and is passed through rather than
+      // re-derived.
+      await createServiceSafety(dependencies).recorder.observe(
+        {
+          kind: 'communication.message_sent',
+          senderId: actorId,
+          peerId: counterpartId,
+          conversationId: conversation.conversationId,
+          messagesLastHour: messagesLastHour + 1,
+          at: request.now,
         },
         request.tx,
       );

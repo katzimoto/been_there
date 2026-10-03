@@ -202,11 +202,12 @@ public actor APIClient {
 
     /// `ClientGate`'s input, assembled from the one projection the server publishes.
     ///
-    /// `AccountStanding.removedCapabilities` is left at its empty default, because
-    /// `AccountStandingProjection` does not publish it. The server's
-    /// `AccountStandingRow` carries `caseId` and `decisionId`, but neither reaches
-    /// any response body — so the client has nothing to fill them from and does
-    /// not invent anything. See the handoff note.
+    /// `AccountStanding` carries `removedCapabilities`, `baselineCapabilities`
+    /// and `caseId`, and `accountProjectionFor` builds all three from the
+    /// `account_standing` row and the kernel's own capability table. This used to
+    /// be a function with a caveat: the projection published none of them, so the
+    /// removed set stayed at its empty default and the case reference at nil. It
+    /// is now a plain readback of a complete projection.
     public func viewerSnapshot() async throws -> ViewerSnapshot {
         let held = try await requireSession()
         let view = try await account(userId: held.userId)

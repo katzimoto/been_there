@@ -121,10 +121,13 @@ final class APIModelDecodingTests: XCTestCase {
             "updatedAt": "2026-10-03T06:12:52.550Z"
           },
           "account": {
-            "projectionVersion": 1,
+            "projectionVersion": 2,
             "state": "active",
             "capabilities": ["browse_discovery","like","send_message","report","block","edit_profile"],
-            "visibleInProduct": true
+            "baselineCapabilities": ["browse_discovery","like","send_message","report","block","edit_profile"],
+            "removedCapabilities": [],
+            "visibleInProduct": true,
+            "caseId": null
           }
         }
         """
@@ -135,30 +138,95 @@ final class APIModelDecodingTests: XCTestCase {
         XCTAssertTrue(view.account.visibleInProduct)
     }
 
-    /// The gap, asserted rather than worked around.
+    /// The standing projection carries what a restriction screen needs, and this
+    /// asserts the decoder reads it rather than defaulting it.
     ///
-    /// `ClientGate.Unavailable` documents that a restriction explanation needs
-    /// `removedCapabilities` and `caseReference` to be honest. The server's
-    /// `AccountStandingProjection` publishes neither, so a real response decodes
-    /// with both at their empty defaults. If a response ever *does* carry them,
-    /// this test fails — which is the moment the gap closes and the view model
-    /// should be updated rather than left claiming it does not know.
-    func testThePublishedStandingCarriesNoRemovedCapabilitiesOrCaseReference() throws {
+    /// `ClientGate.Unavailable` documents that an honest explanation needs
+    /// `removedCapabilities` and a case reference. This is the payload the server
+    /// produces for a restricted account, taken from
+    /// `accountProjectionFor`: the baseline is the kernel's grant for an
+    /// unrestricted account, the removed set is that minus what was granted, and
+    /// `caseId` is the deciding case. The projection version is 2 and the
+    /// decoder refuses anything else, so a response built against the old
+    /// three-field shape cannot decode at all — which is what makes this a real
+    /// assertion rather than a tolerant read of whatever arrived.
+    func testARestrictedStandingCarriesTheRemovedSetAndTheDecidingCase() throws {
         let view = try decode(AccountView.self, """
         {
           "userId": "u", "accountId": "a", "createdAt": "t",
           "identity": { "projectionVersion": 1, "subjectId": "u", "state": "verified",
                         "generation": 2, "discoverable": false, "updatedAt": "t" },
-          "account": { "projectionVersion": 1, "state": "limited",
-                       "capabilities": ["browse_discovery","report","block","edit_profile"],
-                       "visibleInProduct": true }
+          "account": {
+            "projectionVersion": 2, "state": "limited",
+            "capabilities": ["browse_discovery","report","block","edit_profile"],
+            "baselineCapabilities": ["browse_discovery","like","send_message","report","block","edit_profile"],
+            "removedCapabilities": ["like","send_message"],
+            "visibleInProduct": true,
+            "caseId": "case-4f1c"
+          }
         }
         """)
-        XCTAssertTrue(view.account.removedCapabilities.isEmpty)
         XCTAssertEqual(view.account.state, .limited)
-        // The restricted view model reads these as absent rather than inventing them.
-        XCTAssertFalse(RestrictedAccountViewModel(standing: view.account).removed.isKnown)
-        XCTAssertNil(RestrictedAccountViewModel(standing: view.account).caseReference)
+        XCTAssertEqual(view.account.removedCapabilities.sorted(), ["like", "send_message"])
+        XCTAssertEqual(view.account.caseId, "case-4f1c")
+        // The two published sets describe the same account. A server that changed
+        // one without the other would fail here rather than render a screen that
+        // quietly contradicts itself.
+        XCTAssertTrue(view.account.removedSetAgreesWithBaseline)
+
+        let screen = RestrictedAccountViewModel(standing: view.account)
+        XCTAssertEqual(screen.removed.sorted(), ["like", "send_message"])
+        XCTAssertEqual(screen.caseReference, "case-4f1c")
+        // The unrestrictable floor is still on the screen: this is a restriction,
+        // not a mute, and the member can still reach a human.
+        XCTAssertTrue(screen.alwaysAvailable.contains("report"))
+        XCTAssertTrue(screen.alwaysAvailable.contains("block"))
+    }
+
+    /// A response missing a field the projection declares is a failure, not a
+    /// screen that says a restriction removed nothing.
+    ///
+    /// This is the assertion that replaced the old tolerance. The decoder used
+    /// to default an absent `removedCapabilities` to `[]`, which a restriction
+    /// screen would then render as "nothing was removed" — a false statement
+    /// about somebody's account, produced by a client-side default.
+    func testAStandingMissingTheRemovedSetFailsToDecode() {
+        let json = """
+        {
+          "userId": "u", "accountId": "a", "createdAt": "t",
+          "identity": { "projectionVersion": 1, "subjectId": "u", "state": "verified",
+                        "generation": 2, "discoverable": false, "updatedAt": "t" },
+          "account": {
+            "projectionVersion": 2, "state": "limited",
+            "capabilities": ["browse_discovery","report","block","edit_profile"],
+            "baselineCapabilities": ["browse_discovery","like","send_message","report","block","edit_profile"],
+            "visibleInProduct": true,
+            "caseId": "case-4f1c"
+          }
+        }
+        """
+        XCTAssertThrowsError(try decode(AccountView.self, json))
+    }
+
+    /// A standing published at the version this build does not read is refused,
+    /// rather than decoded with three of its fields quietly wrong.
+    func testThePreviousStandingProjectionVersionIsRefused() {
+        let json = """
+        {
+          "userId": "u", "accountId": "a", "createdAt": "t",
+          "identity": { "projectionVersion": 1, "subjectId": "u", "state": "verified",
+                        "generation": 2, "discoverable": false, "updatedAt": "t" },
+          "account": {
+            "projectionVersion": 1, "state": "limited",
+            "capabilities": ["browse_discovery","report","block","edit_profile"],
+            "baselineCapabilities": ["browse_discovery","like","send_message","report","block","edit_profile"],
+            "removedCapabilities": ["like","send_message"],
+            "visibleInProduct": true,
+            "caseId": "case-4f1c"
+          }
+        }
+        """
+        XCTAssertThrowsError(try decode(AccountView.self, json))
     }
 
     // MARK: Onboarding

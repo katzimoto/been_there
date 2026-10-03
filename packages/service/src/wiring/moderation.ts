@@ -4,8 +4,13 @@ import {
   type AccountState,
   type ActorId,
   type CaseId,
+  type CorrelationId,
   type DataSensitivity,
+  type DomainEvent,
+  type EventId,
+  type EventPublisher,
   type ReportId,
+  type SubjectId,
   type UserId,
   castId,
 } from '@been-there/core';
@@ -25,9 +30,12 @@ import {
   type EvidenceKind,
   type EvidenceRecord,
   type EvidenceSourceDomain,
+  type EmitSpec,
+  type EventEmitter,
   type IdSource,
   type ModerationContext,
   type NewAuditEntry,
+  type PairingKey,
   type Report,
   type ReportReason,
   REPORT_REASON_POLICY,
@@ -70,6 +78,28 @@ export function uuidIdSource(): IdSource {
 }
 
 /**
+ * What a request's moderation context is given beyond its clock.
+ *
+ * Both of these exist because the context is the only place a moderation event
+ * can be published from, and a context that publishes into the void is the
+ * default rather than a choice: it is why `POST /v1/reports` emitted nothing at
+ * all — including the `moderation.report_pairing` join that the safety layer's
+ * strongest detector needs.
+ */
+export interface ModerationWiring {
+  /**
+   * The per-deployment secret the pairing token is keyed with.
+   *
+   * A deployment without one publishes no pairing event, so the join simply does
+   * not exist there. That is the honest outcome and is deliberately not replaced
+   * by a default secret anybody could guess.
+   */
+  readonly pairingKey?: PairingKey;
+  /** Where this context's published events go. Absent builds and drops them. */
+  readonly publish?: EventPublisher;
+}
+
+/**
  * A context bound to one request's clock, plus the audit buffer to flush.
  *
  * `now` is the request's instant, not a fresh `new Date()`: a decision, its case
@@ -77,7 +107,10 @@ export function uuidIdSource(): IdSource {
  * says it was submitted three milliseconds after the decision that produced it is
  * a record nobody can reason about later.
  */
-export function requestModerationContext(at: Date): {
+export function requestModerationContext(
+  at: Date,
+  wiring: ModerationWiring = {},
+): {
   readonly context: ModerationContext;
   readonly audit: AuditLog;
   readonly pending: AuditEntry[];
@@ -101,8 +134,45 @@ export function requestModerationContext(at: Date): {
     },
     ids: uuidIdSource(),
     now: () => at,
+    ...(wiring.pairingKey === undefined ? {} : { pairingKey: wiring.pairingKey }),
+    ...(wiring.publish === undefined ? {} : { events: publishingEmitter(wiring.publish, at) }),
   });
   return { context, audit, pending: emitted };
+}
+
+/**
+ * `createContext`'s own envelope construction, with the event handed to a bus.
+ *
+ * The default emitter builds an event and drops it. Reusing the shape here rather
+ * than writing a second one matters because the envelope *is* the contract: an
+ * event published to the metrics sink with a different `occurredAt` than the one
+ * moderation recorded would make the detection-before-report reduction compare
+ * two different instants for one decision.
+ */
+export function publishingEmitter(publish: EventPublisher, at: Date): EventEmitter {
+  const ids = uuidIdSource();
+  return {
+    emit<P extends Readonly<Record<string, unknown>>>(spec: EmitSpec<P>): DomainEvent<P> {
+      const event: DomainEvent<P> = {
+        eventId: castId<'EventId'>(ids.next()),
+        type: spec.type,
+        version: 1,
+        occurredAt: at,
+        actorId: spec.actorId,
+        ...(spec.subjectId === undefined ? {} : { subjectId: castId<'SubjectId'>(spec.subjectId) }),
+        correlationId: spec.correlationId,
+        ...(spec.causationId === undefined ? {} : { causationId: spec.causationId }),
+        sensitivity: spec.sensitivity,
+        payload: spec.payload,
+      };
+      // Fire-and-forget: `emit` is synchronous by contract and every caller in
+      // this repository ignores the envelope's fate. The in-process bus
+      // delivers to its subscribers on a microtask, so the metric reduction sees
+      // the event after the handler that produced it has returned.
+      void publish.publish(event);
+      return event;
+    },
+  };
 }
 
 /**

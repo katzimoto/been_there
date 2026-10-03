@@ -1,5 +1,6 @@
 import {
   type AccountState,
+  type CaseId,
   type IdentityState,
   type UserId,
   accountMachine,
@@ -98,22 +99,38 @@ export function accountStateOf(value: string, userId: UserId): AccountState {
  * moment anything acts on it — the decision handler writes the row inside the
  * same transaction as the decision, so there is no window in which a sanctioned
  * account reads as `active`.
+ *
+ * The three owner-visible fields are derived here rather than read off the row,
+ * because the row does not hold them. `baselineCapabilities` is the kernel's own
+ * grant for an unrestricted account; `removedCapabilities` is that minus what
+ * was granted, in baseline order. Both come from `capabilitiesFor` and neither
+ * is a second copy of the table — a copy is what this avoids, so that a new
+ * capability added to the kernel appears in the removed set without anybody
+ * editing a projection.
+ *
+ * `caseId` is the row's own column, passed through untouched. It is the case
+ * that produced *this* standing, it is an opaque id, and nothing derived from it
+ * appears here: no reason, no moderator, no report and no other account.
  */
 export function accountProjectionFor(row: AccountStandingRow | null, userId: UserId): AccountStandingProjection {
-  if (row === null) {
-    return {
-      projectionVersion: STANDING_PROJECTION_VERSION,
-      state: accountMachine.initial,
-      capabilities: capabilitiesFor(accountMachine.initial),
-      visibleInProduct: isVisibleInProduct(accountMachine.initial),
-    };
-  }
-  const state = accountStateOf(row.state, userId);
+  // The kernel's own grant for an unrestricted account, read once rather than
+  // copied: a new capability added to `CAPABILITIES_BY_ACCOUNT_STATE` appears in
+  // the baseline and in the removed set without anybody editing this file.
+  const baselineCapabilities = capabilitiesFor(accountMachine.initial);
+  const state = row === null ? accountMachine.initial : accountStateOf(row.state, userId);
+  const capabilities = row === null ? capabilitiesFor(accountMachine.initial) : [...row.capabilities];
   return {
     projectionVersion: STANDING_PROJECTION_VERSION,
     state,
-    capabilities: [...row.capabilities],
-    visibleInProduct: row.visibleInProduct,
+    capabilities,
+    baselineCapabilities,
+    // Baseline order, and a difference rather than a record of what a moderator
+    // typed. The baseline is the whole of the unrestricted set, so a capability
+    // the baseline never named — `appeal_request`, granted only on `banned` —
+    // cannot be reported here as something that was taken away.
+    removedCapabilities: baselineCapabilities.filter((capability) => !capabilities.includes(capability)),
+    visibleInProduct: row === null ? isVisibleInProduct(accountMachine.initial) : row.visibleInProduct,
+    caseId: row?.caseId == null ? null : castId<'CaseId'>(row.caseId),
   };
 }
 

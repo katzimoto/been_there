@@ -4,40 +4,46 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
- * Orphaned per-suite databases, reclaimed when the process exits.
+ * Per-suite databases, reclaimed on request.
  *
  * ## Why this exists
  *
- * Suites drop their database in `afterAll`, and three of them leak:
- * `health.test.ts` and `health-restart.test.ts` start a *second* service of their
- * own — faulted stores, or several servers on one pool — and
- * `account-sessions.test.ts` builds its own `ServiceDependencies`. Each prepares
- * a database it then abandons, and nothing reclaims it.
+ * Every suite gets a database of its own so it cannot see another's rows — see
+ * `isolation.ts`. Suites drop theirs in `afterAll`, and three of them did not:
+ * they start a *second* service of their own, or build their own
+ * `ServiceDependencies`, so nothing outside the file is holding the database
+ * they prepared.
  *
- * The symptom is invisible for a long time and then it is not. The development
- * database reached **97** orphaned databases before this existed, and the failure
- * surfaced as `StoreError: the connection was terminated` in whichever suite ran
- * next. That reads as a flaky test. It is not — it is a pool exhausted by
- * databases nobody dropped.
+ * The failure mode is the worst kind, because it does not look like one. The
+ * development database reached **97** orphans, and the suite that failed was
+ * whichever ran next, with `StoreError: the connection was terminated`. That
+ * reads as a flake and gets re-run; it is a pool exhausted by databases nobody
+ * dropped.
  *
- * `afterAll` is the right place to drop a database and the wrong place to
- * *guarantee* it: a suite that throws, or that opens its own handle, bypasses it.
- * This is the belt to those braces. The names carry the pid, so anything still
- * matching at exit is unambiguously this run's own, and reclaiming it needs no
- * cooperation from the suite that made it.
+ * ## How a suite uses it
  *
- * ## How it drops, and why it is a subprocess
+ * ```ts
+ * import { reclaimPrepared } from './support/reclaim.js';
  *
- * Reclaiming happens in an `exit` handler, where the event loop is no longer
- * ours and a promise-based driver will not settle. So this shells out to
- * `psql` through the compose container, which needs no connection state of our
- * own and fails harmlessly if the container is not there.
+ * afterAll(async () => {
+ *   await pool.end();
+ *   reclaimPrepared();
+ * });
+ * ```
  *
- * It never drops another process's database: the pid is in the name.
+ * `reclaimPrepared()` drops everything `requireDatabaseReady()` handed out this
+ * process and nothing else. That precision is the point: an earlier blanket
+ * `reclaim()` in one suite dropped a sibling database mid-run and broke it, so
+ * the name says what it touches.
+ *
+ * It shells out to `psql` through the compose container rather than using the
+ * driver, because this also runs at a point where a promise-based pool will not
+ * settle. It never touches a database belonging to another process — the names
+ * carry the pid.
  */
 
-function readDatabaseUrl(): string | undefined {
-  const fromEnv = process.env['DATABASE_URL'];
+function readEnv(name) {
+  const fromEnv = process.env[name];
   if (fromEnv !== undefined) {
     return fromEnv;
   }
@@ -46,7 +52,7 @@ function readDatabaseUrl(): string | undefined {
     return undefined;
   }
   for (const line of readFileSync(envFile, 'utf8').split('\n')) {
-    const match = /^\s*DATABASE_URL\s*=\s*(.*?)\s*$/.exec(line);
+    const match = new RegExp(`^\\s*${name}\\s*=\\s*(.*?)\\s*$`).exec(line);
     if (match !== null) {
       return match[1];
     }
@@ -54,45 +60,23 @@ function readDatabaseUrl(): string | undefined {
   return undefined;
 }
 
-const claimed = new Set<string>();
-let armed = false;
+const prepared = new Set<string>();
 
-/** Records that this process created `name`, so it is reclaimed if not dropped. */
-export function claimDatabase(name: string): void {
-  claimed.add(name);
-  if (armed) {
-    return;
-  }
-  // Deliberately no `process.on('exit')` backstop. A vitest worker tears the
-  // process down without running those handlers, so an exit hook is a promise
-  // rather than a guarantee — which is exactly the failure this file exists to
-  // fix. `reclaim()` is called explicitly from `afterAll` instead, which runs.
-  void armed;
+/** Records a database `requireDatabaseReady()` created for this process. */
+export function notePrepared(name: string): void {
+  prepared.add(name);
 }
 
-/** Releases a database the suite dropped itself, so it is not dropped twice. */
-export function releaseDatabase(name: string): void {
-  claimed.delete(name);
-}
+/** Drops every database this process prepared and has not released. */
+export function reclaimPrepared(): void {
+  const names = [...prepared];
+  prepared.clear();
 
-/**
- * Drops every still-claimed database. Idempotent, and silent on failure: an
- * error here would mask whatever brought the process down, and the next run's
- * `create` drops leftovers by name anyway.
- */
-export function reclaim(): void {
-  if (claimed.size === 0) {
+  const user = readEnv('POSTGRES_USER') ?? 'been_there';
+  const database = readEnv('POSTGRES_DB') ?? 'been_there';
+  if (readEnv('DATABASE_URL') === undefined) {
     return;
   }
-  const names = [...claimed];
-  claimed.clear();
-
-  const env = readDatabaseUrl();
-  if (env === undefined) {
-    return;
-  }
-  const user = process.env['POSTGRES_USER'] ?? 'been_there';
-  const database = process.env['POSTGRES_DB'] ?? 'been_there';
 
   for (const name of names) {
     spawnSync(

@@ -1,7 +1,6 @@
-import type { ActorId, DomainError, Result, UserId } from '@been-there/core';
+import type { ActorId, DomainError, EventPublisher, Result, UserId } from '@been-there/core';
 import type { Stores, Transaction } from '@been-there/contracts';
 import type { Principal, Role } from '@been-there/platform';
-
 /**
  * What the service is given at the edge, and nothing else.
  *

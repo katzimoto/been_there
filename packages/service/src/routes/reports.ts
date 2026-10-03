@@ -21,6 +21,7 @@ import { readEnum, readString } from '../http/body.js';
 import { okResponse, route, type HttpResponse, type Route, type RouteRequest } from '../http/router.js';
 import type { ServiceDependencies } from '../ports.js';
 import { blocksBetween, ledgersFor, matchRecordOf } from '../wiring/dating.js';
+import { createServiceSafety } from '../wiring/safety.js';
 import { auditAppender, flushAudit, reportRowOf, requestModerationContext } from '../wiring/moderation.js';
 import { userIdOf } from './accounts.js';
 
@@ -44,6 +45,12 @@ import { userIdOf } from './accounts.js';
  * would let two different reports share one fingerprint, and the appeal record is
  * exactly where that would bite.
  */
+
+/** The deployment's pairing secret, or `null`: no secret means no pairing event. */
+function pairingKeyOf(dependencies: ServiceDependencies): string | null {
+  const secret = process.env['RISK_PAIRING_SECRET'];
+  return secret === undefined || secret.length === 0 ? null : secret;
+}
 
 const REPORT_REASONS: readonly ReportReason[] = Object.keys(REPORT_REASON_POLICY) as ReportReason[];
 
@@ -121,7 +128,15 @@ async function submitReportFor(
     // matched correctly carries no match at all.
     matchId: match === null ? null : String(match.matchId),
   };
-  const { context, pending } = requestModerationContext(request.now);
+  // The context is given the process's event stream and the deployment's pairing
+  // secret. Without them `submitReport` constructs its events and drops them —
+  // including `moderation.report_pairing`, the join token
+  // `interaction.unmatch_report` needs — so the safety layer would never learn
+  // that an unmatch and a report describe the same pair.
+  const { context, pending } = requestModerationContext(request.now, {
+    publish: createServiceSafety(dependencies).events,
+    ...(pairingKeyOf(dependencies) === null ? {} : { pairingKey: { secret: pairingKeyOf(dependencies)! } }),
+  });
   const submitted = submitReport(context, {
     reportId: castId<'ReportId'>(randomUUID()),
     subjectId: subject.value,

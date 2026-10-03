@@ -1,4 +1,4 @@
-import type { AccountState, IdentityState, PhotoId, UserId } from '@been-there/core';
+import type { AccountState, CaseId, IdentityState, PhotoId, UserId } from '@been-there/core';
 import type { BlockRecord } from './blocks.js';
 import type { LikeRecord } from './likes.js';
 import type { MatchRecord, MatchStanding } from './interaction.js';
@@ -19,7 +19,16 @@ import type { GenderIdentity, ProfileSnapshot } from './profile.js';
  */
 
 export const DATING_READ_MODEL_VERSION = 1;
-export const STANDING_PROJECTION_VERSION = 1;
+
+/**
+ * Bumped to 2 when the projection gained `baselineCapabilities`,
+ * `removedCapabilities` and `caseId`. A version exists so a consumer can
+ * refuse a shape it does not understand rather than mis-read it, and a
+ * projection that has quietly grown three owner-visible fields is exactly the
+ * case that check is for: a build from before this one would decode a standing
+ * and render "nothing was removed" from a set it never received.
+ */
+export const STANDING_PROJECTION_VERSION = 2;
 
 /**
  * The vocabulary every standing is read through. These four names are the whole
@@ -42,16 +51,56 @@ export interface IdentityStandingProjection {
 }
 
 /**
- * Built from `account_state.changed` (public). It carries the capability set
- * and nothing else: a dating client must not be able to infer that a user was
- * reported, reviewed or restricted, so the reason for the standing is not in
- * this projection and never will be.
+ * Built from `account_state.changed` (public) and read from the `account_standing`
+ * row. It carries the capability set, the set difference against the
+ * unrestricted grant, and the case reference — and nothing else.
+ *
+ * ## What it deliberately still does not carry
+ *
+ * No moderation *reason*, no moderator identity, no report and no evidence. A
+ * projection carrying a reason would turn a dating client into a moderation
+ * surface, and this one is consumed by the discovery and send gates as well as
+ * by the account screen. What it does carry is what the member is entitled to
+ * know about their own standing, and nothing about anybody else's.
+ *
+ * ## Why the baseline is published rather than derived
+ *
+ * `removedCapabilities` is computed by subtracting the granted set from
+ * `capabilitiesFor(accountMachine.initial)` — the kernel's own grant for an
+ * unrestricted account. A client that wanted to work out the same set would
+ * have to hold a copy of `CAPABILITIES_BY_ACCOUNT_STATE`, and a second copy of
+ * the kernel's capability table is precisely the drift this repository exists
+ * to prevent. Publishing the baseline makes the subtraction checkable from both
+ * ends: a client that disagrees with `baselineCapabilities − capabilities` has
+ * found a real disagreement rather than a stale table.
  */
 export interface AccountStandingProjection {
   readonly projectionVersion: number;
   readonly state: AccountState;
   readonly capabilities: readonly string[];
+  /** What an unrestricted account holds. The set `removedCapabilities` subtracts from. */
+  readonly baselineCapabilities: readonly string[];
+  /**
+   * `baselineCapabilities` minus `capabilities`, in baseline order. Empty for
+   * an account that has never been sanctioned.
+ *
+ * A set difference, not a record of what a moderator typed: it says what this
+ * account cannot do relative to an unrestricted one, which is the fact the
+ * screen needs, and nothing about who decided it or why.
+ */
+  readonly removedCapabilities: readonly string[];
   readonly visibleInProduct: boolean;
+  /**
+   * The case whose decision produced this standing, or `null` when none did.
+   *
+   * Owner-visible, and the basis on which a member contests the decision:
+   * `moderation.restriction_applied` already publishes it at `user` clearance
+   * for that reason. It is an opaque id — it names no reason, no moderator and
+   * no other account — and the endpoint that resolves it is staff-gated, so
+   * holding it discloses the existence of nothing beyond what the member's own
+   * screen already shows.
+   */
+  readonly caseId: CaseId | null;
 }
 
 /** Everything eligibility needs to know about one user. */

@@ -12,12 +12,30 @@ final class RestrictedAndDiscoveryViewModelTests: XCTestCase {
 
     // MARK: Fixtures — the capability sets the kernel's own table declares
 
+    /// `CAPABILITIES_BY_ACCOUNT_STATE.active`, verbatim. This is the *baseline*:
+    /// what `accountProjectionFor` subtracts a granted set from, and the reason
+    /// the server publishes it rather than leaving a client to hold its own copy.
+    private static let baseline = ["browse_discovery", "like", "send_message", "report", "block", "edit_profile"]
+
+    /// A standing shaped exactly as `accountProjectionFor` builds one: the granted
+    /// set, the baseline it was granted out of, the difference, and the deciding
+    /// case. The difference is computed here from the same two published sets
+    /// rather than written out, so a fixture and the server cannot drift apart
+    /// into two different claims about the same account.
     private func standing(
         _ state: AccountState,
         _ capabilities: [String],
-        visible: Bool = true
+        visible: Bool = true,
+        caseId: String? = "case-9a2f"
     ) -> AccountStanding {
-        AccountStanding(state: state, capabilities: capabilities, visibleInProduct: visible)
+        AccountStanding(
+            state: state,
+            capabilities: capabilities,
+            removedCapabilities: Self.baseline.filter { !capabilities.contains($0) },
+            baselineCapabilities: Self.baseline,
+            visibleInProduct: visible,
+            caseId: caseId
+        )
     }
     /// `CAPABILITIES_BY_ACCOUNT_STATE.active`, verbatim.
     private var active: AccountStanding {
@@ -135,19 +153,46 @@ final class RestrictedAndDiscoveryViewModelTests: XCTestCase {
         )
     }
 
-    // MARK: The gap, asserted rather than filled
+    // MARK: The removed set and the deciding case, read rather than inferred
 
-    /// `AccountStandingProjection` publishes `state`, `capabilities` and
-    /// `visibleInProduct` — and nothing else. So the removed set and the case
-    /// reference are reported as unknown rather than inferred from a copy of the
-    /// kernel's capability table, which is exactly the second copy the repository
-    /// exists to prevent.
-    func testTheRemovedSetAndTheCaseReferenceAreReportedAsUnknown() {
+    /// The screen names what was removed, because the server says so.
+    ///
+    /// This replaces a test that asserted the *absence* — that the projection
+    /// published no removed set and so the client reported `.notPublished`. That
+    /// was true of the server and false of the product: `ClientGate.Unavailable`
+    /// documented that an honest restriction explanation needs exactly these two
+    /// values. `AccountStandingProjection` now carries both, and the screen reads
+    /// them rather than describing the restriction in prose alone.
+    func testTheScreenNamesTheRemovedSetTheServerPublished() {
+        XCTAssertEqual(RestrictedAccountViewModel(standing: active).removed, [])
+        XCTAssertEqual(
+            RestrictedAccountViewModel(standing: limited).removed.sorted(),
+            ["like", "send_message"]
+        )
+        XCTAssertEqual(
+            RestrictedAccountViewModel(standing: suspended).removed.sorted(),
+            ["browse_discovery", "like", "send_message"]
+        )
+        XCTAssertEqual(
+            RestrictedAccountViewModel(standing: banned).removed.sorted(),
+            ["browse_discovery", "edit_profile", "like", "send_message"]
+        )
+        // Whatever the state, the two published sets describe the same account.
         for published in [active, limited, suspended, banned] {
-            let model = RestrictedAccountViewModel(standing: published)
-            XCTAssertFalse(model.removed.isKnown, "\(published.state.rawValue) claimed to know the removed set")
-            XCTAssertNil(model.caseReference)
+            XCTAssertTrue(published.removedSetAgreesWithBaseline)
         }
+    }
+
+    /// The screen names the case that decided it, which is the basis on which a
+    /// member contests the restriction.
+    func testTheScreenNamesTheDecidingCase() {
+        XCTAssertEqual(RestrictedAccountViewModel(standing: limited).caseReference, "case-9a2f")
+        // An account no decision has touched says so, and says it by being null
+        // because the *server* said null — the decoder refuses a response with no
+        // `caseId` key at all, so this nil cannot be a client-side gap.
+        XCTAssertNil(
+            RestrictedAccountViewModel(standing: standing(.active, Self.baseline, caseId: nil)).caseReference
+        )
     }
 
     /// The screen says what is switched off in words, and says it for the state
@@ -171,16 +216,20 @@ final class RestrictedAndDiscoveryViewModelTests: XCTestCase {
         }
     }
 
-    /// Nothing on the screen names a case, a moderator or a reason.
+    /// The copy still names no reason and no person, even now that the screen
+    /// holds the deciding case.
     ///
-    /// `AccountStandingProjection` carries a state, a capability list and a
-    /// visibility bit and nothing else, "because a projection that carried one
-    /// would turn a dating client into a moderation surface". The client's copy
-    /// must stay on the same side of that line.
-    func testTheScreenNeverNamesACaseOrAModerator() {
+    /// `AccountStandingProjection` carries an opaque case id and nothing else,
+    /// "because a projection that carried one [a reason] would turn a dating
+    /// client into a moderation surface". The reference is a field the product
+    /// can route on; the prose a member reads stays on the same side of that
+    /// line. This test would fail if someone started writing "case case-9a2f was
+    /// opened because you were reported" into the body.
+    func testTheCopyNamesNoReasonAndNoModeratorEvenWithTheCaseInHand() {
         for published in [active, limited, suspended, banned] {
             let model = RestrictedAccountViewModel(standing: published)
             let all = [model.title, model.body].joined(separator: " ").lowercased()
+            XCTAssertFalse(all.contains("case-9a2f"), "\(published.state.rawValue) named the case in prose")
             for forbidden in ["case-", "case #", "moderator", "reported", "reviewed", "because you"] {
                 XCTAssertFalse(
                     all.contains(forbidden),
