@@ -111,6 +111,28 @@ await pool.query('SELECT 1 FROM app.users LIMIT 0');
 const running = await startService(dependencies, {
   routes: serviceRoutes(dependencies),
   port,
+  // The trusted-hop seam: this deployment is a service behind a reverse proxy,
+  // so the caller's address arrives in `X-Forwarded-For` and the socket's own
+  // address is the proxy's. Installed rather than omitted, and read per request
+  // rather than captured once.
+  //
+  // The reason is concrete, not tidiness. `SIGNUP_PER_IP_PER_HOUR` is 5
+  // (`packages/service/src/accounts/rate-limit.ts`), and without this seam every
+  // request in the demo arrives over one loopback socket and so shares one
+  // bucket. The acceptance walk creates four accounts, which would leave it four
+  // of five with nothing spare — and a fifth sign-up anywhere in it would fail
+  // the demo for a reason that has nothing to do with what the walk shows.
+  // `packages/service/test/support/harness.ts` solves the same problem by
+  // exposing `fromAddress()` and rotating; this is the production spelling of
+  // that seam, and the walk presents addresses the way a proxy would.
+  //
+  // **It must not be removed, and the limit must not be raised to make the
+  // walk pass.** Raising `SIGNUP_PER_IP_PER_HOUR` would delete the very limit
+  // the demo exists to show. `scripts/demo/lib/preflight.mjs` asserts both
+  // halves — the sixth sign-up from one address is refused, a sign-up from a
+  // second address is admitted — so removing this seam or raising the limit
+  // turns the walk red rather than quietly weakening it.
+  peerAddressFrom: (message) => firstForwardedFor(message.headers['x-forwarded-for']),
 });
 const health = createServiceHealth(dependencies);
 
@@ -209,6 +231,26 @@ function actorsFor(staffEntries, storesForActors, transactionForActors) {
 
 function say(text) {
   process.stdout.write(`[demo] ${text}\n`);
+}
+
+/**
+ * The caller's address, from the first entry of `X-Forwarded-For`.
+ *
+ * The first entry is the only one a trusted hop may believe: every proxy in the
+ * chain appends, so the leftmost is the one the hop that actually received the
+ * connection wrote. A header a client can set is not a rate-limit key, which is
+ * why this exists only where the hop in front is trusted — the condition
+ * `ServerOptions.peerAddressFrom` documents.
+ *
+ * `null` rather than a guess when the header is absent or unparseable, so the
+ * service falls back to the socket address instead of inventing one.
+ */
+function firstForwardedFor(header) {
+  if (typeof header !== 'string') {
+    return null;
+  }
+  const first = header.split(',')[0].trim();
+  return /^\d{1,3}(\.\d{1,3}){3}(:\d{1,5})?$/.test(first) ? first : null;
 }
 
 function emit(kind, payload) {

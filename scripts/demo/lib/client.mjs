@@ -16,8 +16,25 @@
  * process is the whole point.
  */
 export function createClient(base = '') {
+  let presentedAddress = null;
   return {
     base,
+
+    /**
+     * Presents every subsequent request as arriving from `address`, by sending
+     * the header a reverse proxy in front of the service would send.
+     *
+     * This is the same seam `fromAddress()` gives the test harness, in the
+     * production spelling: the harness varies a closure because nothing is in
+     * front of it, whereas here a real hop reads `X-Forwarded-For`. Without
+     * this, every request in the walk arrives over one loopback socket and so
+     * shares one `signup_per_ip` bucket — see `scripts/demo/server.mjs`.
+     *
+     * @param {string | null} address
+     */
+    fromAddress(address) {
+      presentedAddress = address;
+    },
 
     /**
      * @param {string} method
@@ -31,6 +48,7 @@ export function createClient(base = '') {
         headers: {
           ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+          ...(presentedAddress === null ? {} : { 'x-forwarded-for': presentedAddress }),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
@@ -74,11 +92,9 @@ export function errorOf(response) {
 /** `details` of a refusal, as an object, or `{}`. */
 export function detailsOf(response) {
   const details = errorOf(response)['details'];
-  return typeof details === 'object' && details === null
+  return typeof details !== 'object' || details === null
     ? {}
-    : typeof details === 'object'
-      ? /** @type {Record<string, unknown>} */ (details)
-      : {};
+    : /** @type {Record<string, unknown>} */ (details);
 }
 
 /** Reads a nested field by dotted path, failing loudly rather than as undefined. */

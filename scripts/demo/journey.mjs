@@ -38,6 +38,7 @@ import { REPO_ROOT, demoDatabase, loadDotEnv } from './lib/demo-database.mjs';
 import { createClient } from './lib/client.mjs';
 import { exitWithFailure, narrator } from './lib/narrative.mjs';
 import { STEP_COUNT, STEPS } from './lib/steps.mjs';
+import { checkRateLimitBudget } from './lib/preflight.mjs';
 
 const SERVER = join(REPO_ROOT, 'scripts/demo/server.mjs');
 const BOOT_TIMEOUT_MS = 30_000;
@@ -200,6 +201,14 @@ try {
   walk.heading('Been There — the acceptance walk, over HTTP, against real Postgres');
   say(`database ${database.database}, created and migrated for this run`);
   say(`service running as its own process on ${running.url}, pid ${running.pid}`);
+
+  // Before step 1, and outside the numbered steps, because this is a property
+  // of the demo's own plumbing rather than a claim about the product. It fails
+  // the run rather than a step, so a regression here never reads as a defect
+  // in the age gate.
+  walk.heading('Preflight: the rate limit the walk depends on');
+  await checkRateLimitBudget(client, say);
+  client.fromAddress(null);
 
   const context = { client, say, people: {}, ids: {}, moderator: MODERATOR, restart };
 
