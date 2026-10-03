@@ -397,6 +397,8 @@ function report() {
   say('   verification and matches Alice before blocking her, because an unverified');
   say('   account cannot hold a conversation and the block would close nothing. The');
   say('   deviation is printed inside the step.');
-  say('5. There is no client. No iOS or web UI is started, so the product demonstrated');
-  say('   here is the server and the rules it enforces, exercised as a client would.');
+  say('5. No UI is started by this walk. It exercises the server and the rules it');
+  say('   enforces, driven as a client would drive it. A web client exists and is the');
+  say('   way to look at this rather than read it: node web/server.mjs, then');
+  say('   http://127.0.0.1:5173. It is not started here, and there is no iOS app.');
 }
