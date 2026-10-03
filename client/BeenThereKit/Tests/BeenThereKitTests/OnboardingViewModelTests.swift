@@ -267,30 +267,135 @@ final class OnboardingViewModelTests: XCTestCase {
         ))
     }
 
-    /// A real drift, recorded rather than smoothed over.
+    /// The drift this test was written to catch, now closed.
     ///
-    /// `ClientGate.onboardingNextStep` checks **identity** before contact;
-    /// `outstandingSteps` in the service checks **contact** first, and
-    /// `ONBOARDING_ORDER` puts `contact_verification` ahead of
-    /// `identity_verification`. So for a fresh sign-up — nothing verified,
-    /// nothing confirmed — the mirror says "verify identity" and the server says
-    /// "confirm your contact".
+    /// It used to assert the mirror said `.verifyIdentity` for a fresh sign-up
+    /// while the server said `.contactVerification`, and reported the two as
+    /// disagreeing. That was a true report of a real defect: `ONBOARDING_ORDER`
+    /// puts `contact_verification` ahead of `identity_verification`, and §3 makes
+    /// contact verification blocking while identity verification is deferrable.
     ///
-    /// The checklist uses the server's answer, so the screen is right. The
-    /// disagreement reporter exists so this drift stays visible rather than being
-    /// silently resolved in whichever direction the caller happened to ask.
-    func testTheMirrorChecksIdentityBeforeContactWhereTheServerChecksContactFirst() {
+    /// The fix was to make the mirror *walk* the server's order rather than
+    /// restate it, so this now asserts agreement in the state where the two used
+    /// to differ. The reporter is unchanged and still reports genuine
+    /// divergence — `testAMirrorThatRunsAheadOfTheServerIsReported` covers the
+    /// other direction, and `testAReorderingOfTheServerOrderIsReported` covers a
+    /// server that moves a step.
+    func testTheMirrorAgreesWithTheServerForAFreshSignUp() {
         let mirror = ClientGate.onboardingNextStep(
             OnboardingSnapshot(
                 identity: .unverified, contactVerified: false,
                 profileComplete: false, preferencesSet: false
             )
         )
-        XCTAssertEqual(mirror, .verifyIdentity)
+        XCTAssertEqual(mirror, .verifyContact)
         XCTAssertEqual(freshSignUp().nextStep, .contactVerification)
-        XCTAssertTrue(OnboardingViewModel.reportsStepDisagreement(
+        XCTAssertFalse(OnboardingViewModel.reportsStepDisagreement(
             readiness: freshSignUp(), viewer: viewer(.unverified, .active)
         ))
+    }
+
+    /// Agreement across every state the mirror and the server both describe.
+    ///
+    /// The states where the two used to differ are exactly those with an
+    /// unverified identity *and* an unconfirmed contact, so every non-`verified`
+    /// identity state is checked against a server projection built the way
+    /// `readinessFor` builds it — outstanding and next both derived, never
+    /// hand-written to please the assertion.
+    func testTheMirrorAgreesWithTheServerInEveryStateItCanDescribe() {
+        for state in IdentityState.allCases {
+            for contactVerified in [true, false] {
+                for profileComplete in [true, false] {
+                    for preferencesSet in [true, false] {
+                        let readiness = serverReadiness(
+                            identity: state,
+                            contactVerified: contactVerified,
+                            profileComplete: profileComplete,
+                            preferencesSet: preferencesSet
+                        )
+                        let context = "\(state.rawValue) contact:\(contactVerified) "
+                            + "profile:\(profileComplete) prefs:\(preferencesSet)"
+
+                        let mirrored = ClientGate.onboardingNextStep(
+                            OnboardingSnapshot(
+                                identity: state,
+                                contactVerified: contactVerified,
+                                profileComplete: profileComplete,
+                                preferencesSet: preferencesSet
+                            )
+                        )
+                        let server = readiness.nextStep?.rawValue ?? "nil"
+                        XCTAssertFalse(
+                            OnboardingViewModel.reportsStepDisagreement(
+                                readiness: readiness, viewer: viewer(state, .active)
+                            ),
+                            "\(context) — server \(server), mirror \(mirrored)"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// The reporter still fires when the server really does disagree.
+    ///
+    /// A drift test that only ever asserts agreement cannot tell a fixed
+    /// ordering from a broken detector, so this constructs the disagreement the
+    /// fix removed — the server naming `identity_verification` next for a member
+    /// whose contact is unconfirmed — and requires it to be reported. If someone
+    /// reorders `ONBOARDING_ORDER` the way the client used to be ordered, this
+    /// goes red.
+    func testAReorderingOfTheServerOrderIsReported() {
+        let reordered = OnboardingReadiness(
+            version: 1, userId: "u", contactVerified: false, ageGatePassed: true,
+            ageBand: "28-32", termsAcceptedVersion: "2026-09-01", termsCurrent: true,
+            identity: .init(state: .unverified, discoverable: false),
+            profileState: .draft, preferencesSet: false,
+            nextStep: .identityVerification,
+            outstanding: [.identityVerification, .contactVerification, .profile, .preferences],
+            discoverable: false, accountState: .active
+        )
+        XCTAssertTrue(OnboardingViewModel.reportsStepDisagreement(
+            readiness: reordered, viewer: viewer(.unverified, .active)
+        ))
+    }
+
+    /// Builds the readiness `readinessFor` would publish for these facts.
+    ///
+    /// `ONBOARDING_ORDER` restated in the order the service declares it, so the
+    /// expectation is derived from the server's list rather than written out to
+    /// suit the client. `age_gate` and `terms` are complete in every case,
+    /// because `OnboardingSnapshot` has no fact for them and this is about the
+    /// four steps both sides can see.
+    private func serverReadiness(
+        identity: IdentityState,
+        contactVerified: Bool,
+        profileComplete: Bool,
+        preferencesSet: Bool
+    ) -> OnboardingReadiness {
+        let order: [OnboardingReadiness.Step] = [
+            .contactVerification, .ageGate, .terms,
+            .identityVerification, .profile, .preferences, .photoScreening,
+        ]
+        var outstanding: [OnboardingReadiness.Step] = []
+        if !contactVerified { outstanding.append(.contactVerification) }
+        if identity != .verified { outstanding.append(.identityVerification) }
+        if !profileComplete { outstanding.append(.profile) }
+        if !preferencesSet { outstanding.append(.preferences) }
+        outstanding = order.filter { outstanding.contains($0) }
+
+        return OnboardingReadiness(
+            version: 1, userId: "u",
+            contactVerified: contactVerified,
+            ageGatePassed: true, ageBand: "28-32",
+            termsAcceptedVersion: "2026-09-01", termsCurrent: true,
+            identity: .init(state: identity, discoverable: false),
+            profileState: profileComplete ? .complete : .draft,
+            preferencesSet: preferencesSet,
+            nextStep: outstanding.first,
+            outstanding: outstanding,
+            discoverable: false, accountState: .active
+        )
     }
 
     /// The mirror is strictly narrower than the server's list, so a difference is
