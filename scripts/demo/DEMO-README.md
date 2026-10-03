@@ -42,10 +42,10 @@ than one that admits a gap:
   not an authenticated person.
 - **No outbound email.** Recovery codes and sign-out notices are composed by the
   service and then dropped; no relay is configured. The walk does not use them.
-- **No UI is started by this walk.** It exercises the server and the rules it
-  enforces, driven as a client would drive it. A web client exists — `node
-  web/server.mjs`, then <http://127.0.0.1:5173> — and is the way to *look* at
-  this rather than read it.
+- **The walk starts no UI.** It exercises the server and the rules it enforces,
+  driven as a client would drive it. A clickable web client does exist — `node
+web/server.mjs`, then <http://127.0.0.1:5173> — and is the way to _look_ at
+  this rather than read it. It is separate from the walk, which never starts it.
 - **Step 7 deviates from a straight three-person script.** Carol completes
   verification and matches Alice before blocking her, because an unverified
   account cannot hold a conversation, so the block would have nothing to close.
@@ -58,9 +58,9 @@ than one that admits a gap:
   create is held so teardown awaits it. Measured over 66 interrupts across
   `SIGINT` and `SIGTERM`: 0 leaked databases. The handler prints the exact DROP
   command when it cannot clean up, so the failure is visible rather than silent.
-  It holds no rows; clear it with
-  `make db-shell` and `DROP DATABASE <name> WITH (FORCE)`. A run that completes
-  normally always drops its own.
+  A database that does survive holds no rows; clear it with `make db-shell` and
+  `DROP DATABASE <name> WITH (FORCE)`. A run that completes normally always
+  drops its own.
 - **No production infrastructure.** One Postgres container on port `55432`, a
   service on `127.0.0.1:8787`. No TLS, no deployment story.
 - **Social events are not built.** Deferred by decision, not by omission. See
@@ -122,9 +122,13 @@ line in `.demo/service.log`. Health: `curl http://127.0.0.1:8787/v1/health/ready
 you believe the product worked. The rows are written through the domain's own
 stores, so a seeded `verified` account is one the domain would have produced.
 
-(An earlier version of this file said the served database was empty because
-`packages/seed` did not exist. It does now; the claim was stale, not a defect in
-the demo.)
+That means the moderation queue is populated before you have signed up anyone:
+8 accounts, 8 verification attempts, 4 likes, 2 matches, 1 conversation with
+messages, 1 block, 1 report, 2 cases and 30 audit rows. Only the staff bearer
+token printed at startup can read the case surfaces.
+
+(An earlier version of this file said the served database was empty, because
+`packages/seed` did not exist at the time. It does now; that claim was stale.)
 
 ### What the walk proves
 
@@ -200,7 +204,7 @@ The full design argument is in `docs/architecture/00-overview.md`.
 | `make demo` cannot reach the database         | Postgres is not up yet: run `make ps`.                                                        |
 | The service exits at start                    | Run `make logs`. Usually a port already in use; `make demo-stop` then retry.                  |
 | A `t_journey_*` database survives a run       | You interrupted the walk near step 11. It holds no rows; drop it. See "What is _not_ real".   |
-| `Dataset: NOT loaded` from `make demo`        | No longer expected — `make demo` now seeds 87 rows and hard-fails if seeding fails.         |
+| `Dataset: NOT loaded` from `make demo`        | No longer expected — `make demo` now seeds 87 rows and hard-fails if seeding fails.           |
 
 ## Notes on this archive
 

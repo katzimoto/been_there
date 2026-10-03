@@ -51,21 +51,41 @@ const STOP_TIMEOUT_MS = 10_000;
  */
 const MODERATOR = { token: 'journey-senior-moderator', moderatorId: 'senior_moderator' };
 
-loadDotEnv();
+// Everything the signal handlers and the teardown need is declared before the
+// first `await`, because the handlers are registered below and before it. The
+// unprotected window is the time Node spends loading this module graph, and
+// loading `pg` and the built packages is most of it — a signal that arrives
+// during that window kills the process outright, and a database created half a
+// second earlier outlives it.
 
-if (!existsSync(join(REPO_ROOT, 'packages/service/dist/index.js'))) {
-  process.stderr.write(
-    'The packages are not built, so there is no service to walk.\n' +
-      'Run `npm run build` first, or `make demo-journey`, which builds for you.\n',
-  );
-  exit(1);
+/** The walk's own database, once the module graph is loaded. */
+let database;
+
+/**
+ * The `CREATE DATABASE`, held while it is in flight.
+ *
+ * Without this the teardown can drop a database that has not finished being
+ * created: the DROP runs first, matches nothing, and the CREATE commits
+ * afterwards into a process that is on its way out. It reproduces only on a
+ * cold start, where `CREATE DATABASE` is slow enough for a signal to land
+ * inside it, which is why it looks like an intermittent leak and is not one.
+ */
+let creating = undefined;
+
+/** Drops the database once any `CREATE DATABASE` in flight has settled. */
+async function dropDatabase() {
+  if (database === undefined) {
+    return;
+  }
+  if (creating !== undefined) {
+    try {
+      await creating;
+    } catch {
+      // A create that failed has nothing to drop.
+    }
+  }
+  await database.drop();
 }
-
-const pg = (await import('pg')).default;
-const database = demoDatabase(pg, 'journey');
-const client = createClient();
-const walk = narrator(STEP_COUNT);
-const say = walk.say;
 
 /** The process currently serving, so step 11's restart has something to kill. */
 let running = undefined;
@@ -117,7 +137,7 @@ async function performTeardown() {
     }
   }
   spawned.clear();
-  await database.drop();
+  await dropDatabase();
 }
 
 function refuseIfStopping(what) {
@@ -128,9 +148,10 @@ function refuseIfStopping(what) {
 
 // A walk that is interrupted — Ctrl-C, a killed pipeline — must not leave a
 // database behind. The suites solve this in an exit hook; this is the script
-// equivalent. 130 is the shell's code for "interrupted", so a caller piping this
-// can tell the two apart, and a cleanup that did not finish says so and names
-// the database rather than exiting with a code that looks identical either way.
+// equivalent, registered as early as the module graph allows. 130 is the
+// shell's code for "interrupted", so a caller piping this can tell the two
+// apart, and a cleanup that did not finish says so and names the database
+// rather than exiting with a code that looks identical either way.
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
     if (teardownOnce !== undefined) {
@@ -139,11 +160,12 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
     void teardown().then(
       () => exit(130),
       (error) => {
+        const name = database?.database ?? 'the walk database';
         process.stderr.write(
           `Interrupted, and the cleanup did not finish: ${String(error)}\n` +
-            'The database may still exist. To drop it:\n' +
+            `The database may still exist. To drop it:\n` +
             '  docker compose exec postgres psql -U been_there -d been_there \\\n' +
-            `    -c 'DROP DATABASE IF EXISTS ${database.database} WITH (FORCE)'\n`,
+            `    -c 'DROP DATABASE IF EXISTS ${name} WITH (FORCE)'\n`,
         );
         exit(130);
       },
@@ -151,8 +173,27 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   });
 }
 
+loadDotEnv();
+
+if (!existsSync(join(REPO_ROOT, 'packages/service/dist/index.js'))) {
+  process.stderr.write(
+    'The packages are not built, so there is no service to walk.\n' +
+      'Run `npm run build` first, or `make demo-journey`, which builds for you.\n',
+  );
+  exit(1);
+}
+
+const pg = (await import('pg')).default;
+database = demoDatabase(pg, 'journey');
+const client = createClient();
+const walk = narrator(STEP_COUNT);
+const say = walk.say;
+
 try {
-  const connectionString = await database.create();
+  // Held before the await, so an interrupt arriving inside the CREATE cannot let
+  // the teardown drop a database that does not exist yet.
+  creating = database.create();
+  const connectionString = await creating;
   running = await boot('first', connectionString);
   client.base = running.url;
 

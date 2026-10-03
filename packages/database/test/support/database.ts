@@ -126,8 +126,31 @@ function isolationFor(label: string): Isolation {
           // Verbatim, against the fresh database. The migrations qualify `app.`
           // themselves, which is why a per-suite database works and a per-suite
           // schema did not.
-          await migrator.query(readFileSync(join(migrations, file), 'utf8'));
+          try {
+            await migrator.query(readFileSync(join(migrations, file), 'utf8'));
+          } catch (error) {
+            // Named and re-thrown, because the raw error is routinely about
+            // something twenty statements earlier. Each migration is one
+            // transaction, so a failure rolls back everything before it —
+            // including a `CREATE EXTENSION` — and what reaches the reader names
+            // the symptom rather than the cause. A missing `hmac` reads as a
+            // crypto problem when the statement that mattered was the extension
+            // it depended on.
+            throw new Error(
+              `${file} did not apply to the fresh database ${name}. The failure above is ` +
+                'that file\'s, and anything it created earlier in its own transaction has ' +
+                `already been rolled back. Cause: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
         }
+      } catch (error) {
+        // The database is dropped before the error propagates. A suite whose
+        // migrations fail never reaches its own `afterAll` — the pool it was
+        // handed does not exist — so without this the database survives the run
+        // that could not use it, and it is invisible until someone runs out of
+        // connections. That is how one broken migration becomes several.
+        await this.drop();
+        throw error;
       } finally {
         await migrator.end();
       }
