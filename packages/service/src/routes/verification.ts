@@ -12,14 +12,15 @@ import {
   ok,
 } from '@been-there/core';
 import type { IdentityRecordRow, Transaction } from '@been-there/contracts';
-import { type IdentityStatusProjection, hasProjectionChanged, projectIdentityStatus } from '@been-there/identity';
 import {
+  type IdentityStatusProjection,
+  type ProviderSession,
+  hasProjectionChanged,
+  projectIdentityStatus,
+  BIOMETRIC_EVIDENCE_KINDS,
+  REQUIRED_CHECKS,
   type CaptureInput,
   type EvidenceKind,
-  type ProviderCheckResult,
-  type ProviderVerificationResult,
-  REQUIRED_CHECKS,
-  BIOMETRIC_EVIDENCE_KINDS,
   type VerificationAttempt,
   type VerificationCheck,
   type VerificationStartReason,
@@ -65,12 +66,36 @@ import { createServiceSafety } from '../wiring/safety.js';
  *
  * ## Anomalies are not client input
  *
- * A client may submit a provider result; it may not submit an `AnomalyFinding`.
- * A finding is a detector's output, and letting a request carry one would hand
- * every caller the power to route their own verification to a human — or, since a
- * `review`-level finding also blocks an otherwise clean pass, to hold up their
- * own verification indefinitely. Detectors produce findings; this file passes
- * what it has, which is currently nothing.
+ * A client may *ask* whether a provider result is ready; it may not supply one.
+ * It may not submit an `AnomalyFinding` either. A finding is a detector's
+ * output, and letting a request carry one would hand every caller the power to
+ * route their own verification to a human — or, since a `review`-level finding
+ * also blocks an otherwise clean pass, to hold up their own verification
+ * indefinitely. Detectors produce findings; this file passes what it has, which
+ * is currently nothing.
+ *
+ * ## The score is never client input
+ *
+ * `provider-result` used to read `confidence` and `checks` out of the request
+ * body and feed them straight to `completeFromProvider`. `resolveAttempt`
+ * established only that the attempt belonged to the caller, so the subject could
+ * post their own passing result and reach `verified` in one request. The 0.9
+ * floor was applied faithfully — to a number the subject had chosen. That is not
+ * a weaker verification; it is no verification at all, and nothing in readiness,
+ * metrics or logs distinguished it from a real one.
+ *
+ * The score now arrives from `dependencies.verification`, the port's only
+ * legitimate source, and a body carrying `confidence` or `checks` is *refused*
+ * rather than ignored: a caller still sending one holds a belief about how
+ * verification works that this code has just made false, and dropping the field
+ * quietly would leave that belief standing. What remains client input is a
+ * client asking whether a result is ready, which a real vendor would ordinarily
+ * have the service poll; `202` with `pending: true` is the ordinary "not
+ * finished yet" answer, not a failure.
+ *
+ * The identity machine, the attempt lifecycle and the 0.9 floor are untouched by
+ * this and remain real controls. Only the score's *source* changed, and that is
+ * the whole of what a wiring fix is supposed to change.
  */
 
 /**
@@ -97,12 +122,6 @@ const EVIDENCE_KINDS: readonly EvidenceKind[] = [
 
 const START_REASONS: readonly VerificationStartReason['code'][] = ['onboarding', 'user_requested'];
 
-const CHECK_OUTCOMES: readonly ProviderCheckResult['outcome'][] = [
-  'passed',
-  'failed',
-  'inconclusive',
-  'not_performed',
-];
 
 export function verificationRoutes(dependencies: ServiceDependencies): readonly Route[] {
   return [
@@ -215,13 +234,13 @@ export function verificationRoutes(dependencies: ServiceDependencies): readonly 
           storageRef: storageRef.value,
           digest: digest.value,
         };
-        const recorded = recordCapture(attempt.value, capture, request.now);
+        const recorded = recordCapture(attempt.value.attempt, capture, request.now);
         if (!recorded.ok) {
           return recorded;
         }
         await dependencies.stores.verificationAttempts.update(
           recorded.value.verificationId,
-          attemptPatchOf(recorded.value, providerReferenceOf(attempt.value)),
+          attemptPatchOf(recorded.value, attempt.value.providerReference),
           request.tx,
         );
         return okResponse(200, {
@@ -240,19 +259,33 @@ export function verificationRoutes(dependencies: ServiceDependencies): readonly 
         if (!attempt.ok) {
           return attempt;
         }
-        const submitted = submitToProvider(attempt.value, request.now);
+        const submitted = submitToProvider(attempt.value.attempt, request.now);
         if (!submitted.ok) {
           return submitted;
         }
+        // The provider session opens here, not at capture time, and its id is
+        // persisted with the outcome so `releaseSession` can reach the adapter's
+        // copy of the artefacts later. Before this, the reference was a
+        // hardcoded `null` and no adapter was ever consulted — the handle the
+        // erasure path in `evidence.ts` depends on was never written at all.
+        const session = await dependencies.verification.startSession({
+          correlationId: submitted.value.verificationId,
+          reVerification: submitted.value.reVerification,
+          checks: submitted.value.completedChecks,
+        });
+        if (!session.ok) {
+          return session;
+        }
         await dependencies.stores.verificationAttempts.update(
           submitted.value.verificationId,
-          attemptPatchOf(submitted.value, providerReferenceOf(attempt.value)),
+          attemptPatchOf(submitted.value, session.value.sessionId),
           request.tx,
         );
         return okResponse(200, {
           verificationId: submitted.value.verificationId,
           attemptState: submitted.value.state,
           submittedAt: submitted.value.submittedAt?.toISOString() ?? null,
+          providerMode: dependencies.verification.mode,
         });
       },
     ),
@@ -265,17 +298,55 @@ export function verificationRoutes(dependencies: ServiceDependencies): readonly 
         if (!attempt.ok) {
           return attempt;
         }
-        const userId = castId<'UserId'>(attempt.value.subjectId);
+        const userId = castId<'UserId'>(attempt.value.attempt.subjectId);
         const row = await dependencies.stores.identity.find(userId, request.tx);
         if (row === null) {
           return NOT_FOUND('account');
         }
-        const result = providerResultOf(request.body, request.now);
+        // The score comes from the adapter, never from the request body.
+        //
+        // This line is the whole reason `ServiceDependencies.verification` is
+        // required. The body used to be the source of `confidence` and `checks`,
+        // which meant the subject could post their own passing result and reach
+        // `verified` in one request — the 0.9 floor was applied faithfully, to a
+        // number the subject chose. A floor applied to a subject-chosen number is
+        // not a weaker verification; it is no verification at all.
+        //
+        // A request body carrying a score is refused rather than ignored: a
+        // caller still sending one after this change is a caller whose belief
+        // about how verification works is wrong, and quietly dropping it would
+        // leave that belief intact.
+        if ('confidence' in request.body || 'checks' in request.body) {
+          return domainError(
+            'validation_failed',
+            'identity',
+            'a provider score is not accepted from a client; it comes from the configured verification provider',
+            {
+              refusedFields: Object.keys(request.body)
+                .filter((field) => field === 'confidence' || field === 'checks')
+                .join(','),
+              providerMode: dependencies.verification.mode,
+            },
+          );
+        }
+        const result = await dependencies.verification.fetchResult(
+          sessionFor(attempt.value.attempt, attempt.value.providerReference, request.now),
+        );
         if (!result.ok) {
           return result;
         }
+        if (result.value === null) {
+          // The ordinary waiting case, not a failure. A vendor that has not
+          // finished yet leaves the attempt exactly where it was.
+          return okResponse(202, {
+            verificationId: attempt.value.attempt.verificationId,
+            attemptState: attempt.value.attempt.state,
+            providerMode: dependencies.verification.mode,
+            pending: true,
+          });
+        }
         const completed = completeFromProvider(
-          attempt.value,
+          attempt.value.attempt,
           identityStateOf(row.state, userId),
           result.value,
           [],
@@ -288,7 +359,7 @@ export function verificationRoutes(dependencies: ServiceDependencies): readonly 
         // Repeated failure escalates to a person and to nothing else, and *when*
         // is the identity package's decision. `null` is the ordinary "not yet"
         // answer and is not an error.
-        const prior = attempt.value;
+        const prior = attempt.value.attempt;
         const escalation = escalateAfterRepeatedFailure({
           identityState: completed.value.identity.state,
           attempts: [prior, completed.value.attempt],
@@ -349,7 +420,7 @@ export function verificationRoutes(dependencies: ServiceDependencies): readonly 
 async function resolveAttempt(
   dependencies: ServiceDependencies,
   request: RouteRequest,
-): Promise<Result<VerificationAttempt, DomainError>> {
+): Promise<Result<{ attempt: VerificationAttempt; providerReference: string | null }, DomainError>> {
   const userId = userIdOf(request.params['userId']);
   if (!userId.ok) {
     return userId;
@@ -368,7 +439,16 @@ async function resolveAttempt(
       verificationId,
     });
   }
-  return ok(attempt);
+  // The provider's session id travels alongside the attempt rather than being
+  // carried on the domain type: it is a fact about the *adapter's* copy of the
+  // artefacts, and putting it on `VerificationAttempt` would put vendor state
+  // inside the aggregate. Reading it here is what lets the erasure path in
+  // `evidence.ts` name a session to release.
+  const stored = row['providerReference'];
+  return ok({
+    attempt,
+    providerReference: typeof stored === 'string' && stored.length > 0 ? stored : null,
+  });
 }
 
 /**
@@ -436,58 +516,33 @@ async function writeIdentityState(
 }
 
 /**
- * The provider reference already on the attempt, if any.
+ * The provider session to poll, rebuilt from the attempt's own timeline.
  *
- * `VerificationAttempt` does not carry one, so an attempt that has been through a
- * provider already has it only in the store. The service keeps no copy: a second
- * copy in memory would be a value nothing could invalidate.
+ * `submit` persisted the adapter's session id in the `provider_reference`
+ * column, and `attemptOf` deliberately does not surface it: it is a fact about
+ * the *vendor's* copy of the artefacts, not about the attempt, and widening the
+ * domain type to carry it would put vendor state inside the aggregate. So the
+ * service reads it back from the store rather than inventing one.
+ *
+ * The timestamps are ours rather than the adapter's, which is sound because the
+ * port makes no promise about them beyond `expiresAt` being a deadline — an
+ * adapter that needs its own clock reads its own session store by
+ * `sessionId`, and `stubProvider` ignores the field entirely.
  */
-function providerReferenceOf(attempt: VerificationAttempt): string | null {
-  void attempt;
-  return null;
+function sessionFor(
+  attempt: VerificationAttempt,
+  providerReference: string | null,
+  now: Date,
+): ProviderSession {
+  return {
+    // An attempt with no stored reference was never submitted, and the attempt
+    // machine refuses a result for one — so this is unreachable in practice and
+    // exists only so the type is total. It is deliberately *not* a fabricated
+    // vendor id: inventing one would let a reader believe an adapter had been
+    // asked about a session that does not exist.
+    sessionId: providerReference ?? `unstarted-${attempt.verificationId}`,
+    startedAt: attempt.submittedAt ?? attempt.startedAt,
+    expiresAt: attempt.expiresAt > now ? attempt.expiresAt : now,
+  };
 }
 
-function providerResultOf(
-  body: Readonly<Record<string, unknown>>,
-  now: Date,
-): Result<ProviderVerificationResult, DomainError> {
-  const providerReference = readString(body, 'providerReference');
-  if (!providerReference.ok) {
-    return providerReference;
-  }
-  const confidence = body['confidence'];
-  if (typeof confidence !== 'number') {
-    return MISSING_FIELD('confidence');
-  }
-  const raw = body['checks'];
-  if (!Array.isArray(raw)) {
-    return MISSING_FIELD('checks');
-  }
-  const checks: ProviderCheckResult[] = [];
-  for (const entry of raw) {
-    if (typeof entry !== 'object' || entry === null) {
-      return MISSING_FIELD('checks');
-    }
-    const candidate = entry as { check?: unknown; outcome?: unknown; score?: unknown; reason?: unknown };
-    const check = REQUIRED_CHECKS.find((name) => name === candidate.check);
-    if (check === undefined) {
-      return UNKNOWN_FIELD_VALUE('checks.check', REQUIRED_CHECKS);
-    }
-    const outcome = CHECK_OUTCOMES.find((name) => name === candidate.outcome);
-    if (outcome === undefined) {
-      return UNKNOWN_FIELD_VALUE('checks.outcome', CHECK_OUTCOMES);
-    }
-    checks.push({
-      check,
-      outcome,
-      score: typeof candidate.score === 'number' ? candidate.score : null,
-      reason: typeof candidate.reason === 'string' ? candidate.reason : null,
-    });
-  }
-  return ok({
-    providerReference: providerReference.value,
-    confidence,
-    checks,
-    completedAt: now,
-  });
-}

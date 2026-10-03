@@ -2,7 +2,7 @@ import type { ServiceDependencies } from '../ports.js';
 import { createServiceSafety } from '../wiring/safety.js';
 import { type LifecyclePhase, ServiceLifecycle, type ShutdownStep } from './lifecycle.js';
 import { ServiceMetrics } from './metrics.js';
-import { type ReadinessReport, checkDatabase } from './readiness.js';
+import { type ReadinessReport, checkDatabase, verificationDeclaration } from './readiness.js';
 
 /**
  * Everything the health routes answer from, held in one place.
@@ -44,6 +44,7 @@ export class ServiceHealth {
     if (!this.lifecycle.serving) {
       return {
         ready: false,
+        verification: verificationDeclaration(this.dependencies.verification),
         checkedAt: checkedAt.toISOString(),
         checks: [
           {
@@ -58,6 +59,7 @@ export class ServiceHealth {
     this.metrics.recordProbe(database.ok ? 'up' : 'down');
     return {
       ready: database.ok,
+      verification: verificationDeclaration(this.dependencies.verification),
       checkedAt: checkedAt.toISOString(),
       checks: [database],
     };

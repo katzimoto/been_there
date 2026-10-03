@@ -259,10 +259,16 @@ npx vitest run packages/<pkg>/test/<file>.test.ts
   concurrently. The 1164 figure in §2 is `npx vitest list`, a collection count.
 - **`GET /v1/health/metrics` requires a session**, deliberately — a safety ratio
   is a statement about the detection pipeline. Do not treat its 401 as a bug.
-- **No outbound calls of any kind.** No identity vendor (`journey.mjs` posts a
-  fixture 0.95 to the endpoint a vendor would use), no email/SMS relay (codes are
+- **No outbound calls of any kind.** No identity vendor (the service is wired to
+  `stubProvider()`, which declares a score and examines nothing; `journey.mjs`
+  asks the service rather than supplying a number), no email/SMS relay (codes are
   composed and dropped), no SSO (one static moderator token). Stated honestly by
-  the journey's own closing report.
+  the journey's own closing report, and the stub is named at
+  `GET /v1/health/ready` as `verification.mode: "stub"`.
+- **A provider score is refused from a client.** `POST .../provider-result` used to
+  read `confidence` and `checks` from the request body, so a member could reach
+  `verified` by posting their own passing result. It now reads the score from
+  `ServiceDependencies.verification` and returns 400 for a body carrying one.
 - **The moderator token is static and passed in-process.** There is no staff
   login, so the web UI's moderator view authenticates as a constant.
 - **Two photo-screening stages are stubs**: perceptual-hash dedupe (stage 2) has

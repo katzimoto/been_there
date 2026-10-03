@@ -27,6 +27,7 @@ import {
 } from './support/harness.js';
 import { COMPLETE_PROFILE, PASSING_RESULT, verify } from './support/fixtures.js';
 import { reclaimPrepared } from './support/reclaim.js';
+import { harnessVerificationProvider } from './support/provider.js';
 
 /**
  * What survives a restart, and what does not — proved by actually restarting.
@@ -84,6 +85,7 @@ const config = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 const pg = (await import(pathToFileURL(config.pgModule).href)).default;
 const database = await import(pathToFileURL(config.databaseModule).href);
 const service = await import(pathToFileURL(config.serviceModule).href);
+const identity = await import(pathToFileURL(config.identityModule).href);
 
 const say = (kind, payload) => process.stdout.write(kind + ' ' + JSON.stringify(payload) + '\\n');
 
@@ -114,6 +116,13 @@ const dependencies = {
     },
   },
   contacts: { deliver: async () => undefined },
+  // The child is a separate OS process and cannot reach this suite's test
+  // helpers, so it builds the *production* stub from the built package. That is
+  // the point of the restart test: step two must serve through the same adapter
+  // step one did, not through a fixture that merely agrees with it. The dynamic
+  // import is the file's established convention, not an oversight — see the
+  // module docstring above: every specifier here arrives resolved at runtime.
+  verification: identity.stubProvider(),
   now: () => new Date(),
 };
 
@@ -221,6 +230,7 @@ async function startChild(steps: readonly ChildStep[], callers: readonly { token
       pgModule: modulePath('pg'),
       databaseModule: modulePath('@been-there/database'),
       serviceModule: modulePath('@been-there/service'),
+      identityModule: modulePath('@been-there/identity'),
       callers,
       steps,
     }),
@@ -296,11 +306,15 @@ describe('committed work across a process restart', () => {
     const pool = new pg.Pool({ connectionString: await requireDatabaseReady() });
     const stores = createStores(pool);
     const transaction = createTransaction(pool);
+    // One provider, wired into the service and handed back on the harness, so a
+    // suite moves the score the service actually reads rather than a copy.
+    const provider = harnessVerificationProvider();
     const dependencies: ServiceDependencies = {
       stores,
       transaction,
       actors: resolverFor(callers),
       contacts: CONTACTS,
+      verification: provider,
       now: () => new Date(),
     };
     const running = await startService(dependencies, { routes: serviceRoutes(dependencies) });
@@ -311,6 +325,7 @@ describe('committed work across a process restart', () => {
       stores,
       transaction,
       dependencies,
+      verification: provider,
       // No trusted hop is installed above, so every request takes its socket
       // address and there is nothing to present a different one through.
       fromAddress: socketAddressOnly,

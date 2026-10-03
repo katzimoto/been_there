@@ -27,18 +27,22 @@ export const COMPLETE_PROFILE = {
   location: '25_50_km',
 };
 
-export const PASSING_RESULT = {
-  providerReference: 'vendor-session-1',
-  confidence: 0.96,
-  checks: [
-    { check: 'document_authenticity', outcome: 'passed', score: 0.97, reason: null },
-    { check: 'liveness', outcome: 'passed', score: 0.95, reason: null },
-    { check: 'likeness', outcome: 'passed', score: 0.96, reason: null },
-  ],
-};
+/**
+ * The scores a suite asks the harness provider for.
+ *
+ * These used to be request bodies posted to `/provider-result`, which is how a
+ * subject could post their own score and reach `verified`. They are now the
+ * *only* way a suite moves the score — by configuring the provider the service
+ * is wired to, which is the same seam a vendor adapter would occupy.
+ *
+ * `PASSING_RESULT` clears `CONFIDENCE_THRESHOLDS.verifiedFloor` (0.9);
+ * `BORDERLINE_RESULT` sits below it, which is what routes an attempt to a human
+ * rather than granting or refusing it automatically.
+ */
+export const PASSING_RESULT = { confidence: 0.96 } as const;
 
-/** A result the policy sends to a human rather than deciding. */
-export const BORDERLINE_RESULT = { ...PASSING_RESULT, confidence: 0.72 };
+/** A score the policy sends to a human rather than deciding. */
+export const BORDERLINE_RESULT = { confidence: 0.72 } as const;
 
 export interface Created {
   readonly userId: UserId;
@@ -136,12 +140,26 @@ const ARTEFACTS = [
   { check: 'likeness', kind: 'selfie_image' },
 ] as const;
 
+/**
+ * Run an account all the way to a decided identity.
+ *
+ * `result` is the score the **provider** reports, not a body the client posts.
+ * It is `{ confidence }` and nothing else, and it is applied to
+ * `harness.verification` before the attempt is submitted — so the sequence below
+ * is the one a real deployment runs: the subject captures, the service asks its
+ * provider, the provider answers.
+ *
+ * The last call carries no body. Posting a score to `/provider-result` is now a
+ * `400`, and `clientScoreIsRefused` in `verification-boundary.test.ts` asserts
+ * it — that is the whole point of this helper no longer accepting one.
+ */
 export async function verify(
   harness: Harness,
   token: string,
   userId: UserId,
-  result: unknown,
+  result: { readonly confidence: number },
 ): Promise<Record<string, unknown>> {
+  harness.verification.scoreAs(result.confidence);
   const started = await call(
     harness,
     'POST',
@@ -181,12 +199,12 @@ export async function verify(
   if (submitted.status !== 200) {
     throw new Error(`submitting returned ${submitted.status}: ${JSON.stringify(submitted.body)}`);
   }
+  // No body. The service asks its provider; the client cannot name a score.
   const recorded = await call(
     harness,
     'POST',
     `/v1/accounts/${userId}/verification/attempts/${verificationId}/provider-result`,
     token,
-    result,
   );
   if (recorded.status !== 200) {
     throw new Error(`recording the result returned ${recorded.status}: ${JSON.stringify(recorded.body)}`);

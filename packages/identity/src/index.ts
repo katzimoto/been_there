@@ -69,6 +69,7 @@ export {
   type ProviderFailure,
   type ProviderFailureEffect,
   type ProviderFailureReason,
+  type ProviderMode,
   type ProviderSession,
   type ProviderSessionRequest,
   type ProviderVerificationResult,
@@ -78,6 +79,13 @@ export {
   classifyProviderFailure,
   providerFailureError,
 } from './provider.js';
+
+export {
+  DEFAULT_STUB_CONFIG,
+  type StubProviderConfig,
+  StubVerificationProvider,
+  stubProvider,
+} from './stub-provider.js';
 
 export {
   type CaptureInput,

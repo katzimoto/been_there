@@ -22,6 +22,7 @@ import { createSessionActorResolver } from '../src/accounts/session-resolver.js'
 import { reclaimPrepared } from './support/reclaim.js';
 import { CURRENT_TERMS_VERSION } from '../src/accounts/terms.js';
 import { COMPLETE_PROFILE, PASSING_RESULT, newPeer, verify } from './support/fixtures.js';
+import { harnessVerificationProvider } from './support/provider.js';
 
 /**
  * Account deletion (§8), and the six properties the brief asks it to hold.
@@ -127,6 +128,7 @@ beforeAll(async () => {
         messages.push(message);
       },
     },
+    verification: provider,
     now: () => new Date(clockNow.getTime()),
   };
   url = (
@@ -186,7 +188,11 @@ const callers: Caller[] = [moderator(MOD)];
  * database methods the fixtures do not use are the ones that would need a live
  * pool, and none of them are called by the paths below.
  */
+const provider = harnessVerificationProvider();
 const harness = {
+  get verification() {
+    return provider;
+  },
   get url() {
     return url;
   },

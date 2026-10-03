@@ -27,22 +27,6 @@ const ARTEFACTS = [
   { check: 'likeness', kind: 'selfie_image' },
 ]
 
-/**
- * The provider's answer. `confidence: 0.95` clears
- * `CONFIDENCE_THRESHOLDS.verifiedFloor` (0.9) with all three checks passed, which
- * is what turns the attempt into a `verified` identity.
- */
-export function providerResult(confidence) {
-  return {
-    providerReference: `vendor-session-${confidence}`,
-    confidence,
-    checks: [
-      { check: 'document_authenticity', outcome: 'passed', score: 0.97, reason: null },
-      { check: 'liveness', outcome: 'passed', score: 0.95, reason: null },
-      { check: 'likeness', outcome: 'passed', score: 0.96, reason: null },
-    ],
-  };
-}
 
 /** A per-run octet, so two walks never share an address and never share a bucket. */
 const RUN_OCTET = Math.floor(Math.random() * 254) + 1;
@@ -145,9 +129,19 @@ export async function completeProfile(client, person, say) {
 
 /**
  * The four-call verification sequence: open an attempt, capture one artefact per
- * required check, submit, then post the provider's result.
+ * required check, submit, then ask whether the provider has a result.
+ *
+ * The last call carries no score. It used to post the client's own `confidence`
+ * and check outcomes, and the service applied them faithfully — so this walk was
+ * deciding who got verified, using the client's own number. It now sends no body
+ * and the service asks its configured provider instead.
+ *
+ * The service in this walk runs the stub, so the number that comes back is the
+ * stub's declared 0.95. Printing that as though it were a measurement would be
+ * the exact misreading the readiness caveat exists to prevent, so the narration
+ * says where it came from.
  */
-export async function verify(client, person, confidence, say) {
+export async function verify(client, person, say) {
   const base = `/v1/accounts/${person.userId}/verification/attempts`;
   const started = await client.call('POST', base, person.token, { reason: 'onboarding' });
   expectStatus(started, 201, `${person.name}: open a verification attempt`);
@@ -172,18 +166,23 @@ export async function verify(client, person, confidence, say) {
 
   const submitted = await client.call('POST', `${base}/${verificationId}/submit`, person.token, {});
   expectStatus(submitted, 200, `${person.name}: submit the attempt`);
+  say(
+    `${person.name}: submitted; provider session opened, mode ` +
+      `${at(submitted.body, 'providerMode')}`,
+  );
 
+  // No body. The service asks its configured provider; the client cannot name a
+  // score, and posting one is refused rather than ignored.
   const recorded = await client.call(
     'POST',
     `${base}/${verificationId}/provider-result`,
     person.token,
-    providerResult(confidence),
   );
-  expectStatus(recorded, 200, `${person.name}: post the provider result`);
+  expectStatus(recorded, 200, `${person.name}: ask the provider for a result`);
   say(
-    `${person.name}: provider result confidence ${confidence} -> decision ` +
-      `${at(recorded.body, 'decision')}, identity.state ${at(recorded.body, 'identityState')}, ` +
-      `generation ${at(recorded.body, 'generation')}`,
+    `${person.name}: provider (stubbed) reported confidence ${at(recorded.body, 'confidence')} ` +
+      `-> decision ${at(recorded.body, 'decision')}, identity.state ` +
+      `${at(recorded.body, 'identityState')}, generation ${at(recorded.body, 'generation')}`,
   );
   return recorded.body;
 }

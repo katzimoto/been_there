@@ -1,3 +1,4 @@
+import type { ProviderMode, VerificationProvider } from '@been-there/identity';
 import type { ServiceDependencies } from '../ports.js';
 
 /**
@@ -25,10 +26,73 @@ export interface DependencyCheck {
   readonly detail: string;
 }
 
+
+/**
+ * What the process is actually verifying with, stated at the boundary a
+ * deployment reads.
+ *
+ * ## Why this is reported but does not gate readiness
+ *
+ * The tempting move is to answer `ready: false` when `mode` is `stub`, and it is
+ * the wrong one. Readiness means "send this process traffic", and a deployment
+ * that chose a stub — a demo, a fixture environment, a product that has not
+ * bought a vendor yet — is *supposed* to be serving. Failing the probe would take
+ * every replica out of rotation and turn an honest disclosure into an outage,
+ * which teaches operators to ignore this endpoint, at which point the disclosure
+ * is gone and so is the reason for it.
+ *
+ * So a stub is reported, loudly and by name, and readiness is left alone. What
+ * changes is that nobody can reach a passing `/v1/health/ready` and conclude a
+ * vendor is behind it: the field is right there, next to the `ready: true` it
+ * accompanies.
+ *
+ * The distinction being protected is the one that matters for the product. The
+ * identity machine, the attempt lifecycle and the 0.9 floor are real in both
+ * modes — `mode` says nothing about whether the floor is enforced. What it says
+ * is whether anyone has ever looked at a document.
+ */
+export interface VerificationDeclaration {
+  /** `'stub'` or `'vendor'`. Never defaulted and never inferred. */
+  readonly mode: ProviderMode;
+  /** The adapter's own operational label. */
+  readonly label: string;
+  /**
+   * Present only when `mode` is `stub`, and phrased for the operator reading the
+   * probe rather than for the domain: it says what the process does *not* do.
+   */
+  readonly caveat: string | null;
+}
+
+/**
+ * The declaration for this process's provider.
+ *
+ * A function rather than a constant so the caveat cannot drift from the mode it
+ * describes: a stub whose caveat went empty would read as a vendor.
+ */
+export function verificationDeclaration(provider: VerificationProvider): VerificationDeclaration {
+  return {
+    mode: provider.mode,
+    label: provider.label,
+    caveat:
+      provider.mode === 'stub'
+        ? 'verification is running stubbed: no document, selfie or liveness capture has been ' +
+          'examined by anyone, and every confidence score reaching the 0.9 floor was asserted ' +
+          'by the stub rather than measured. The identity machine and the floor are real; the ' +
+          'evidence behind them is not. This process must not be described as verifying anyone.'
+        : null,
+  };
+}
+
 export interface ReadinessReport {
   readonly ready: boolean;
   readonly checkedAt: string;
   readonly checks: readonly DependencyCheck[];
+  /**
+   * Always present. A readiness body that omitted it whenever verification was
+   * stubbed would be indistinguishable from one written by a process with a
+   * vendor, which is the omission this exists to prevent.
+   */
+  readonly verification: VerificationDeclaration;
 }
 
 /**

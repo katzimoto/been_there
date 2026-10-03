@@ -27,6 +27,7 @@ import { createStores, createTransaction } from '@been-there/database';
 import type { Principal, Role } from '@been-there/platform';
 import { type DomainError, type Result, type UserId, castId, domainError, ok } from '@been-there/core';
 import { type Stores, type Transaction } from '@been-there/contracts';
+import { HarnessVerificationProvider } from './provider.js';
 import type { ContactMessage, RunningService } from '@been-there/service';
 import {
   type ActorResolver,
@@ -174,6 +175,16 @@ export function isolatedDatabaseName(): string {
 export interface Harness {
   /** Every message the service tried to deliver, newest last. */
   readonly messages: readonly ContactMessage[];
+  /**
+   * The verification provider this harness's service is wired to.
+   *
+   * Exposed so a suite can choose the score the provider reports — a passing one
+ * above the 0.9 floor, a borderline one below it, or a deferred one that has not
+   * finished. It is the *provider* that is adjustable, never the request body:
+   * the service reads a score from here and from nowhere else, and a client that
+   * posts one is refused.
+   */
+  readonly verification: HarnessVerificationProvider;
   readonly url: string;
   readonly stores: Stores;
   readonly pool: pg.Pool;
@@ -380,6 +391,11 @@ export async function startHarness(
     const stores: Stores = createStores(pool);
     const transaction = createTransaction(pool);
     const messages: ContactMessage[] = [];
+    // One provider per harness, shared by every suite that starts one. Held in a
+    // local rather than constructed inline so a suite can reach it through
+    // `Harness.verification` and move the score across the 0.9 floor without
+    // rebuilding a service.
+    const provider = new HarnessVerificationProvider();
     const dependencies: ServiceDependencies = {
       stores,
       transaction,
@@ -391,6 +407,11 @@ export async function startHarness(
           messages.push(message);
         },
       },
+      // The verification provider, and the reason a suite cannot post its own
+      // score: `verification` is a required dependency and this is the adapter
+      // that fills it. `support/provider.ts` documents why it exists and what it
+      // deliberately does not do.
+      verification: provider,
       now: () => new Date(),
     };
     const trustedHop = options.trustedHop ?? true;
@@ -418,6 +439,14 @@ export async function startHarness(
       transaction,
       /** Every message the service tried to deliver, newest last. */
       messages,
+
+      /**
+       * The verification provider this harness's service is wired to, so a suite
+       * can move the score across the 0.9 floor without rebuilding a service.
+       * A suite wanting a borderline result calls `scoreAs(0.72)`; there is
+       * deliberately no way to make the *client* supply one.
+       */
+      verification: provider,
       /**
        * Presents every subsequent request as arriving from `address`, or
        * refuses: a harness with no trusted hop has no seam to present one

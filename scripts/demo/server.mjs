@@ -74,6 +74,7 @@ const staff = parseStaff(process.env['DEMO_STAFF_TOKENS']);
 const pg = (await import('pg')).default;
 const { createStores, createTransaction } = await import('@been-there/database');
 const { ok } = await import('@been-there/core');
+const { stubProvider } = await import('@been-there/identity');
 const {
   createServiceHealth,
   createSessionActorResolver,
@@ -89,6 +90,22 @@ const dependencies = {
   stores,
   transaction,
   actors: actorsFor(staff, stores, transaction),
+  // The verification provider, constructed explicitly rather than defaulted.
+  //
+  // There is no vendor in this repository and no decision has been taken to buy
+  // one, so the score is asserted. Naming it here is the point: `verification` is
+  // a required dependency, so a composition root that forgot it fails to
+  // construct rather than quietly serving a route that reads a score off the
+  // wire.
+  //
+  // `mode: 'stub'` is reported at `/v1/health/ready`, and every provider
+  // reference this writes is prefixed `stub-session-`, so a row created by this
+  // process stays identifiable without asking the process that made it.
+  verification: stubProvider({
+    confidence: 0.95,
+    referenceSuffix: 'demo',
+    sessionTtlMs: 30 * 60 * 1000,
+  }),
   // Composed here and never sent: there is no relay in this repository, and a
   // demo that quietly posted mail to a sandbox would be an outbound side effect
   // nobody asked for. The message is reported so its existence stays visible.
