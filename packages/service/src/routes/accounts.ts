@@ -5,16 +5,18 @@ import {
   type Result,
   type UserId,
   castId,
+  capabilitiesFor,
   domainError,
   err,
   identityMachine,
   ok,
 } from '@been-there/core';
+import { reentryReviewFor } from '@been-there/platform';
 import { NOT_FOUND } from '../http/failure.js';
 import { okResponse, publicRoute, route, type Route } from '../http/router.js';
 import type { ServiceDependencies } from '../ports.js';
 import { accountProjectionFor, identityProjectionFor } from '../wiring/standing.js';
-import { correlationIdFrom, recordFunnel } from '../accounts/funnel.js';
+import { appendAudit, correlationIdFrom, recordFunnel } from '../accounts/funnel.js';
 import { readinessFor } from '../accounts/onboarding.js';
 import {
   AGE_GATE_NOTICE,
@@ -211,6 +213,73 @@ export function accountRoutes(dependencies: ServiceDependencies): readonly Route
         request.tx,
       );
 
+      // Declared here rather than beside the first `recordFunnel` further down,
+      // because the re-entry block below audits through the same sinks.
+      // `correlationId` is the join key for the whole onboarding run, so both halves
+      // of a sign-up land in one series — a funnel that could not join them would be
+      // two funnels.
+      const funnel = {
+        stores: dependencies.stores,
+        tx: request.tx,
+        correlationId,
+        now: request.now,
+      };
+
+      // §8.3's re-entry rule, and the reason deleting an account cannot launder a
+      // ban. §8.3: "Re-register while a case is open or the prior standing was
+      // `banned` → Sign-up is allowed but the new account is not discoverable until
+      // Moderation has reviewed the re-entry."
+      //
+      // Refusing the sign-up instead would be worse, and not a smaller change:
+      // deletion would become a way to buy a permanent block on a contact point, so
+      // the only safe action for somebody who fears a ban would be never to delete.
+      // The rule is a hold on *discoverability*, not on the account's existence.
+      //
+      // What is read here is the pseudonymous subject row and nothing else. §2 puts
+      // moderation reasoning off limits to every product surface, so `priorState` is
+      // used to decide the hold and is **not** returned to the caller — §8.2's
+      // linkage is "by a human moderator reviewing a case, never automatically and
+      // never in the product". The response says a review is needed and nothing about
+      // why, which is the same line §9's copy rules draw.
+      const priorSubject = await dependencies.stores.accounts.findDeletedSubject(
+        signUp.contact.identifier,
+        request.tx,
+      );
+      const reentry =
+        priorSubject === null
+          ? { reviewRequired: false, priorState: null }
+          : reentryReviewFor(priorSubject);
+      if (reentry.reviewRequired) {
+        // Written as a `suspended` standing with no case behind it, deliberately:
+        // it is the one state that carries `visible_in_product: false` and the
+        // capabilities that let somebody still report, block and delete. It is not a
+        // sanction — no case, no moderator, no decision — and a moderator lifts it by
+        // the ordinary path. A `banned` row would be the platform enforcing without a
+        // human, which is the thing this repository exists to prevent.
+        await dependencies.stores.accountStanding.upsert(
+          {
+            userId,
+            state: 'suspended',
+            capabilities: [...capabilitiesFor('suspended')],
+            visibleInProduct: false,
+            caseId: null,
+            decisionId: null,
+            generation: 1,
+            updatedAt: request.now,
+          },
+          null,
+          request.tx,
+        );
+        await appendAudit(funnel, {
+          action: 'account.enforcement_applied',
+          actorId: request.actor.actorId,
+          subjectId: userId,
+          entityType: 'account',
+          entityId: userId,
+          detail: { reason_code: 'deletion_reentry', review_required: true },
+        });
+      }
+
       // A session here rather than a second round trip: steps 2, 3 and 4 are
       // blocking and the client has a credential it can present to reach them. The
       // token is returned once here and never stored.
@@ -224,12 +293,6 @@ export function accountRoutes(dependencies: ServiceDependencies): readonly Route
         await dependencies.stores.accounts.insertSession(row, request.tx);
       }
 
-      const funnel = {
-        stores: dependencies.stores,
-        tx: request.tx,
-        correlationId,
-        now: request.now,
-      };
       await recordFunnel(funnel, 'account.registration_completed', { surface: 'sign_up' });
       await recordFunnel(funnel, 'account.onboarding_step_completed', {
         step: 'age_gate',
@@ -256,6 +319,13 @@ export function accountRoutes(dependencies: ServiceDependencies): readonly Route
           generation: 1,
           discoverable: false,
         },
+        // §8.3: "The user sees 'we're checking your new account before it appears in
+        // discovery' — a real explanation, no case detail." So this carries the flag
+        // and never the reason. `priorState` is withheld on purpose: it is moderation
+        // reasoning about a person, and §2 keeps it off every product surface. The
+        // moderator learns it by opening the case, which is the only route §8.2's
+        // linkage is allowed to take.
+        reentry: { reviewRequired: reentry.reviewRequired },
         session: {
           token: issued.value.token,
           sessionId: issued.value.row.sessionId,

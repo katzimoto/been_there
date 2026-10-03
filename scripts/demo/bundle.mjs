@@ -173,6 +173,67 @@ function exclusionReason(relPath, name, isDirectory) {
 }
 
 /**
+ * Proves the `.env` rule is still a shape rather than a list.
+ *
+ * This rule once enumerated `.env` and `.env.local`, and a file named
+ * `.env.canary-probe` shipped in a distributed archive — a secret-shaped file
+ * leaving the machine, found only by planting one and looking. The fix was to
+ * match the shape, but a shape that silently reverts to a list on the next edit
+ * would fail the same way and equally quietly. So the rule is checked against
+ * names nobody would enumerate, every run, before anything is packed.
+ */
+function assertEnvRuleIsShapeBased() {
+  const mustBeExcluded = [
+    '.env',
+    '.env.local',
+    '.env.production',
+    '.env.canary-probe',
+    '.env.test.local',
+    '.envrc.development',
+    '.env.staging',
+  ];
+  const regressions = [];
+  for (const name of mustBeExcluded) {
+    if (!isEnvFile(name)) {
+      regressions.push(name);
+    }
+  }
+  if (isEnvFile(ENV_TEMPLATE)) {
+    regressions.push(`${ENV_TEMPLATE} (the template must still ship)`);
+  }
+
+  // The same rule, applied the way the packer applies it: on the basename of a
+  // nested path. A `.env` ten packages down must be caught by the same line.
+  const nestedExcluded = [
+    'packages/service/.env.staging',
+    'packages/core/.env.canary-probe',
+    'scripts/demo/lib/.env.local',
+  ];
+  for (const path of nestedExcluded) {
+    const basename = path.split('/').pop();
+    if (!isEnvFile(basename) || exclusionReason(path, basename, false) === null) {
+      regressions.push(path);
+    }
+  }
+
+  // And the one name that must still ship. Losing it breaks every command.
+  if (exclusionReason(ENV_TEMPLATE, ENV_TEMPLATE, false) !== null) {
+    regressions.push(`${ENV_TEMPLATE} (excluded, but the template must ship)`);
+  }
+  if (regressions.length > 0) {
+    console.error(
+      'The .env exclusion rule no longer matches the shape of an env file. ' +
+        `It would let these through: ${regressions.join(', ')}.`,
+    );
+    console.error(
+      `A .env* file leaving this machine in an archive is a leak, not a cosmetic ` +
+        `oversight. Fix isEnvFile() to test the prefix, keeping ${ENV_TEMPLATE}.`,
+    );
+    process.exit(1);
+  }
+}
+
+/**
  * Every file that goes in, relative to ROOT and sorted, plus the reasons for
  * everything that does not.
  *
@@ -403,6 +464,7 @@ function main() {
     process.exit(1);
   }
 
+  assertEnvRuleIsShapeBased();
   const { included, excluded } = collect();
 
   const present = new Set(included.map((file) => file.path));

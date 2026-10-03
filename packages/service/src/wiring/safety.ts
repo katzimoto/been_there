@@ -16,6 +16,7 @@ import {
 import type { Stores, Transaction } from '@been-there/contracts';
 import { type PairingKey, createPairingMatcher, type PairingMatcher, openCase } from '@been-there/moderation';
 import {
+  type DetectionReachability,
   type IdFactory,
   SAFETY_DETECTORS,
   type ReviewCandidate,
@@ -26,6 +27,7 @@ import {
   createSafetyDetectors,
   createSafetySeam,
   emptyRiskRecord,
+  safetyDetectorReach,
 } from '@been-there/trust-safety';
 import { auditAppender, caseRowOf, corrupt, flushAudit, requestModerationContext } from './moderation.js';
 import type { ServiceDependencies } from '../ports.js';
@@ -124,6 +126,30 @@ export type ObservedBehaviour =
       readonly kind: 'verification.attempt.started';
       readonly userId: UserId;
       readonly verificationId: string;
+      readonly at: Date;
+    }
+  /**
+   * A report was filed, naming who filed it.
+   *
+   * This is the one observation whose performer and subject differ, and it is
+   * the only producer of `report_against`. A report is an *accusation*, so this
+   * fact must never move the account it names: the policy layer discards every
+   * `report_against` signal and opens a case about the reporters instead
+   * (`assessSignal`, and `signal.ts`'s attribution rule, which makes
+   * `actorId !== subjectId` mandatory for this kind so a detector cannot
+   * self-report its way to a risk state).
+   *
+   * `reporterId` is null for an anonymous report, and an anonymous report has
+   * no reporter to count: `corroborate` counts *distinct* actors to recognise
+   * a campaign, so a null reporter is not evidence of anything and is carried
+   * as such rather than being guessed at.
+   */
+  | {
+      readonly kind: 'moderation.report_submitted';
+      readonly reporterId: UserId | null;
+      /** The account the report was filed *against*. */
+      readonly subjectId: SubjectId;
+      readonly reportId: string;
       readonly at: Date;
     }
   | { readonly kind: 'identity.status_changed'; readonly userId: UserId; readonly at: Date };
@@ -258,6 +284,18 @@ function evaluatedSubjects(behaviour: ObservedBehaviour): readonly SubjectId[] {
       return [subjectOf(behaviour.senderId)];
     case 'unmatch.performed':
       return [subjectOf(behaviour.actorId), behaviour.subjectId];
+    case 'moderation.report_submitted':
+      // The account reported, and the reporter when they are named. The
+      // reporter is evaluated because a cluster is evidence about *them*, and
+      // `corroborate` reads each subject's own ledger — a campaign is only
+      // visible when the third reporter's ledger can see the other two reports
+      // about the same target. An anonymous report has no reporter to run for,
+      // which is why an all-anonymous campaign is not countable: there is no
+      // distinct actor to count.
+      return [
+        behaviour.subjectId,
+        ...(behaviour.reporterId === null ? [] : [subjectOf(behaviour.reporterId)]),
+      ];
     case 'profile.state_changed':
     case 'verification.attempt.started':
     case 'identity.status_changed':
@@ -306,6 +344,16 @@ function behaviourEvent(
       });
     case 'unmatch.performed':
       return envelope({ actorId: behaviour.actorId, matchId: behaviour.matchId }, behaviour.subjectId);
+    case 'moderation.report_submitted':
+      // No reason, no statement, no evidence digest: the reduction rule reads a
+      // reporter, a reported account and a report id, and a payload field no
+      // rule names cannot cross into an observation. That is what keeps a
+      // free-text allegation out of a scoring engine.
+      return envelope({
+        reporterId: behaviour.reporterId ?? '',
+        reportedUserId: behaviour.subjectId,
+        reportId: behaviour.reportId,
+      });
     case 'profile.state_changed':
       return envelope({ userId: behaviour.userId });
     case 'verification.attempt.started':
@@ -508,6 +556,19 @@ function warn(message: string, subjectId: SubjectId): void {
 export interface ServiceSafety {
   readonly recorder: SafetyRecorder;
   readonly events: EventPublisher & EventSubscriber;
+  /**
+   * What this deployment's detector catalogue can actually reach, computed from
+   * the detectors it is really running.
+   *
+   * This is what lets the metrics endpoint say *why*
+   * `safety.detected_before_first_report` reads zero, instead of serving a
+   * plausible number that is indistinguishable from detection working. With
+   * the verification provider a stub, the only detectors loud enough to reach
+   * `high` are downstream of a report — so the metric's comparison
+   * (`risk.changed` before the first `moderation.report_submitted`) is
+   * unsatisfiable, and no wiring or configuration can change that.
+   */
+  readonly detectorReach: DetectionReachability;
 }
 
 const SURFACES = new WeakMap<ServiceDependencies, ServiceSafety>();
@@ -533,14 +594,20 @@ export function createServiceSafety(dependencies: ServiceDependencies): ServiceS
   }
   const events = new InMemoryEventBus();
   const secret = process.env['RISK_PAIRING_SECRET'];
+  const pairingKey = secret === undefined || secret.length === 0 ? null : { secret };
   const created: ServiceSafety = {
     events,
     recorder: createSafetyRecorder({
       stores: dependencies.stores,
       events,
       now: dependencies.now,
-      ...(secret === undefined || secret.length === 0 ? {} : { pairingKey: { secret } }),
+      ...(pairingKey === null ? {} : { pairingKey }),
     }),
+    // Computed from the same detector list the recorder was built with, so what
+    // this serves can never describe a catalogue the process is not running.
+    detectorReach: safetyDetectorReach(
+      pairingKey === null ? SAFETY_DETECTORS : createSafetyDetectors(createPairingMatcher(pairingKey)),
+    ),
   };
   SURFACES.set(dependencies, created);
   return created;

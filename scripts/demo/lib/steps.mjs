@@ -22,6 +22,7 @@ const CONTACTS = {
   bob: `demo-${RUN}-bob@example.test`,
   carol: `demo-${RUN}-carol@example.test`,
   underage: `demo-${RUN}-underage@example.test`,
+  bandProbe: `demo-${RUN}-band-probe@example.test`,
 };
 
 /** The provider score the walk uses. 0.95 clears the 0.9 verified floor. */
@@ -51,6 +52,27 @@ export const STEPS = [
         say,
       );
       people.alice = alice;
+
+      // The band is derived from the date of birth, not a stored constant and not
+      // something the client chose. Printing it proves only that *a* band came
+      // back, so a second sign-up with a different date of birth has to produce a
+      // different one. Cheap — one account in a throwaway database — and it turns
+      // "ageBand 33-37" from an observation into a claim.
+      const older = await signUp(
+        client,
+        { name: 'BandProbe', contact: CONTACTS.bandProbe, dateOfBirth: '1960-01-01' },
+        () => {},
+      );
+      if (older.ageBand === alice.ageBand) {
+        throw new Error(
+          `two date of births 1960-01-01 and 1990-06-15 both produced ageBand ` +
+            `${JSON.stringify(alice.ageBand)}, so the band is not derived from the date`,
+        );
+      }
+      say(
+        `age band derived: 1990-06-15 -> ${alice.ageBand}, 1960-01-01 -> ${older.ageBand}, ` +
+          'and neither response carried a date or a number',
+      );
       return `account created, identity.state unverified, identity.discoverable false`;
     },
   },

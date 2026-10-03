@@ -3,6 +3,7 @@ import { type HttpResponse, type Route, type RouteRequest, okResponse, publicRou
 import type { ServiceDependencies } from '../ports.js';
 import { metricCatalogue, parseMetricLabels } from '../health/metrics.js';
 import { createServiceHealth } from '../health/service.js';
+import { createServiceSafety } from '../wiring/safety.js';
 
 /**
  * Liveness and metrics.
@@ -40,8 +41,34 @@ export function healthRoutes(dependencies: ServiceDependencies): readonly Route[
         if (!labels.ok) {
           return labels;
         }
+        // Why `safety.detected_before_first_report` reads zero, served with it
+        // rather than left to be inferred from the number. A counter pinned at
+        // zero is indistinguishable from detection working, and reading it that
+        // way is the failure this declaration exists to prevent.
+        //
+        // Computed from the detectors this process is actually running, so it
+        // changes when the catalogue does. With the verification provider a
+        // stub, every detector loud enough to reach `high` is downstream of a
+        // report, and the metric compares a detection against the first report
+        // — so the comparison cannot be satisfied and no configuration changes
+        // that. This is not a reduced mode: at full strength the answer is
+        // still "not measurable", and saying so is the honest report.
+        const reach = createServiceSafety(dependencies).detectorReach;
+        const detection = {
+          measurable: reach.measurable,
+          ...(reach.measurable
+            ? {}
+            : {
+                reason:
+                  'no detector in this catalogue can reach high or critical without a report already filed against the subject, so this metric counts a detection that is causally downstream of the report it must precede',
+                belowThreshold: reach.belowThreshold,
+                reportDependent: reach.reportDependent,
+              }),
+          detectors: reach.detectors,
+        };
         return okResponse(200, {
           collectedAt: request.now.toISOString(),
+          detection,
           metrics: health.metrics.snapshot(labels.value).map((series) => ({
             name: series.name,
             instrument: series.instrument,

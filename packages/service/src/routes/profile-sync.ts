@@ -10,6 +10,7 @@ import {
 } from '@been-there/dating';
 import type { ServiceDependencies } from '../ports.js';
 import { profileContentOf, profileStateOf } from '../wiring/standing.js';
+import { createServiceSafety } from '../wiring/safety.js';
 
 /**
  * The one place a profile row is written.
@@ -127,5 +128,19 @@ export async function saveProfile(
     updatedAt: at,
   };
   await dependencies.stores.interaction.upsertProfile(row, tx);
+  // Every profile write funnels through here — the content route and all three
+  // photo routes — so this is the one place a profile change can be observed.
+  // Without it `dating.profile_churn` is a detector the service can never fire,
+  // and a detector in the catalogue the service cannot reach is a claim the
+  // catalogue makes that the service contradicts.
+  //
+  // Only the fact that it changed crosses. Not `state`: the reduction row for
+  // this kind deliberately keeps no account state, because a detector that could
+  // read `limited`/`suspended`/`banned` would be one refactor from being an
+  // enforcement engine.
+  await createServiceSafety(dependencies).recorder.observe(
+    { kind: 'profile.state_changed', userId, at },
+    tx,
+  );
   return ok({ row, completeness });
 }

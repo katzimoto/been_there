@@ -37,6 +37,7 @@ import type { ServiceDependencies } from '../ports.js';
 import { attemptOf, attemptPatchOf, attemptRowOf } from '../wiring/attempts.js';
 import { userIdOf } from './accounts.js';
 import { identityStateOf, subjectOf } from '../wiring/standing.js';
+import { createServiceSafety } from '../wiring/safety.js';
 
 /**
  * Verification, and the only place an identity state is ever written.
@@ -159,6 +160,20 @@ export function verificationRoutes(dependencies: ServiceDependencies): readonly 
       }
       await dependencies.stores.verificationAttempts.insert(
         attemptRowOf(capturing.value),
+        request.tx,
+      );
+      // The attempt, as an opaque id. `identity.reuse` pairs an attempt with a
+      // later state change to see identity churn, and it can only do that if
+      // something observed the attempt — without this the detector is in the
+      // catalogue and unreachable from the service. The capture, the document
+      // and the reason never cross: the attempt's id is the whole of it.
+      await createServiceSafety(dependencies).recorder.observe(
+        {
+          kind: 'verification.attempt.started',
+          userId: userId.value,
+          verificationId: capturing.value.verificationId,
+          at: request.now,
+        },
         request.tx,
       );
       return okResponse(201, {
@@ -406,6 +421,17 @@ async function writeIdentityState(
       expectedGeneration: previous.generation,
     });
   }
+  // That the state moved, and nothing about why. This is the only writer of an
+  // identity state, so it is the only place the change can be observed; the
+  // `before`/`after` projections above already compute exactly what changed and
+  // deliberately discard them, which is why the fact was going unobserved.
+  // No likeness score, no provider label and no artefact crosses: `identity.reuse`
+  // pairs this with an attempt to see churn, and the projection has none of
+  // those fields to give.
+  await createServiceSafety(dependencies).recorder.observe(
+    { kind: 'identity.status_changed', userId, at },
+    tx,
+  );
   return ok(row);
 }
 

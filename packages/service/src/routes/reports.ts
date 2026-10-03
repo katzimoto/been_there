@@ -21,6 +21,7 @@ import { readEnum, readString } from '../http/body.js';
 import { okResponse, route, type HttpResponse, type Route, type RouteRequest } from '../http/router.js';
 import type { ServiceDependencies } from '../ports.js';
 import { blocksBetween, ledgersFor, matchRecordOf } from '../wiring/dating.js';
+import { subjectOf } from '../wiring/standing.js';
 import { createServiceSafety } from '../wiring/safety.js';
 import { auditAppender, flushAudit, reportRowOf, requestModerationContext } from '../wiring/moderation.js';
 import { userIdOf } from './accounts.js';
@@ -160,6 +161,27 @@ async function submitReportFor(
   }
   await dependencies.stores.moderation.insertReport(
     reportRowOf(submitted.value.report),
+    request.tx,
+  );
+  // The fact the safety layer needs: a report was filed, and by whom. This is
+  // the only route that can observe it, because it is the only place that knows
+  // both the reporter and the account reported — and it is deliberately
+  // observed *after* the row is written, so a refused submission produces no
+  // signal about an account nobody reported.
+  //
+  // The reporter is the authenticated caller even when the report is anonymous:
+  // anonymity is the reporter's choice about how the *record* reads, and the
+  // request itself was not anonymous. What `report_against` can do with it is
+  // bounded by the policy layer, which discards the signal and can only raise a
+  // cluster about the reporters.
+  await createServiceSafety(dependencies).recorder.observe(
+    {
+      kind: 'moderation.report_submitted',
+      reporterId,
+      subjectId: subjectOf(subject.value),
+      reportId: submitted.value.report.reportId,
+      at: request.now,
+    },
     request.tx,
   );
   await flushAudit(pending, auditAppender((row, tx) => dependencies.stores.moderation.appendAudit(row, tx)), request.tx);
