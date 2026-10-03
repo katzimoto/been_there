@@ -19,7 +19,7 @@ Where each link stands:
 | Persistence | **built** | 8 stores, 131 tests against real Postgres |
 | HTTP service | **built** | real server, real HTTP, real database |
 | Verified identity | **built** | identity machine; a provider result below the floor does not grant `verified` |
-| Profile & preferences | in progress (#35) | — |
+| Profile & preferences | **built** | four route modules — body, photos, preferences and the legacy surface — all funnelling writes through one `saveProfile` |
 | Discovery | **built** | `evaluateEligibility`; an unverified viewer gets an empty page and is not told why |
 | Like → match | **built** | reciprocal like creates exactly one match |
 | Chat | **built** | through the communication gate; refusal is symmetric |
