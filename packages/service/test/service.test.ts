@@ -37,6 +37,11 @@ import {
 
 const ALICE = 'alice-token';
 const BOB = 'bob-token';
+/** A person created for one test, so its match is that test's own. */
+const PEER = 'matches-list-peer';
+/** A second person for the same test: a match needs two, and only one is allowed
+ *  to be the actor asking for the list. */
+const PEER_TWO = 'matches-list-peer-two';
 const CAROL = 'carol-token';
 const DAVE = 'dave-token';
 const ERIN = 'erin-token';
@@ -290,6 +295,51 @@ describe('the service, over HTTP, against real Postgres', () => {
     expect((readBack.body['messages'] as unknown[]).length).toBe(2);
   });
 
+  /**
+   * A match a client can open.
+   *
+   * The list published the match but not its conversation, so a member could see
+   * a match on one screen and then have nowhere to send a message — the only
+   * conversation id any client ever received was the one on a like response, and
+   * a client that started on the matches list had never seen one. This pins the
+   * id onto the projection, and pins it to *this* conversation rather than to any
+   * conversation: an id the client cannot send to is worse than none.
+   */
+  it('publishes each match\'s conversation on the matches list, so the chat is reachable', async () => {
+    // Two fresh people, both verified, because a like needs an eligible actor *and*
+    // an eligible counterparty and this suite's own `ALICE` deliberately is not
+    // one — her verification ends in review, which is what a neighbouring test
+    // asserts. Reusing her would make this test fail for her reason.
+    const first = await newPeer(harness, callers, PEER);
+    const second = await newPeer(harness, callers, PEER_TWO);
+    for (const person of [[PEER, first], [PEER_TWO, second]] as const) {
+      await call(harness, 'PUT', `/v1/accounts/${person[1].userId}/profile`, person[0], {
+        ...COMPLETE_PROFILE,
+        displayName: person[1].userId === first.userId ? 'Robin' : 'Sam',
+      });
+      await verify(harness, person[0], person[1].userId, PASSING_RESULT);
+    }
+
+    // The first like is always accepted and creates nothing; the reciprocal is
+    // what creates the match, so a pair has to be mutual before there is one.
+    await call(harness, 'POST', '/v1/interactions/likes', PEER, { toUserId: second.userId });
+    const reciprocal = await call(harness, 'POST', '/v1/interactions/likes', PEER_TWO, {
+      toUserId: first.userId,
+    });
+    expect(reciprocal.status).toBe(201);
+    expect(reciprocal.body['resolution']).toBe('match_created');
+    const matchConversation = String(reciprocal.body['conversationId']);
+    const matchId = String(reciprocal.body['match']);
+
+    const listed = await call(harness, 'GET', '/v1/matches', PEER);
+    expect(listed.status).toBe(200);
+    const matches = listed.body['matches'] as Record<string, unknown>[];
+    const mine = matches.find((entry) => entry['matchId'] === matchId);
+    expect(mine).toBeDefined();
+    // The like response and the list must agree, or a client that caught the id
+    // on one path and read it on the other would open two conversations.
+    expect(mine?.['conversationId']).toBe(matchConversation);
+  });
   it('answers a conversation probe identically whether or not the conversation exists', async () => {
     const absent = await call(
       harness,

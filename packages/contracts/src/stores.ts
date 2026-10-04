@@ -159,10 +159,92 @@ export interface CredentialRow {
   /** Already normalised at the edge. No other form is ever stored. */
   readonly contactIdentifier: string;
   readonly contactVerified: boolean;
-  readonly passwordHash: string;
+  /**
+   * `null` for an account that authenticates with a provider.
+   *
+   * Nullable rather than a sentinel because a sentinel is a credential: an
+   * invented hash would be a value that passes a `NOT NULL` CHECK, looks like a
+   * password to every reader, and authenticates nobody. `null` is the honest
+   * answer to "this account has no password", and `account_credentials`'s
+   * `account_credentials_method_shape` constraint is what keeps the two cases
+   * from drifting apart in the database.
+   */
+  readonly passwordHash: string | null;
   readonly createdAt: Date;
   readonly updatedAt: Date;
 }
+
+/**
+ * One row of `social_identities`: the provider account a member signs in with.
+ *
+ * Four columns, and the two that are absent are the point. There is no
+ * identity token, no authorization code, no claims blob, no provider response
+ * body and no provider-supplied email address. `providerSubject` is the stable
+ * identifier the provider assigned to this person and it is the *only* provider
+ * value this platform keeps — a bearer credential from a third party is a secret
+ * with a long tail, and the address the provider attests enters through
+ * `CredentialRow.contactIdentifier` under the same rules as any other contact.
+ * `docs/features/social-sign-in.md` §4 states why, and the shape here is what
+ * makes it checkable rather than aspirational.
+ */
+export interface SocialIdentityRow {
+  readonly userId: UserId;
+  /** `'apple'`, `'google'` or `'meta'` — the schema's CHECK admits no others. */
+  readonly provider: string;
+  /** Opaque, case-sensitive, never an address or a display name. */
+  readonly providerSubject: string;
+  /** When this provider identity was attached, by sign-up or by a later link. */
+  readonly linkedAt: Date;
+}
+
+/**
+ * `SocialIdentityStore`: the four queries a provider sign-in needs.
+ *
+ * It is a separate port rather than four methods on `AccountPlatformStore`
+ * because the resolution rule is the whole of its meaning and it deserves a
+ * surface that is only that rule. Sign-in looks an account up by
+ * `(provider, providerSubject)` and by nothing else. There is deliberately no
+ * `findByEmail`, because an account takeover by matching an email address is
+ * the failure this port exists to make unrepresentable: a caller holding only
+ * this port cannot ask the question that would enable it.
+ */
+export interface SocialIdentityStore {
+  /**
+   * The account behind a provider subject, or `null`.
+   *
+   * The only lookup that resolves an incoming assertion to an account. Paired
+   * with the unique index on `(provider, provider_subject)` this is what makes
+   * one provider subject one account, forever — including under concurrency,
+   * where a read-then-write would not.
+   */
+  findSocialIdentity(provider: string, providerSubject: string, tx: Transaction): Promise<SocialIdentityRow | null>;
+
+  /**
+   * Every provider identity one account holds, for the member-facing list and
+   * for unlinking. A member may hold more than one provider and never two
+   * identities from the same one.
+   */
+  listSocialIdentitiesFor(userId: UserId, tx: Transaction): Promise<readonly SocialIdentityRow[]>;
+
+  /**
+   * Attaches a provider identity to an account.
+   *
+   * There is no "find a plausible account and attach it here" step, and no
+   * parameter through which one could be passed: the caller supplies a `userId`
+   * it has already resolved by provider subject. A link therefore only ever
+   * happens against an account the member is already authenticated as.
+   */
+  insertSocialIdentity(row: SocialIdentityRow, tx: Transaction): Promise<void>;
+
+  /**
+   * Detaches one provider identity. The affected-row count is the answer, so an
+   * unlink of something that was not linked says so instead of reading as
+   * success. There is no timestamp parameter because the table records when an
+   * identity was attached and nothing about when it was detached — the
+   * audit log is where that history belongs.
+   */
+  deleteSocialIdentity(userId: UserId, provider: string, tx: Transaction): Promise<boolean>;
+ }
 
 export interface OnboardingRow {
   readonly userId: UserId;
@@ -967,6 +1049,14 @@ export interface Stores {
   readonly goals: GoalStore;
   /** The staff directory and the sessions a named moderator holds. */
   readonly staff: StaffIdentityStore;
-}
+  /**
+   * Provider identities, resolved only by `(provider, providerSubject)`.
+   *
+   * A member of `Stores` rather than another field on `accounts` so that a
+   * caller composing against this object reaches a provider sign-in resolution
+   * only through the port whose entire interface is that resolution.
+   */
+  readonly socialIdentities: SocialIdentityStore;
+ }
 
 import type { ActorId } from '@been-there/core';

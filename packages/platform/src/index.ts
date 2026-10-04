@@ -17,3 +17,6 @@ export * from './integration.js';
 export * from './telemetry.js';
 export * from './safety-metric.js';
 export * from './deletion.js';
+export * from './social-authn.js';
+export * from './social-signin.js';
+export * from './apple-assertion.js';

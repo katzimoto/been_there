@@ -83,6 +83,23 @@ export const SIGN_IN_FAILED_COPY: CredentialCopy = {
 };
 
 /**
+ * What a member is told when the sign-in limit trips.
+ *
+ * Its own copy, because reusing `SIGN_IN_FAILED_COPY` here is how a rate limit
+ * ends up reading as a broken password — and it was: the refusal carried
+ * `reason: 'too_many_attempts'` under the title "That email and password don't
+ * match", which tells a member their password is wrong when the password was
+ * never checked, and which invites exactly the retry storm the limit exists to
+ * stop. The two refusals are indistinguishable in *status* on purpose (a limit
+ * that answered differently would confirm the account exists); they are not
+ * indistinguishable in *wording*, because the wording is what the member acts on.
+ */
+export const SIGN_IN_LIMITED_COPY: CredentialCopy = {
+  title: 'Too many sign-in attempts.',
+  body: 'Wait a few minutes and try again, or reset your password.',
+};
+
+/**
  * A seed of the Platform-maintained breached-password list.
  *
  * §5.1 requires the check at set and at login, and the check has to be a

@@ -97,7 +97,7 @@ import {
 } from '@been-there/database';
 import { PgAccountPlatformStore } from '@been-there/database';
 import { hashPassword, normalizeContact } from '@been-there/platform';
-import { attemptRowOf, caseRowOf, reportRowOf } from '@been-there/service';
+import { CURRENT_TERMS_VERSION, attemptRowOf, caseRowOf, reportRowOf } from '@been-there/service';
 import { loadDevelopmentDataset } from '../../../scripts/seed/development-dataset.mjs';
 import { verifyDataset } from '../../../scripts/seed/dataset-invariants.mjs';
 import { SEED_EPOCH } from '../../../scripts/seed/dataset-steps.mjs';
@@ -460,6 +460,32 @@ const units = [
             state: person.identityState,
             generation: 1,
             latestVerificationId: ids.uuid(person.verificationId),
+            updatedAt: EPOCH,
+          },
+          tx,
+        );
+        // The onboarding row, so the checklist the service publishes says what a
+        // seeded person has actually done. Without it every seeded member had
+        // three outstanding steps — confirm your contact, confirm your date of
+        // birth, accept the current terms — so the app did the right thing and
+        // landed them on the setup screen every time, with browsing withheld
+        // behind an unfinished checklist. That is the gate working; the dataset
+        // was what was unfinished. The dates are the same ones the profiles carry,
+        // and the terms version is the service's own current one rather than a
+        // literal here, so accepting the wrong version is not something this
+        // seeder can do.
+        await accounts.insertOnboarding(
+          {
+            userId,
+            dateOfBirth: person.profileContent.birthdate,
+            ageAttested: true,
+            // The version the service accepts today, read from the same module the
+        // sign-up route reads: a seeder that carried its own copy could accept
+        // a stale version and produce a dataset whose members had silently
+        // un-accepted the current terms.
+        termsVersion: CURRENT_TERMS_VERSION,
+            termsAcceptedAt: EPOCH,
+            coarseArea: null,
             updatedAt: EPOCH,
           },
           tx,
@@ -862,6 +888,13 @@ function summarise(dataset) {
   for (const person of dataset.users) {
     console.log(`    ${`${person.userId}@been-there.test`.padEnd(34)} ${SEED_PASSWORD}`);
   }
+  // The same addresses in the form a script can use, because the client test
+  // suite signs in as one person per test and the service rate-limits sign-ins
+  // per account: five per fifteen minutes, and a suite that reuses one address
+  // spends another test's budget.
+  console.log(
+    `  BEEN_THERE_DEMO_CONTACTS=${dataset.users.map((person) => `${person.userId}@been-there.test`).join(',')}`,
+  );
   console.log('  `make seed-print` prints the dataset; `make audit-log` shows who may read its log.');
 }
 

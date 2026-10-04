@@ -47,6 +47,7 @@ One specification per MVP feature issue, in `features/`:
 | [Notifications](./features/notifications.md) | [#16](https://github.com/katzimoto/been_there/issues/16) |
 | [Privacy & User Settings](./features/privacy-and-user-settings.md) | [#17](https://github.com/katzimoto/been_there/issues/17) |
 | [Product Quality & Measurement](./features/product-quality-and-measurement.md) | [#18](https://github.com/katzimoto/been_there/issues/18) |
+| [Social Sign-In](./features/social-sign-in.md) | Google, Apple, Meta alongside email and password — domain, schema and verification built; no route, no button, pending OAuth client credentials and a paid Apple Developer team |
 
 ### Review
 

@@ -38,6 +38,7 @@ public final class AppModel {
         case signIn
         case onboarding
         case discovery
+        case matches
         case standing
 
         public var id: String { rawValue }
@@ -47,6 +48,7 @@ public final class AppModel {
             case .signIn: return "Sign in"
             case .onboarding: return "Setup"
             case .discovery: return "People"
+            case .matches: return "Matches"
             case .standing: return "Account"
             }
         }
@@ -58,6 +60,7 @@ public final class AppModel {
             case .signIn: return "person.crop.circle"
             case .onboarding: return "checklist"
             case .discovery: return "person.2"
+            case .matches: return "heart"
             case .standing: return "person.text.rectangle"
             }
         }
@@ -75,16 +78,19 @@ public final class AppModel {
 
     /// The endpoint as last applied. `nil` until `connect()` has parsed the text
     /// into a URL, so a screen never claims to be pointed somewhere it is not.
-    public private(set) var endpoint: ServiceEndpoint?
+    public internal(set) var endpoint: ServiceEndpoint?
 
-    private var client: APIClient
+    /// The client every route goes through. Module-internal rather than private
+    /// because `AppModel+MemberSurfaces.swift` is an extension in another file,
+    /// and `private` is scoped to the file. Not `public`: nothing outside this
+    /// module may reach the session behind it.
+    var client: APIClient
 
     // MARK: What the member typed
 
     public var contact: String = ""
     public var password: String = ""
     public var dateOfBirth: String = ""
-    public var termsVersion: String = AppModel.currentTermsVersion
 
     /// The terms version the repository's service was written against.
     ///
@@ -97,15 +103,16 @@ public final class AppModel {
 
     // MARK: What the server said
 
-    public private(set) var tab: Tab = .signIn
     /// The tab bar is the only thing that moves this, so it asks rather than
-    /// assigning: `tab` stays `private(set)` because every other field here is
-    /// something the server said, and a view that could write one of those would
-    /// be able to invent a server answer.
+    /// assigning. The setter is `internal` rather than `private` for the reason
+    /// the other server answers below carry — `connect()` writes it from
+    /// `AppModel+Service.swift` — and it is still unwritable from outside this
+    /// module, which is where "a view could invent a server answer" would bite.
+    public internal(set) var tab: Tab = .signIn
     public func go(to tab: Tab) {
         self.tab = tab
     }
-    public private(set) var session: IssuedSession?
+    public internal(set) var session: IssuedSession?
     public private(set) var account: AccountView?
     public private(set) var readiness: OnboardingReadiness?
     public private(set) var onboarding: OnboardingViewModel?
@@ -117,11 +124,71 @@ public final class AppModel {
     /// so the notice is carried and displayed rather than paraphrased.
     public private(set) var ageGateNotice: SignUpResult.AgeGateNotice?
 
-    public private(set) var isLoading = false
+    /// The notice the *service* publishes for the age gate, read from its readiness
+    /// answer, so the sign-up screen can say why it is asking before it asks.
+    /// `nil` when the service published none — the screen then shows nothing,
+    /// because the alternative is this client stating the policy in its own words.
+    public private(set) var preflightAgeGate: TermsDeclaration.AgeGate?
+
+    /// Kept so a later refresh does not re-probe readiness for a session it has
+    /// already read.
+    private var terms: TermsDeclaration?
+
+    /// The terms version the service says it accepts. Falls back to the last known
+    /// value when readiness has not answered, so a sign-up is never blocked by a
+    /// probe that has not landed.
+    public private(set) var termsVersion: String = AppModel.currentTermsVersion
+
+    /// The age band the service derived at sign-up, shown back to the member. It
+    /// publishes a band and never a date, so this is the only form of the answer
+    /// that exists.
+    public private(set) var signUpAgeBand: String?
+
+    /// The birth date the member picked, as a `DatePicker` holds it. The service
+    /// takes `YYYY-MM-DD`; `signUpDateOfBirthISO` is what gets sent, formatted in
+    /// the calendar the picker used so what is sent is what was seen.
+    public var signUpDateOfBirth: Date = AppModel.defaultDateOfBirth
+
+    /// Twenty-five years ago, so the picker opens on a plausible adult date
+    /// rather than today — a screen that opens on the member's birthday reads as
+    /// a form that was not filled in.
+    public static let defaultDateOfBirth: Date = {
+        let calendar = Calendar.current
+        let now = Date()
+        let year = calendar.component(.year, from: now) - 25
+        let month = calendar.component(.month, from: now)
+        let day = calendar.component(.day, from: now)
+        return calendar.date(from: DateComponents(year: year, month: month, day: day)) ?? now
+    }()
+
+    /// The picked date as the service reads it.
+    public var signUpDateOfBirthISO: String {
+        let calendar = Calendar.current
+        let parts = calendar.dateComponents([.year, .month, .day], from: signUpDateOfBirth)
+        return String(format: "%04d-%02d-%02d",
+                      parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+    }
+
+    /// Whether the sign-up form holds everything the service requires.
+    ///
+    /// Shape only: a contact, a password of some length, and a date. Deliberately
+    /// *not* a local age check and not a local password policy — those are the
+    /// service's rules, and a client that pre-judged them would be a second
+    /// definition that drifts. What is refused here is an obviously empty field.
+    public var canSubmitSignUp: Bool {
+        !contact.trimmingCharacters(in: .whitespaces).isEmpty
+            && !password.isEmpty
+            && !isLoading
+    }
+
+    /// `internal(set)` rather than `private(set)` for the reason the member-surface
+    /// properties carry: their mutating half is in `AppModel+MemberSurfaces.swift`
+    /// and `private` is file-scoped. Outside this module it is still read-only.
+    public internal(set) var isLoading = false
     /// A failure from the last load, not from the last sign-in attempt.
-    public private(set) var loadFailure: APIError?
+    public internal(set) var loadFailure: APIError?
     /// A failure from the last sign-in or sign-up attempt.
-    public private(set) var authFailure: APIError?
+    public internal(set) var authFailure: APIError?
 
     // MARK: Lifecycle
 
@@ -141,70 +208,9 @@ public final class AppModel {
     /// call site, so the default and the printed URL cannot drift apart.
     public static let demoPort = 8787
 
-    // MARK: Connecting
 
-    /// Whether the typed address parses, and whether this button is worth
-    /// offering.
-    ///
-    /// Derived from the text rather than tracked: a "Connect" button that is
-    /// enabled for an address the app cannot use teaches the person that the
-    /// app is broken.
-    public var canConnect: Bool {
-        AppModel.parse(serviceURLText) != nil
-    }
-
-    static func parse(_ text: String) -> ServiceEndpoint? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: trimmed),
-              let scheme = url.scheme?.lowercased(),
-              scheme == "http" || scheme == "https",
-              url.host != nil
-        else { return nil }
-        return ServiceEndpoint(baseURL: url)
-    }
-
-    /// Points the app at the address on screen and loads from it.
-    ///
-    /// The `URLSession` is rebuilt with the endpoint because the service's base
-    /// URL is fixed at client construction — see `APIClient.init`.
-    public func connect() async {
-        guard let parsed = AppModel.parse(serviceURLText) else { return }
-        endpoint = parsed
-        client = APIClient(endpoint: parsed)
-        session = nil
-        await resetProjections()
-        authFailure = nil
-        loadFailure = nil
-        tab = .signIn
-        await checkService()
-    }
-
-    /// Asks the service whether it is up, before anyone types a password.
-    ///
-    /// `/v1/health/ready` is public and answers `503` **with a body**, which is
-    /// the whole reason it exists: an app that renders "nobody to show you" when
-    /// the store is unreachable is stating a falsehood. So the connection screen
-    /// says which it is.
-    public func checkService() async {
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            let report = try await client.readiness()
-            serviceReady = report.ready
-            serviceChecks = report.checks
-        } catch let error as APIError {
-            serviceReady = false
-            serviceChecks = []
-            loadFailure = error
-        } catch {
-            serviceReady = false
-            serviceChecks = []
-            loadFailure = .transport(String(describing: error))
-        }
-    }
-
-    public private(set) var serviceReady: Bool?
-    public private(set) var serviceChecks: [ReadinessReport.Check] = []
+    public internal(set) var serviceReady: Bool?
+    public internal(set) var serviceChecks: [ReadinessReport.Check] = []
 
     // MARK: Signing in
 
@@ -241,10 +247,11 @@ public final class AppModel {
             let result = try await client.signUp(
                 contact: contact,
                 password: password,
-                dateOfBirth: dateOfBirth,
+                dateOfBirth: signUpDateOfBirthISO,
                 termsVersion: termsVersion
             )
             ageGateNotice = result.ageGate
+            signUpAgeBand = result.ageBand
             await adopt(result.session)
         } catch let error as APIError {
             authFailure = error
@@ -293,6 +300,50 @@ public final class AppModel {
         tab = .signIn
     }
 
+    // MARK: Matches, conversations and safety
+    //
+    // These are `internal(set)` rather than `private(set)` for the same reason
+    // `client` is: their mutating half lives in `AppModel+MemberSurfaces.swift`,
+    // and `private` is scoped to the file. Read access stays `public`, so
+    // outside this module they are exactly as before — readable, not writable.
+
+    /// `GET /v1/matches`, as published.
+    public internal(set) var matches: MatchList?
+    /// The matches load's own failure, kept apart from the standing's.
+    public internal(set) var matchesFailure: APIError?
+
+    /// A conversation the app has an id for, and the match it belongs to.
+    ///
+    /// ## Where the conversation id comes from
+    ///
+    /// `GET /v1/matches` publishes it per row, resolved through the
+    /// participant-scoped `conversations.findByMatch`, so a member is told about
+    /// a conversation only when they are in it. Nothing here derives it and
+    /// nothing here remembers it: `match.conversationId` is the id, or there is
+    /// no conversation and the row says so rather than offering a button that
+    /// would be answered `404`.
+    public struct Conversation: Identifiable {
+        public let match: MatchRecord
+        /// The other participant, derived from `participants` and the viewer's
+        /// own id. `MatchRecord` names both; the client knows which one it is.
+        public let counterpartId: String
+        public let conversationId: String
+
+        public var id: String { conversationId }
+    }
+
+    /// The chat on screen, or `nil` when the member is on a tab.
+    public internal(set) var chat: Conversation?
+    public internal(set) var messages: MessagePage?
+    public internal(set) var messagesFailure: APIError?
+    /// What the member has typed, held here so closing the chat discards it.
+    public var draft: String = ""
+
+    /// The refusal from the last block or report, and what the last one returned.
+    public internal(set) var safetyFailure: APIError?
+    public internal(set) var lastReport: ReportResult?
+    public internal(set) var lastBlock: BlockResult?
+
     /// Takes a session and reads everything the session can reach.
     ///
     /// The destination after a load is `refresh`'s, not this one's: one rule
@@ -308,12 +359,29 @@ public final class AppModel {
     /// Reloads everything the screens show, from three routes.
     ///
     /// `GET /v1/accounts/:userId` carries the standing and the identity status,
-    /// `GET /v1/accounts/:userId/onboarding` carries the checklist, and
-    /// `GET /v1/discovery` carries the page. The first two are read once and the
-    /// third is built from them, because `DiscoveryViewModel` refuses to be built
-    /// from a page alone: its empty-page copy depends on the member's own
-    /// visibility and readiness, and a screen that guessed would invent a fact.
+    /// `GET /v1/accounts/:userId/onboarding` carries the checklist,
+    /// `GET /v1/discovery` carries the page and `GET /v1/matches` the matches.
+    /// The first two are read once and the other two are built from them,
+    /// because `DiscoveryViewModel` refuses to be built from a page alone: its
+    /// empty-page copy depends on the member's own visibility and readiness, and
+    /// a screen that guessed would invent a fact.
+    ///
+    /// Matches are loaded here rather than on demand because a like changes them
+    /// — `POST /v1/interactions/likes` may create a match, and a block ends one
+    /// — and both go through `refresh()`.
     public func refresh() async {
+        // The readiness probe runs before any session exists: the sign-up screen
+        // needs the age-gate notice and the accepted terms version, and both are
+        // public answers. A failure here is not a load failure — nothing on screen
+        // depends on it, so it is silently absent rather than an error the member
+        // cannot act on.
+        if preflightAgeGate == nil, let report = try? await client.readiness() {
+            terms = report.terms
+            if let terms = report.terms {
+                preflightAgeGate = terms.ageGate
+                termsVersion = terms.currentVersion
+            }
+        }
         guard let held = session else { return }
         let api = client
         isLoading = true
@@ -326,6 +394,10 @@ public final class AppModel {
             let loadedAccount = try await accountResponse
             let loadedReadiness = try await readinessResponse
 
+            if let terms = terms {
+                preflightAgeGate = terms.ageGate
+                termsVersion = terms.currentVersion
+            }
             account = loadedAccount
             readiness = loadedReadiness
             standing = RestrictedAccountViewModel(standing: loadedAccount.account)
@@ -346,6 +418,18 @@ public final class AppModel {
                 discovery = .failure(error)
             }
 
+            do {
+                matches = try await api.matches()
+                matchesFailure = nil
+            } catch let error as APIError {
+                // The same reasoning as discovery: the standing, the checklist and
+                // the page all arrived, and one route failing is not the whole
+                // load having failed.
+                matchesFailure = error
+            } catch {
+                matchesFailure = .transport(String(describing: error))
+            }
+
             tab = AppModel.landingTab(account: loadedAccount, onboarding: self.onboarding)
         } catch let error as APIError {
             loadFailure = error
@@ -354,22 +438,11 @@ public final class AppModel {
         }
     }
 
-    /// Which screen a completed load opens on.
+    /// Forgets everything the previous session was showing.
     ///
-    /// A reading, not a policy: each branch names a fact the server published.
-    /// `standings` is checked first because a restricted member's reason for
-    /// opening the app is the restriction, and sending them to an empty discovery
-    /// page first would be a worse experience than saying why they are seeing it.
-    static func landingTab(
-        account: AccountView,
-        onboarding: OnboardingViewModel?
-    ) -> Tab {
-        if account.account.state != .active { return .standing }
-        if onboarding?.isDiscoverable == false { return .onboarding }
-        return .discovery
-    }
-
-    private func resetProjections() async {
+    /// Called by `connect()` and `signOut()`. Everything the previous session
+    /// was showing goes with it, including the open chat.
+    func resetProjections() async {
         account = nil
         readiness = nil
         onboarding = nil
@@ -377,40 +450,12 @@ public final class AppModel {
         standing = nil
         ageGateNotice = nil
         loadFailure = nil
+        matches = nil
+        matchesFailure = nil
+        closeChat()
+        safetyFailure = nil
+        lastReport = nil
+        lastBlock = nil
     }
 
-    // MARK: What the screens read
-
-    /// The gate's input, assembled from the account projection the server sent.
-    ///
-    /// `nil` before a load rather than a fabricated snapshot: a gate answered
-    /// from a standing the app made up would be exactly the client-side rule
-    /// copy this repository refuses to have.
-    public var viewerSnapshot: ViewerSnapshot? {
-        guard let account else { return nil }
-        return ViewerSnapshot(
-            userId: account.userId,
-            identity: account.identity.state,
-            account: account.account
-        )
-    }
-
-    /// Whether discovery is offered at all, per `ClientGate`.
-    public var offersDiscovery: Bool {
-        guard let snapshot = viewerSnapshot else { return false }
-        return ClientGate.canBrowseDiscovery(snapshot)
-    }
-
-    /// Whether the like affordance is offered on a card, per the granted set.
-    ///
-    /// `DiscoveryViewModel.offersLike` is a readback of what the server granted
-    /// rather than a rule of its own, so it needs a loaded page — hence the
-    /// `discovery?`. Before the first load the answer is `false`: withholding an
-    /// affordance the server may well grant is the safe direction, and
-    /// `OnboardingViewModel.reportsGateDisagreement` is what catches the case
-    /// where that turns out to be wrong.
-    public func offersLike() -> Bool {
-        guard let discovery, let account else { return false }
-        return discovery.offersLike(account.account)
-    }
 }

@@ -30,11 +30,15 @@ public struct SignInScreen: View {
 
     @Environment(\.palette) private var palette
 
+    /// Whether the sign-up sheet is up. Local to this screen: the tab bar has no
+    /// business knowing that creating an account is a sheet, and the sheet is not
+    /// a destination anybody can be sent back to.
+    @State private var showingSignUp = false
+
     public var body: some View {
         Screen("Been There", subtitle: "A client over the real service. Everything below is read from it.") {
             serviceAddress
             credentials
-            signUpExtras
             notice
         }
     }
@@ -105,26 +109,7 @@ public struct SignInScreen: View {
                 PrimaryButton("Sign in", isEnabled: model.canSubmitCredentials) {
                     Task { await model.signIn() }
                 }
-            }
-        }
-    }
-
-    private var signUpExtras: some View {
-        Card {
-            VStack(alignment: .leading, spacing: Space.md) {
-                SectionHeader("Or create an account")
-                field("Date of birth (YYYY-MM-DD)", $model.dateOfBirth, monospaced: true)
-                field("Terms version", $model.termsVersion, monospaced: true)
-                Text(
-                    "The terms version is pre-filled as a starting point and is editable. The "
-                        + "service refuses a stale one and names the version it wants."
-                )
-                .font(Typeface.caption)
-                .foregroundStyle(palette.inkTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-                PrimaryButton("Sign up", isEnabled: model.canSubmitCredentials) {
-                    Task { await model.signUp() }
-                }
+                createAccount
             }
         }
     }
@@ -134,6 +119,29 @@ public struct SignInScreen: View {
     /// The age-gate notice is copy the service publishes on the sign-up response.
     /// Rewriting it would be the client stating a policy in its own voice, so it
     /// is displayed as-is and the age band the service derived is shown beside it.
+    /// Creating an account is a screen of its own, presented as a sheet: the
+    /// sign-up form asks for a birth date and the reason for it, which is not
+    /// something to bury under a password field on the way in.
+    private var createAccount: some View {
+        Button {
+            showingSignUp = true
+        } label: {
+            Text("Create an account")
+                .font(.system(size: 15, weight: .semibold))
+                .frame(maxWidth: .infinity)
+                .frame(height: 50)
+                .background(palette.accent.opacity(0.08))
+                .foregroundStyle(palette.accent)
+                .clipShape(RoundedRectangle(cornerRadius: Radius.button, style: .continuous))
+        }
+        .buttonStyle(PressableStyle())
+        .accessibilityIdentifier("create-account")
+        .sheet(isPresented: $showingSignUp) {
+            SignUpScreen(model: model)
+                .environment(\.palette, palette)
+        }
+    }
+
     private var notice: some View {
         VStack(alignment: .leading, spacing: Space.md) {
             if let gate = model.ageGateNotice {

@@ -125,6 +125,16 @@ public struct MatchRecord: Codable, Sendable, Equatable, Identifiable {
     public let endedAt: String?
     public let endedCause: String?
 
+    /// The conversation this match opened, or `nil` when the service holds none.
+    ///
+    /// `GET /v1/matches` resolves it per row through `conversations.findByMatch`,
+    /// scoped to the requesting participant — the same actor-scoped read the like
+    /// route already does — so a member can only ever be told about a conversation
+    /// they are in. Before it was published, the only conversation id a client ever
+    /// received was the one on a `match_created` like response, which meant a
+    /// member who opened the app on this list had no way to start a chat at all.
+    public let conversationId: String?
+
     public init(
         matchId: String,
         pairKey: String,
@@ -133,7 +143,8 @@ public struct MatchRecord: Codable, Sendable, Equatable, Identifiable {
         standings: [String],
         createdAt: String,
         endedAt: String?,
-        endedCause: String?
+        endedCause: String?,
+        conversationId: String? = nil
     ) {
         self.matchId = matchId
         self.pairKey = pairKey
@@ -143,6 +154,7 @@ public struct MatchRecord: Codable, Sendable, Equatable, Identifiable {
         self.createdAt = createdAt
         self.endedAt = endedAt
         self.endedCause = endedCause
+        self.conversationId = conversationId
     }
 }
 
@@ -181,6 +193,37 @@ public struct ReadinessReport: Codable, Sendable, Equatable {
     public let ready: Bool
     public let checkedAt: String
     public let checks: [Check]
+    /// What the service tells a client *before* it asks for a birth date.
+    ///
+    /// Optional because a service that does not publish it must still decode —
+    /// the alternative is a client that refuses to start against an older
+    /// deployment. Absent, the sign-up screen shows no notice rather than writing
+    /// its own: the age-gate sentence is the service's policy to state, and a
+    /// paraphrase from the client is a promise nobody checked.
+    public let terms: TermsDeclaration?
+}
+
+/// The terms version the service accepts, and the notice that precedes the age
+/// gate. Published on readiness so every client quotes one sentence rather than
+/// writing its own.
+public struct TermsDeclaration: Codable, Sendable, Equatable {
+    public struct AgeGate: Codable, Sendable, Equatable {
+        public let title: String
+        public let body: String
+
+        public init(title: String, body: String) {
+            self.title = title
+            self.body = body
+        }
+    }
+
+    public let currentVersion: String
+    public let ageGate: AgeGate
+
+    public init(currentVersion: String, ageGate: AgeGate) {
+        self.currentVersion = currentVersion
+        self.ageGate = ageGate
+    }
 }
 
 /// `GET /v1/health/live`.

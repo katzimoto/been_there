@@ -137,7 +137,31 @@ export function matchRoutes(dependencies: ServiceDependencies): readonly Route[]
         { limit: 50, offset: 0 },
         request.tx,
       );
-      return okResponse(200, { total: page.total, matches: page.items });
+      // Each match's conversation, so a client can open the chat without having
+      // caught the id on a like response first. The conversation row is
+      // *already* keyed by match and readable by the same actor, so this is
+      // publishing a value the member is entitled to rather than widening
+      // anything — and its absence was the reason a client could list matches and
+      // then have nowhere to send a message.
+      //
+      // One read per match rather than a join: a page is fifty rows, each read is
+      // a primary-key lookup, and this keeps the change inside one route instead
+      // of altering the store projection every other consumer reads.
+      const matches = await Promise.all(
+        page.items.map(async (item) => {
+          const matchId = item['matchId'];
+          if (typeof matchId !== 'string') {
+            return item;
+          }
+          const conversation = await dependencies.stores.conversations.findByMatch(
+            castId<'MatchId'>(matchId),
+            actorId,
+            request.tx,
+          );
+          return conversation === null ? item : { ...item, conversationId: conversation.conversationId };
+        }),
+      );
+      return okResponse(200, { total: page.total, matches });
     }),
   ];
 }

@@ -253,7 +253,28 @@ async function provisionStaff(storesForStaff, transactionForStaff, baseUrl) {
     createdAt: now,
     updatedAt: now,
   };
-  await transactionForStaff.run((tx) => storesForStaff.staff.insertStaff(row, tx));
+  // Insert once, reuse afterwards. This used to insert unconditionally, and
+  // `staff_identities_by_contact` is unique — so the *second* `make demo` against
+  // the same database died with a constraint violation, after the HTTP server had
+  // already bound its port. The shape of that failure was the worst part: the
+  // port answered for a moment and then connection-refused, which reads as a
+  // client problem rather than a duplicate moderator.
+  //
+  // Reuse rather than update: the password hash is the same constant either way,
+  // and a moderator whose stored hash predates a change to `STAFF_PASSWORD`
+  // should fail the sign-in below loudly rather than have its credential
+  // silently rewritten by a demo boot. A deactivated moderator is reactivated,
+  // because that is the state a demo cannot work around.
+  const existing = await transactionForStaff.run((tx) =>
+    storesForStaff.staff.findStaffByContact(STAFF_CONTACT, tx),
+  );
+  if (existing === null) {
+    await transactionForStaff.run((tx) => storesForStaff.staff.insertStaff(row, tx));
+  } else if (existing.status !== 'active') {
+    await transactionForStaff.run((tx) =>
+      storesForStaff.staff.updateStaffStatus(existing.staffId, 'active', now, tx),
+    );
+  }
   const response = await fetch(`${baseUrl}/v1/staff-sessions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

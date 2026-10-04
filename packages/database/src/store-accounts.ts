@@ -160,13 +160,24 @@ export class PgAccountPlatformStore implements AccountPlatformStore {
     return found[0] === undefined ? null : toCredentialRow(found[0]);
   }
 
+  /**
+   * Writes a credential, deriving `credential_method` from the hash.
+   *
+   * Derived rather than passed, because the two cannot be chosen independently:
+   * migration 009's `account_credentials_method_shape` requires a password method
+   * to hold a hash and a social method to hold none, and a caller passing both
+   * would be asked to state a fact the row already carries. `null` is therefore
+   * the whole of "this account authenticates with a provider" and it is also what
+   * makes the refusal in `resolvePasswordCredential` possible downstream.
+   */
   async insertCredential(row: CredentialRow, tx: Transaction): Promise<void> {
     await affected(
       'insertCredential',
       tx,
       `INSERT INTO app.account_credentials
-         (user_id, contact_kind, contact_identifier, contact_verified, password_hash, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $6)`,
+         (user_id, contact_kind, contact_identifier, contact_verified, password_hash,
+          credential_method, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, CASE WHEN $5::text IS NULL THEN 'social' ELSE 'password' END, $6, $6)`,
       [row.userId, row.contactKind, row.contactIdentifier, row.contactVerified, row.passwordHash, row.createdAt],
     );
   }
@@ -182,12 +193,24 @@ export class PgAccountPlatformStore implements AccountPlatformStore {
     );
   }
 
+  /**
+   * Sets or replaces the password hash.
+   *
+   * `credential_method` moves to `'password'` in the same statement, and it has
+   * to: migration 009's `account_credentials_method_shape` CHECK says a password
+   * method has a hash and a social method does not, so writing a hash without
+   * moving the method would fail the constraint. That is the constraint doing its
+   * job — recovery completing on an account that signed up with a provider is a
+   * legitimate path, and after it the account genuinely does hold a password.
+   */
   async updatePasswordHash(userId: UserId, passwordHash: string, at: Date, tx: Transaction): Promise<boolean> {
     return (
       (await affected(
         'updatePasswordHash',
         tx,
-        'UPDATE app.account_credentials SET password_hash = $2, updated_at = $3 WHERE user_id = $1',
+        `UPDATE app.account_credentials
+            SET password_hash = $2, credential_method = 'password', updated_at = $3
+          WHERE user_id = $1`,
         [userId, passwordHash, at],
       )) > 0
     );

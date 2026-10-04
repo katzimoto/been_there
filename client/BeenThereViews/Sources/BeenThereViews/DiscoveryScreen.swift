@@ -25,27 +25,53 @@ public struct DiscoveryScreen: View {
     @Environment(\.feedback) private var feedback
 
     private let model: DiscoveryViewModel
+    /// The model that performs the actions. Separate from `model` because this
+    /// screen *renders* a `DiscoveryViewModel` — the page the service published
+    /// — while blocking and reporting are account-wide writes that only
+    /// `AppModel`, which owns the session, may make.
+    private let actions: AppModel
     private let offersLike: Bool
+    private let offersBlock: Bool
+    private let offersReport: Bool
     private let likeOutcome: LikeResult.Resolution?
     private let likeFailure: APIError?
     private let onRetry: () -> Void
     private let onLike: (CandidateCard) -> Void
+    private let onBlock: (CandidateCard) -> Void
+    private let onReport: (CandidateCard) -> Void
 
     public init(
         model: DiscoveryViewModel,
+        actions: AppModel,
         offersLike: Bool,
+        offersBlock: Bool = false,
+        offersReport: Bool = false,
         likeOutcome: LikeResult.Resolution? = nil,
         likeFailure: APIError? = nil,
         onRetry: @escaping () -> Void = {},
-        onLike: @escaping (CandidateCard) -> Void = { _ in }
+        onLike: @escaping (CandidateCard) -> Void = { _ in },
+        onBlock: @escaping (CandidateCard) -> Void = { _ in },
+        onReport: @escaping (CandidateCard) -> Void = { _ in }
     ) {
         self.model = model
+        self.actions = actions
         self.offersLike = offersLike
+        self.offersBlock = offersBlock
+        self.offersReport = offersReport
         self.likeOutcome = likeOutcome
         self.likeFailure = likeFailure
         self.onRetry = onRetry
         self.onLike = onLike
+        self.onBlock = onBlock
+        self.onReport = onReport
     }
+
+    /// The safety sheet this screen is showing, or `nil`.
+    ///
+    /// Block and Report live here as well as on a match because the person on a
+    /// discovery card is somebody a member may never match — and the moment a
+    /// member wants to report someone is usually *before* they match.
+    @State private var sheet: SafetySheet?
 
     public var body: some View {
         Screen(model.headline, subtitle: model.bodyText) {
@@ -55,7 +81,15 @@ public struct DiscoveryScreen: View {
             case .cards(let cards):
                 LazyVStack(spacing: Space.sm) {
                     ForEach(cards) { card in
-                        CandidateRow(card: card, offersLike: offersLike) { onLike(card) }
+                        CandidateRow(
+                            card: card,
+                            offersLike: offersLike,
+                            offersBlock: offersBlock,
+                            offersReport: offersReport,
+                            onLike: { onLike(card) },
+                            onBlock: { sheet = .block(card.userId) },
+                            onReport: { sheet = .report(card.userId) }
+                        )
                     }
                 }
                 Text("\(model.total) in total · projection v\(model.projectionVersion)")
@@ -81,6 +115,9 @@ public struct DiscoveryScreen: View {
             if model.offersRetry, case .cards = model.content {
                 SecondaryButton("Refresh") { onRetry() }
             }
+        }
+        .sheet(item: $sheet) { presented in
+            SafetySheetView(model: actions, sheet: presented)
         }
     }
 
@@ -136,10 +173,23 @@ private func likeRefusalText(_ outcome: LikeResult.Resolution) -> String {
 /// is a reference to. The leading circle is an avatar built from the name the
 /// projection published and a hue derived from the id, which claims nothing about
 /// how anybody looks.
+///
+/// ## Why block and report are on this card
+///
+/// The person on a discovery card is somebody a member may never match, and the
+/// moment somebody wants to report a person is usually *before* they match. The
+/// safety controls therefore cannot live only behind a match: a member who
+/// cannot block or report from this card is a member who cannot use the safety
+/// product at all. They are offered exactly when `ClientGate` says the service
+/// granted `block` and `report`, and are absent otherwise.
 struct CandidateRow: View {
     let card: CandidateCard
     let offersLike: Bool
+    let offersBlock: Bool
+    let offersReport: Bool
     let onLike: () -> Void
+    let onBlock: () -> Void
+    let onReport: () -> Void
 
     var body: some View {
         Card(padding: Space.md) {
@@ -195,6 +245,13 @@ struct CandidateRow: View {
                         .font(Typeface.caption)
                         .foregroundStyle(.tertiary)
                 }
+
+                SafetyActions(
+                    offersBlock: offersBlock,
+                    offersReport: offersReport,
+                    onBlock: onBlock,
+                    onReport: onReport
+                )
             }
         }
     }

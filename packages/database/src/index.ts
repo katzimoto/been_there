@@ -15,3 +15,4 @@ export { PgVerificationAttemptStore } from './store-verification-attempts.js';
 export { PostgresGoalStore } from './store-goal.js';
 export { PgAccountPlatformStore } from './store-accounts.js';
 export { PgStaffIdentityStore } from './store-staff.js';
+export { PgSocialIdentityStore } from './store-social-identity.js';

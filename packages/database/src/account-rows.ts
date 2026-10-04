@@ -140,7 +140,7 @@ export function toCredentialRow(raw: QueryResultRow): CredentialRow {
     contactKind: readText(raw['contact_kind'], 'account_credentials', 'contact_kind'),
     contactIdentifier: readText(raw['contact_identifier'], 'account_credentials', 'contact_identifier'),
     contactVerified: readBoolean(raw['contact_verified'], 'account_credentials', 'contact_verified'),
-    passwordHash: readText(raw['password_hash'], 'account_credentials', 'password_hash'),
+    passwordHash: readNullableText(raw['password_hash'], 'account_credentials', 'password_hash'),
     createdAt: readTimestamp(raw['created_at'], 'account_credentials', 'created_at'),
     updatedAt: readTimestamp(raw['updated_at'], 'account_credentials', 'updated_at'),
   };

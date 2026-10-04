@@ -7,6 +7,7 @@ import { PostgresIdentityStore } from './store-users-identity.js';
 import { PostgresInteractionStore } from './store-interaction.js';
 import { createModerationStore } from './store-moderation.js';
 import { PostgresGoalStore } from './store-goal.js';
+import { PgSocialIdentityStore } from './store-social-identity.js';
 import { PgStaffIdentityStore } from './store-staff.js';
 import { PgRiskStore } from './store-risk.js';
 import { PgVerificationAttemptStore } from './store-verification-attempts.js';
@@ -43,5 +44,6 @@ export function createStores(pool: Pool): Stores {
     accounts: new PgAccountPlatformStore(),
     goals: new PostgresGoalStore(),
     staff: new PgStaffIdentityStore(),
+    socialIdentities: new PgSocialIdentityStore(),
   };
 }

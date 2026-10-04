@@ -9,10 +9,12 @@ import {
 import type { SessionRow } from '@been-there/contracts';
 import {
   SIGN_IN_FAILED_COPY,
+  SIGN_IN_LIMITED_COPY,
   evaluatePassword,
   hashPassword,
   normalizeContact,
   verifyPassword,
+  resolvePasswordCredential,
 } from '@been-there/platform';
 import { readString } from '../http/body.js';
 import { okResponse, publicRoute, route, type Route } from '../http/router.js';
@@ -143,8 +145,11 @@ export function accountSessionRoutes(dependencies: ServiceDependencies): readonl
           request.tx,
         );
         const delayMinutes = loginDelayMinutes(failures - LOGIN_ATTEMPTS_PER_WINDOW);
-        return domainError('rate_limited', 'service.accounts', SIGN_IN_FAILED_COPY.body, {
-          title: SIGN_IN_FAILED_COPY.title,
+        // The limit's own words, not the wrong-password words: this refusal is
+        // about how often the address was tried, not about whether the password
+        // was right — and the password was never checked.
+        return domainError('rate_limited', 'service.accounts', SIGN_IN_LIMITED_COPY.body, {
+          title: SIGN_IN_LIMITED_COPY.title,
           reason: 'too_many_attempts',
           delayMinutes,
           retryAfterSeconds: delayMinutes * 60,
@@ -157,7 +162,14 @@ export function accountSessionRoutes(dependencies: ServiceDependencies): readonl
         request.now,
         request.tx,
       );
-      const verified = await verifyPassword(password.value, credential.passwordHash);
+      // An account created with a provider has no password. `resolvePasswordCredential`
+      // refuses it with the reason the platform states, and it hands back the hash
+      // otherwise so `verifyPassword` gets a `string` with no invented fallback.
+      const stored = resolvePasswordCredential(credential);
+      if (!stored.ok) {
+        return stored;
+      }
+      const verified = await verifyPassword(password.value, stored.value);
       if (!verified) {
         return signInFailed();
       }

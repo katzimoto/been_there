@@ -56,6 +56,11 @@ schemes:
         # device run points the app at the Mac's LAN address instead.
         BEEN_THERE_BASE_URL: http://127.0.0.1:8787
         BEEN_THERE_DEMO_CONTACT: u-avery@been-there.test
+        # All eight seeded people, in the order `make seed` prints them. The UI
+        # suite signs in once per test and the service allows five sign-ins per
+        # account per fifteen minutes, so each test takes a different person
+        # rather than all three spending one account's budget.
+        BEEN_THERE_DEMO_CONTACTS: u-avery@been-there.test,u-blair@been-there.test,u-frankie@been-there.test,u-riley@been-there.test,u-ellis@been-there.test,u-sasha@been-there.test,u-casey@been-there.test,u-devon@been-there.test
         BEEN_THERE_DEMO_PASSWORD: been-there-demo-42
 packages:
   BeenThereViews:

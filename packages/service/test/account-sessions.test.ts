@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createStores, createTransaction } from '@been-there/database';
 import pg from 'pg';
+import { SIGN_IN_FAILED_COPY, SIGN_IN_LIMITED_COPY } from '@been-there/platform';
 import {
   serviceRoutes,
   startService,
@@ -401,5 +402,22 @@ describe('recovery', () => {
       harness.stores.accounts.findOpenRecoveryFor(account.userId as never, tx),
     );
     expect(open?.status).not.toBe('pending');
+  });
+});
+
+describe('the sign-in limit speaks for itself', () => {
+  /**
+   * A rate limit that reads as a wrong password.
+   *
+   * The refusal used to carry `reason: 'too_many_attempts'` under the title
+   * "That email and password don't match." — which tells a member their password
+   * is broken when the password was never checked, and invites the retry storm
+   * the limit exists to stop. Status stays 429 either way; only the wording
+   * changed, and this pins the wording.
+   */
+  it('names the limit instead of blaming the password', () => {
+    expect(SIGN_IN_LIMITED_COPY.title).not.toBe(SIGN_IN_FAILED_COPY.title);
+    expect(SIGN_IN_LIMITED_COPY.body).not.toBe(SIGN_IN_FAILED_COPY.body);
+    expect(SIGN_IN_LIMITED_COPY.title).toMatch(/too many/i);
   });
 });

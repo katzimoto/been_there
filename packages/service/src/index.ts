@@ -17,6 +17,9 @@ import { verificationRoutes } from './routes/verification.js';
 import { staffSessionRoutes } from './routes/staff-sessions.js';
 
 export * from './ports.js';
+// The version `POST /v1/accounts` accepts today. Exported so the seeder writes the
+// version the service actually enforces rather than a second literal of it.
+export { CURRENT_TERMS_VERSION } from './accounts/terms.js';
 export * from './http/body.js';
 export * from './http/failure.js';
 export * from './http/router.js';

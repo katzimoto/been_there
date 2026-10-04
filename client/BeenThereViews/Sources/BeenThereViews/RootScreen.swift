@@ -53,8 +53,13 @@ public struct RootScreen: View {
             FeedbackProvider(feedback: feedback) {
                 VStack(spacing: 0) {
                     content
-                    TabBar(tabs: availableTabs, selected: model.tab) { tab in
-                        model.go(to: tab)
+                    // The bar is chrome for moving between tabs, and a chat is
+                    // not a tab — it is pushed over one. Leaving it visible would
+                    // invite a tap that throws the conversation away.
+                    if model.chat == nil {
+                        TabBar(tabs: availableTabs, selected: model.tab) { tab in
+                            model.go(to: tab)
+                        }
                     }
                 }
                 .frame(width: phoneWidth)
@@ -64,23 +69,46 @@ public struct RootScreen: View {
 
     /// The tabs this load can serve.
     ///
-    /// `signIn` is always available because it is the only way to reach anything
-    /// else, and `standing` appears once a standing has been published — which
-    /// includes an `active` one, because "what does the service think my account
-    /// holds" is answerable for any account.
+    /// `signIn` appears only while there is no session. It is the way in, and
+    /// once a session exists it is a control that can only return a member to a
+    /// form they no longer need — so it is withheld rather than shown greyed
+    /// out, which is this file's own rule. Withholding it also removes the
+    /// collision that made it unreachable: a tab labelled "Sign in" and a
+    /// button labelled "Sign in" are the same control to VoiceOver and to any
+    /// UI test querying by name, and the tab won.
+    ///
+    /// `standing` appears once a standing has been published — which includes an
+    /// `active` one, because "what does the service think my account holds" is
+    /// answerable for any account. `matches` appears with the session rather
+    /// than with a loaded list: `GET /v1/matches` answers for any member,
+    /// including an empty one, so withholding it until a match exists would hide
+    /// the empty state the member needs to see.
     private var availableTabs: [AppModel.Tab] {
         AppModel.Tab.allCases.filter { tab in
             switch tab {
-            case .signIn: return true
+            case .signIn: return model.session == nil
             case .standing: return model.account != nil
             case .onboarding: return model.readiness != nil
             case .discovery: return model.offersDiscovery
+            case .matches: return model.session != nil
             }
         }
     }
 
     @ViewBuilder
     private var content: some View {
+        // A chat is pushed over the tab that opened it, so it is decided before
+        // the tab is: `model.chat` is the only thing that moves the member out of
+        // a tab and back, and `closeChat()` is the only way back.
+        if let chat = model.chat {
+            ChatScreen(model: model, conversation: chat) { model.closeChat() }
+        } else {
+            tabContent
+        }
+    }
+
+    @ViewBuilder
+    private var tabContent: some View {
         switch model.tab {
         case .signIn:
             SignInScreen(model: model)
@@ -111,7 +139,10 @@ public struct RootScreen: View {
             if let discovery = model.discovery {
                 DiscoveryScreen(
                     model: discovery,
+                    actions: model,
                     offersLike: model.offersLike(),
+                    offersBlock: model.offersBlock,
+                    offersReport: model.offersReport,
                     likeOutcome: model.likeOutcome,
                     likeFailure: model.likeFailure,
                     onRetry: { Task { await model.refresh() } },
@@ -120,6 +151,9 @@ public struct RootScreen: View {
             } else {
                 loading
             }
+
+        case .matches:
+            MatchesScreen(model: model)
         }
     }
 
@@ -149,6 +183,15 @@ public struct RootScreen: View {
 /// installed. Rendered inside the provider, this reads the right one, which is
 /// the difference between a tab bar that follows the app and one that stays white
 /// on a charcoal screen.
+///
+/// ## Why each tab carries an identifier as well as a label
+///
+/// A tab and the action on the screen it opens can easily share a name — the
+/// "Sign in" tab and the "Sign in" button did. VoiceOver and XCUITest both
+/// identify a control by its accessible name when no identifier is set, so two
+/// such controls are indistinguishable to both, and the tab sits later in the
+/// hierarchy and therefore wins the lookup. The identifier says *what kind of
+/// control this is* and leaves the label saying *what it is called*.
 struct TabBar: View {
     @Environment(\.palette) private var palette
 
@@ -181,6 +224,7 @@ struct TabBar: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(tab.title)
+                    .accessibilityIdentifier("tab.\(tab.rawValue)")
                     .accessibilityAddTraits(isSelected ? [.isSelected] : [])
                 }
             }
