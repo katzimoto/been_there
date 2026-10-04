@@ -79,7 +79,15 @@ import { exit } from 'node:process';
 const ROOT = resolve(import.meta.dirname, '..', '..');
 const PACKAGES_DIR = join(ROOT, 'packages');
 const SELF_PATH = relative(ROOT, resolve(import.meta.dirname, 'check-domain-boundaries.mjs'));
-const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'coverage', '.build']);
+// A Record rather than a Set: these names are written down here and never
+// mutated, so a Set would be a second answer to "which directories do we skip".
+const SKIP_DIRS = {
+  node_modules: true,
+  dist: true,
+  '.git': true,
+  coverage: true,
+  '.build': true,
+};
 
 /** The domain packages, in one place, so the tables and messages agree. */
 const DOMAINS = ['identity', 'dating', 'communication', 'trust-safety', 'moderation', 'platform'];
@@ -161,7 +169,7 @@ for (const [name, entry] of packagesByName) {
 function walk(dir) {
   const found = [];
   for (const entry of readdirSync(dir)) {
-    if (SKIP_DIRS.has(entry)) {
+    if (SKIP_DIRS[entry] === true) {
       continue;
     }
     const full = join(dir, entry);

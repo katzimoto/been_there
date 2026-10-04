@@ -73,7 +73,7 @@ docs: ## Check that documentation links resolve
 research-check: ## Check the research tool still runs
 	node scripts/research/search.mjs --help > /dev/null
 
-check: workflow boundaries typecheck typecheck-tests test docs research-check stale-artifacts lockfile migrate seed client-test client-ios parity ## Everything CI runs, in CI order
+check: workflow boundaries typecheck typecheck-tests test docs research-check stale-artifacts no-static-map-set lockfile migrate seed client-test client-ios parity ## Everything CI runs, in CI order
 ci: install check ## The whole CI sequence as one command
 
 lockfile: ## Assert the lockfile covers every workspace package
@@ -88,6 +88,9 @@ stale-artifacts: ## Assert no compiled output sits beside the source it was buil
 # a 100ms text scan and a boundary violation should fail before a full build.
 boundaries: ## Assert no domain package imports another
 	node scripts/dev/check-domain-boundaries.mjs
+
+no-static-map-set: ## Assert no Map or Set stands in for a Record over static keys
+	node scripts/dev/check-no-static-map-set.mjs
 
 parity: ## Assert the local targets above run exactly what CI runs
 	node scripts/dev/check-ci-parity.mjs
