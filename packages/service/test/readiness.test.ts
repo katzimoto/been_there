@@ -15,6 +15,8 @@ import {
 import { requireDatabaseReady } from './support/harness.js';
 import { harnessVerificationProvider } from './support/provider.js';
 import { reclaimPrepared } from './support/reclaim.js';
+import { AGE_GATE_NOTICE } from '@been-there/platform';
+import { CURRENT_TERMS_VERSION } from '../src/accounts/terms.js';
 
 /**
  * Readiness and liveness, over HTTP, against a real Postgres — and against a
@@ -128,6 +130,32 @@ describe('readiness and liveness, over real HTTP', () => {
    * failing the probe would take it out of rotation and teach operators to
    * ignore this endpoint.
    */
+  /**
+   * The terms a client needs *before* it asks for a birth date, on the same body.
+   *
+   * The age gate is a policy this service owns, and the sentence explaining it
+   * belongs to whoever enforces it. Publishing it here is what stops each client
+   * from writing its own version of the same promise — and it is the only place a
+   * client can learn the terms version it must send, which is otherwise a
+   * hard-coded string in each one.
+   */
+  it('publishes the current terms version and the age-gate notice, so a client can quote rather than paraphrase', async () => {
+    const answer = await fetchJson(`${reachableService?.url}/v1/health/ready`);
+    expect(answer.status).toBe(200);
+
+    const terms = answer.body['terms'] as { currentVersion?: unknown; ageGate?: unknown } | undefined;
+    expect(terms).toBeDefined();
+    expect(typeof terms?.currentVersion).toBe('string');
+    expect(terms?.currentVersion).toBe(CURRENT_TERMS_VERSION);
+
+    const notice = terms?.ageGate as { title?: unknown; body?: unknown } | undefined;
+    expect(notice?.title).toBe(AGE_GATE_NOTICE.title);
+    expect(notice?.body).toBe(AGE_GATE_NOTICE.body);
+    // The sentence has to survive the JSON hop intact, or a client has nothing
+    // to quote — and the promise it makes is that the date is never shown.
+    expect(String(notice?.body)).toContain('never shown to anyone');
+  });
+
   it('reports the provider mode on a passing readiness probe, so a stub cannot read as a vendor', async () => {
     const answer = await fetchJson(`${reachableService?.url}/v1/health/ready`);
     expect(answer.status).toBe(200);

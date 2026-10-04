@@ -41,6 +41,8 @@ One specification per MVP feature issue, in `features/`:
 | [Likes & Matching](./features/likes-and-matching.md) | [#12](https://github.com/katzimoto/been_there/issues/12) |
 | [Messaging Experience](./features/messaging-experience.md) | [#13](https://github.com/katzimoto/been_there/issues/13) |
 | [User Safety Controls](./features/user-safety-controls.md) | [#14](https://github.com/katzimoto/been_there/issues/14) |
+| [Social Events](./features/social-events.md) | [#50](https://github.com/katzimoto/been_there/issues/50) · [#51](https://github.com/katzimoto/been_there/issues/51) · [#52](https://github.com/katzimoto/been_there/issues/52) · [#53](https://github.com/katzimoto/been_there/issues/53) — deferred by decision, specified ahead of it |
+| [Avatar Introductions](./features/avatar-introductions.md) | [#54](https://github.com/katzimoto/been_there/issues/54) · [#55](https://github.com/katzimoto/been_there/issues/55) · [#56](https://github.com/katzimoto/been_there/issues/56) · [#57](https://github.com/katzimoto/been_there/issues/57) · [#58](https://github.com/katzimoto/been_there/issues/58) · [#59](https://github.com/katzimoto/been_there/issues/59) · awaiting [the decision record](./decisions/avatar-introductions.md) for [#62](https://github.com/katzimoto/been_there/issues/62) |
 | [Account Restrictions & Re-verification](./features/account-restrictions-and-reverification.md) | [#15](https://github.com/katzimoto/been_there/issues/15) |
 | [Notifications](./features/notifications.md) | [#16](https://github.com/katzimoto/been_there/issues/16) |
 | [Privacy & User Settings](./features/privacy-and-user-settings.md) | [#17](https://github.com/katzimoto/been_there/issues/17) |

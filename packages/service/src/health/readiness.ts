@@ -1,4 +1,5 @@
 import type { ProviderMode, VerificationProvider } from '@been-there/identity';
+import { AGE_GATE_NOTICE } from '@been-there/platform';
 import type { ServiceDependencies } from '../ports.js';
 
 /**
@@ -83,6 +84,35 @@ export function verificationDeclaration(provider: VerificationProvider): Verific
   };
 }
 
+/**
+ * What a client is told about terms and the age gate before it asks for anything.
+ *
+ * The copy is the platform's own `AGE_GATE_NOTICE` and the service's own
+ * `CURRENT_TERMS_VERSION`, imported rather than retyped, so the sentence a
+ * member reads and the rule the service enforces are the same two values by
+ * construction. A client that renders this is quoting; a client that wrote its
+ * own version of this sentence would be stating a policy in its own voice, and
+ * the repository has one rule about that.
+ */
+export interface TermsDeclaration {
+  /** The version `POST /v1/accounts` currently accepts. */
+  readonly currentVersion: string;
+  /** Shown before the date of birth is asked for. */
+  readonly ageGate: { readonly title: string; readonly body: string };
+}
+
+/**
+ * The declaration itself. A function so the imported constants and the shape
+ * cannot be separated: a readiness body with an empty notice would read as a
+ * service that does not ask.
+ */
+export function termsDeclaration(
+  currentVersion: string,
+  notice: { readonly title: string; readonly body: string },
+): TermsDeclaration {
+  return { currentVersion, ageGate: { title: notice.title, body: notice.body } };
+}
+
 export interface ReadinessReport {
   readonly ready: boolean;
   readonly checkedAt: string;
@@ -93,6 +123,14 @@ export interface ReadinessReport {
    * vendor, which is the omission this exists to prevent.
    */
   readonly verification: VerificationDeclaration;
+  /**
+   * Always present, for the same reason `verification` is: a client that has to
+   * ask the date of birth has to be able to say why *before* it asks, and that
+   * sentence is a policy this service owns. Publishing it here is what stops
+   * every client from writing its own age-gate copy — four clients, four
+   * paraphrases, four chances to promise something the service does not.
+   */
+  readonly terms: TermsDeclaration;
 }
 
 /**

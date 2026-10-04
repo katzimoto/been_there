@@ -1,8 +1,15 @@
+import { AGE_GATE_NOTICE } from '@been-there/platform';
+import { CURRENT_TERMS_VERSION } from '../accounts/terms.js';
 import type { ServiceDependencies } from '../ports.js';
 import { createServiceSafety } from '../wiring/safety.js';
 import { type LifecyclePhase, ServiceLifecycle, type ShutdownStep } from './lifecycle.js';
 import { ServiceMetrics } from './metrics.js';
-import { type ReadinessReport, checkDatabase, verificationDeclaration } from './readiness.js';
+import {
+  type ReadinessReport,
+  checkDatabase,
+  termsDeclaration,
+  verificationDeclaration,
+} from './readiness.js';
 
 /**
  * Everything the health routes answer from, held in one place.
@@ -45,6 +52,7 @@ export class ServiceHealth {
       return {
         ready: false,
         verification: verificationDeclaration(this.dependencies.verification),
+        terms: termsDeclaration(CURRENT_TERMS_VERSION, AGE_GATE_NOTICE),
         checkedAt: checkedAt.toISOString(),
         checks: [
           {
@@ -60,6 +68,7 @@ export class ServiceHealth {
     return {
       ready: database.ok,
       verification: verificationDeclaration(this.dependencies.verification),
+      terms: termsDeclaration(CURRENT_TERMS_VERSION, AGE_GATE_NOTICE),
       checkedAt: checkedAt.toISOString(),
       checks: [database],
     };

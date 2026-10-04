@@ -764,6 +764,94 @@ decided, because deciding it means changing a tested domain module that this
 document does not own — and a spec that guesses at the fix would be guessing at
 someone else's schema.
 
+### 9.9 The surface this is reachable at, and what it refuses
+
+§9 specifies what the goal and the counter *are*. This subsection records where
+they are reachable and what a client is told when they are not, because a rule
+with no refusal has no observable behaviour.
+
+All five routes are in `packages/service/src/routes/goal.ts`, and each one starts
+from the session rather than from an id in the path (`:337-347`), so neither
+aggregate is addressable by anybody but its owner.
+
+| Route | Answers | Notes |
+|---|---|---|
+| `GET /v1/profiles/me/goal` (`:93`) | the target, the count, and the derived progress | Answers with the default when no row exists yet, including for a member with no profile at all (`:99-107`) — "what is my goal" has an answer before there is anything to set it on |
+| `PUT /v1/profiles/me/goal` (`:112`) | the same body after the change | Refused with `not_found` when there is no profile, because a goal is a setting on a publication and there is no publication yet (`:126-128`, `:334-335`) |
+| `GET /v1/profiles/me/completed-dates` (`:150`) | `completed`, `progress`, and **every** record including withdrawn ones | The fold's inputs are published with the fold, because a correction the owner cannot see is one they cannot explain (`:164-171`) |
+| `POST /v1/profiles/me/completed-dates` (`:176`) | `entryId`, `created`, `completed` | `201` with `created: true` when the entry was created, `200` with `created: false` when the key was a replay — a retry is not a second creation (`:231-235`) |
+| `POST /v1/profiles/me/completed-dates/:entryId/corrections` (`:240`) | `kind`, `applied`, the effective day, whether it still counts, `completed` | `kind` is resolved through a lookup, so an unknown value cannot be stored (`:87`, `:253-257`) |
+
+**The counter works without a profile and the goal does not.** That asymmetry is
+§9.1's two keys showing through the surface: the ledger is keyed by `UserId` and
+exists whether or not there is a card, while `PUT` of a target has nothing to
+attach to (`:159-163`). It is not an oversight to be tidied away.
+
+The refusals a client can receive, with the values the domain produces
+(`packages/dating/src/goal.ts`):
+
+| Situation | Code | `reason` |
+|-----------|------|----------|
+| Target is not a whole number | `validation_failed` | `not_a_whole_number` (`:98-103`) |
+| Target below 1 | `validation_failed` | `below_minimum` (`:105-111`) |
+| Target above 100,000 | `validation_failed` | `above_maximum` (`:113-119`) |
+| A day that is not a real calendar day, including `2026-02-31` and a malformed string | `validation_failed` | `not_a_calendar_day` (`:226-249`) |
+| A day that has not happened yet | `validation_failed` | `in_the_future` (`:250-257`) |
+| A date with yourself | `validation_failed` | `self_recorded` (`:295-302`) |
+| A correction against an entry that does not exist | `not_found` | — (`:336-338`) |
+| A restatement of a withdrawn date | `conflict` | `already_withdrawn` (`:345-351`) |
+
+Two absences are load-bearing and are worth naming because they cannot be added
+without a review:
+
+- **Recording reads nothing about the other person.** The only validation on
+  `counterpartId` is that the caller wrote a uuid — not that the account exists,
+  is verified, is matched, or is in good standing
+  (`packages/service/src/routes/goal.ts:189-193`). §9.6's promise is enforced by
+  that absence. A handler that fetched a standing here would reintroduce the
+  review requirement the domain was shaped to make unreachable.
+- **Nothing here is stored as a count.** There is no `completed` column
+  (`packages/database/migrations/005_dating_goal_and_completed_dates.sql:37-40`)
+  and no `counterpart_id` foreign key, for the same reason (`:50-55`).
+
+### 9.10 Where the superseded day actually survives
+
+§9.4 promises that the owner can be told what they claimed, §9.8 records the
+disagreement as open, and §13 carries the question. All three are written against
+"the record overwrites the day". That is true of the domain aggregate and false
+of the storage, and the difference matters because it changes what the open
+question is about.
+
+| Layer | What it keeps | Where |
+|-------|---------------|-------|
+| `CompletedDateRecord` | the **effective** day, plus one correction per correction — a `restated` carries the day it moved *to* | `packages/dating/src/goal.ts:146-158`, `:359-365` |
+| The store | the chain of claims, in `completed_date_corrections.superseded_on` | `packages/database/migrations/005_dating_goal_and_completed_dates.sql:146`, `:168`, `:189` |
+| `findLedger` | reads it back in `seq` order, the append order | `packages/database/src/store-goal.ts:248-252`, `:135-157` |
+| The restatement's write | takes the replaced day from the row's current `occurred_on` in the same statement that appends the correction | `packages/database/src/store-goal.ts:357-374` |
+| The route | **drops it**, because `DateCorrection` has no field for it | `packages/service/src/routes/goal.ts:307`, and why at `packages/database/src/store-goal.ts:29-31` |
+
+The storage guarantee is real and is not an inference: a test walks
+`supersededOn` back across a chain of three restatements and reaches the day the
+owner originally claimed (`packages/database/test/store-goal.test.ts:321-341`),
+and the schema's `CHECK` refuses a `restated` row that does not carry both days
+(`005_dating_goal_and_completed_dates.sql:189`), so the chain cannot be quietly
+nulled out by a writer.
+
+**So the promise is kept in storage and unreachable in the product.** The owner
+cannot be shown what they claimed, because the aggregate the route reloads has no
+field to show it from, and §9.4's "the owner can always be shown what they
+recorded and why the count dropped" is true of a withdrawal and false of a
+restatement.
+
+The open question in §13 is therefore narrower than it reads, and this document
+does not answer it, because the answer is a change to `DateCorrection` in a tested
+domain module this document does not own. It is either: the domain type carries
+the superseded day and the promise is kept as written; or the document's promise
+is reduced to what a withdrawal already keeps, and the chain stays an
+auditability property of the table. The first keeps §9.4 as written. The second
+costs one sentence of it, and buys an aggregate that stays exactly the log the
+domain asked for.
+
 ## 10. Editing
 
 ### 10.1 What is editable once a match exists
@@ -1095,12 +1183,15 @@ measured, which is a smaller problem than a counter leaking into a sink.
   decided is whether the second profile gets its own target at all, and a
   per-profile history would be a schema change rather than a default.
 - **Whether a restatement keeps the day it replaced.** Undecided, and it is the
-  one place where the code and this section disagree today (§9.4, §9.8).
-  `correctCompletedDate` overwrites `occurredOn` and appends the correction, so
-  the day the owner originally claimed is gone: a record claimed on the 3rd and
-  restated to the 2nd retains *that* it was restated, when, and to the 2nd, but
-  not the 3rd. The same is true of a second restatement over a first. The
-  product promise is that a correction preserves what was there, so either the
-  record carries the superseded day with each restatement or this document drops
-  the promise. Owner: Dating + Product. Blocks the correction API's shape, so
-  it should be decided before a store persists corrections.
+  one place where the code and this section disagree today (§9.4, §9.8, §9.10).
+  The domain aggregate cannot say what was claimed first — a record claimed on
+  the 3rd and restated to the 2nd retains *that* it was restated, when, and to
+  the 2nd, but not the 3rd. **The store does keep it**, in
+  `completed_date_corrections.superseded_on`, so what is missing is not the data
+  but the field on `DateCorrection` that would let the owner be shown it (§9.10).
+  The choice is therefore narrower than "the record keeps it or it does not":
+  either the domain type carries the superseded day and this document's promise
+  is kept as written, or the promise is reduced to what a withdrawal already
+  keeps and the chain stays a property of the table. Owner: Dating + Product.
+  Blocks the correction API's shape, and blocks the owner-facing read that §9.4
+  promises.
