@@ -293,6 +293,11 @@ public final class AppModel {
         tab = .signIn
     }
 
+    /// Takes a session and reads everything the session can reach.
+    ///
+    /// The destination after a load is `refresh`'s, not this one's: one rule
+    /// decides where the app opens, and it runs on every load rather than only on
+    /// sign-in. A second rule here would be two answers to one question.
     private func adopt(_ issued: IssuedSession) async {
         session = issued
         await refresh()

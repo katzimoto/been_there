@@ -104,7 +104,7 @@ public struct Palette: Sendable, Equatable {
         attentionSoft: Color(hex: 0x33260F)
     )
 
-    public static func for(_ scheme: ColorScheme) -> Palette {
+    public static func scheme(_ scheme: ColorScheme) -> Palette {
         scheme == .dark ? .dark : .light
     }
 }
@@ -137,7 +137,7 @@ public struct PaletteProvider<Content: View>: View {
     }
 
     public var body: some View {
-        content.environment(\.palette, Palette.for(scheme))
+        content.environment(\.palette, Palette.scheme(scheme))
     }
 }
 

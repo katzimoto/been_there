@@ -1,4 +1,5 @@
 import SwiftUI
+import BeenThereKit
 
 // MARK: - The phone this is designed for
 //
@@ -48,7 +49,7 @@ public enum Radius {
 // is the one typeface guaranteed present on both platforms. Values — ids, dates,
 // counts — stay monospaced so a number reads as a number.
 
-public enum Type_ {
+public enum Typeface {
     public static let display = Font.system(size: 30, weight: .bold, design: .rounded)
     public static let title = Font.system(size: 23, weight: .semibold, design: .rounded)
     public static let headline = Font.system(size: 17, weight: .semibold, design: .rounded)
@@ -61,29 +62,32 @@ public enum Type_ {
 
 // MARK: - The frame
 
-/// Lays a screen out at the phone width and nothing else.
-///
-/// - `ignoresSafeArea` is false by default: the tab bar is part of the phone
-///   chrome, and a screen that ignores the bottom inset draws under it.
-public func phoneFrame(_ content: some View) -> some View {
-    PhoneFrame(content: content)
-}
-
 /// Centres a screen at the phone width and paints the canvas behind it.
 ///
-/// A `View` rather than a bare function because the canvas is a palette colour
-/// and a function cannot read the environment — which is exactly the reason the
-/// old `phoneFrame` had to hard-code one and lose dark mode.
-struct PhoneFrame<Content: View>: View {
+/// A modifier rather than a wrapper view because the wrapper had to hand its
+/// content to another view's `body`, which Swift 6's region isolation rejects
+/// for a non-`Sendable` view value. The modifier keeps the content in the same
+/// place in the same isolation region, and reads the palette from the
+/// environment — which is how the canvas can be a colour rather than a
+/// constant, and therefore how dark mode exists at all.
+public struct PhoneFrame: ViewModifier {
     @Environment(\.palette) private var palette
 
-    let content: Content
-
-    var body: some View {
+    public func body(content: Content) -> some View {
         content
             .frame(width: phoneWidth)
             .frame(maxWidth: .infinity, alignment: .center)
             .background(palette.canvas)
+    }
+}
+
+public extension View {
+    /// Lays a screen out at the phone width and nothing else.
+    ///
+    /// - The safe area is respected: the tab bar is part of the phone chrome,
+    ///   and a screen that ignores the bottom inset draws under it.
+    func phoneFrame() -> some View {
+        modifier(PhoneFrame())
     }
 }
 
@@ -109,12 +113,12 @@ public struct Screen<Content: View>: View {
             VStack(alignment: .leading, spacing: Space.lg) {
                 VStack(alignment: .leading, spacing: Space.sm) {
                     Text(title)
-                        .font(Type_.display)
+                        .font(Typeface.display)
                         .foregroundStyle(palette.ink)
                         .fixedSize(horizontal: false, vertical: true)
                     if let subtitle {
                         Text(subtitle)
-                            .font(Type_.callout)
+                            .font(Typeface.callout)
                             .foregroundStyle(palette.inkSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -191,6 +195,7 @@ public struct Avatar: View {
     private let id: String
     private let size: CGFloat
 
+
     public init(name: String, id: String, size: CGFloat = 52) {
         self.name = name
         self.id = id
@@ -232,6 +237,38 @@ public struct Avatar: View {
     }
 }
 
+/// A ring showing how much of something is done.
+///
+/// Used for the onboarding checklist, where the number matters less than the
+/// shape: a member should see "most of the way" without reading a percentage.
+public struct ProgressRing: View {
+    private let fraction: Double
+    private let tint: Color
+    private let size: CGFloat
+
+    public init(fraction: Double, tint: Color, size: CGFloat = 56) {
+        self.fraction = fraction
+        self.tint = tint
+        self.size = size
+    }
+
+    public var body: some View {
+        ZStack {
+            Circle()
+                .stroke(tint.opacity(0.15), lineWidth: 6)
+            Circle()
+                .trim(from: 0, to: max(0.001, min(1, fraction)))
+                .stroke(tint, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            Text("\(Int(fraction * 100))%")
+                .font(.system(size: size * 0.26, weight: .semibold, design: .rounded))
+                .foregroundStyle(tint)
+        }
+        .frame(width: size, height: size)
+        .accessibilityValue("\(Int(fraction * 100)) percent complete")
+    }
+}
+
 /// A small label for a value the server published — a state, a band, a count.
 ///
 /// Monospaced, so an id reads as an id, and tinted by the meaning the *server*
@@ -240,16 +277,19 @@ public struct ValueChip: View {
     @Environment(\.palette) private var palette
 
     private let text: String
-    private let tint: Color
+
+    private let requestedTint: Color?
 
     public init(_ text: String, tint: Color? = nil) {
         self.text = text
-        self.tint = tint ?? palette.inkSecondary
+        self.requestedTint = tint
     }
+
+    private var tint: Color { requestedTint ?? palette.inkSecondary }
 
     public var body: some View {
         Text(text)
-            .font(Type_.mono)
+            .font(Typeface.mono)
             .foregroundStyle(tint)
             .padding(.horizontal, Space.sm)
             .padding(.vertical, 5)
@@ -268,13 +308,16 @@ public struct TagChip: View {
 
     private let text: String
     private let systemImage: String?
-    private let tint: Color
+
+    private let requestedTint: Color?
 
     public init(_ text: String, systemImage: String? = nil, tint: Color? = nil) {
         self.text = text
         self.systemImage = systemImage
-        self.tint = tint ?? palette.inkSecondary
+        self.requestedTint = tint
     }
+
+    private var tint: Color { requestedTint ?? palette.inkSecondary }
 
     public var body: some View {
         HStack(spacing: 4) {
@@ -283,7 +326,7 @@ public struct TagChip: View {
                     .font(.system(size: 10, weight: .semibold))
             }
             Text(text)
-                .font(Type_.caption)
+                .font(Typeface.caption)
         }
         .foregroundStyle(tint)
         .padding(.horizontal, Space.sm)
@@ -318,7 +361,7 @@ public struct PrimaryButton: View {
                 .foregroundStyle(isEnabled ? palette.onAccent : palette.inkTertiary)
                 .clipShape(RoundedRectangle(cornerRadius: Radius.button, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableStyle())
         .disabled(!isEnabled)
     }
 }
@@ -329,14 +372,17 @@ public struct SecondaryButton: View {
     @Environment(\.palette) private var palette
 
     private let title: String
-    private let tint: Color
     private let action: () -> Void
+
+    private let requestedTint: Color?
 
     public init(_ title: String, tint: Color? = nil, action: @escaping () -> Void) {
         self.title = title
-        self.tint = tint ?? palette.ink
+        self.requestedTint = tint
         self.action = action
     }
+
+    private var tint: Color { requestedTint ?? palette.ink }
 
     public var body: some View {
         Button(action: action) {
@@ -348,7 +394,7 @@ public struct SecondaryButton: View {
                 .foregroundStyle(tint)
                 .clipShape(RoundedRectangle(cornerRadius: Radius.button, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableStyle())
     }
 }
 
@@ -377,7 +423,7 @@ public struct CircleAction: View {
                 .background(filled ? palette.accent : palette.fill)
                 .clipShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableCircleStyle())
         .accessibilityLabel(label)
     }
 }
@@ -416,20 +462,20 @@ public struct EmptyState: View {
 
     private let systemImage: String
     private let title: String
-    private let body: String
+    private let message: String
     private let actionTitle: String?
     private let action: (() -> Void)?
 
     public init(
         systemImage: String,
         title: String,
-        body: String,
+        body message: String,
         actionTitle: String? = nil,
         action: (() -> Void)? = nil
     ) {
         self.systemImage = systemImage
         self.title = title
-        self.body = body
+        self.message = message
         self.actionTitle = actionTitle
         self.action = action
     }
@@ -441,10 +487,10 @@ public struct EmptyState: View {
                     .font(.system(size: 26, weight: .medium))
                     .foregroundStyle(palette.accent)
                 Text(title)
-                    .font(Type_.headline)
+                    .font(Typeface.headline)
                     .foregroundStyle(palette.ink)
-                Text(body)
-                    .font(Type_.callout)
+                Text(message)
+                    .font(Typeface.callout)
                     .foregroundStyle(palette.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let actionTitle, let action {
@@ -479,11 +525,11 @@ public struct FailureNote: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(palette.restricted)
                     Text("This did not load")
-                        .font(Type_.headline)
+                        .font(Typeface.headline)
                         .foregroundStyle(palette.ink)
                 }
-                Text(error.memberFacingMessage)
-                    .font(Type_.callout)
+                Text(error.message ?? "The request did not complete.")
+                    .font(Typeface.callout)
                     .foregroundStyle(palette.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 SecondaryButton("Try again", action: retry)
@@ -499,23 +545,26 @@ public struct FactRow: View {
 
     private let label: String
     private let value: String
-    private let tint: Color?
+
+    private let requestedTint: Color?
 
     public init(_ label: String, _ value: String, tint: Color? = nil) {
         self.label = label
         self.value = value
-        self.tint = tint
+        self.requestedTint = tint
     }
+
+    private var tint: Color { requestedTint ?? palette.ink }
 
     public var body: some View {
         HStack(alignment: .firstTextBaseline) {
             Text(label)
-                .font(Type_.callout)
+                .font(Typeface.callout)
                 .foregroundStyle(palette.inkSecondary)
             Spacer(minLength: Space.md)
             Text(value)
-                .font(Type_.mono)
-                .foregroundStyle(tint ?? palette.ink)
+                .font(Typeface.mono)
+                .foregroundStyle(tint)
                 .multilineTextAlignment(.trailing)
         }
     }

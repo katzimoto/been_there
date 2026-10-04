@@ -37,103 +37,153 @@ public struct OnboardingScreen: View {
         self.onRefresh = onRefresh
     }
 
+    @Environment(\.palette) private var palette
+
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Space.md) {
-                VStack(alignment: .leading, spacing: Space.xs) {
-                    screenTitle(model.headline)
-                    Text("Readiness projection version \(readiness.version)")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.tertiary)
-                }
+        Screen(model.headline, subtitle: "Readiness projection v\(readiness.version)") {
+            progress
 
-                if let step = readiness.nextStep {
-                    Card {
-                        VStack(alignment: .leading, spacing: Space.sm) {
-                            Text("Next").font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                            Text(step.rawValue)
-                                .font(.system(size: 16, weight: .semibold, design: .monospaced))
-                            if let title = model.nextActionTitle {
-                                screenSubtitle(title)
-                            }
-                        }
-                    }
-                }
-
-                if let waiting = model.waitingOn {
-                    Card {
-                        VStack(alignment: .leading, spacing: Space.sm) {
-                            Text("We are checking")
-                                .font(.system(size: 15, weight: .semibold))
-                            screenSubtitle(waitingExplanation(waiting))
-                        }
-                    }
-                }
-
-                checklist
-
+            if let step = readiness.nextStep {
                 Card {
                     VStack(alignment: .leading, spacing: Space.sm) {
-                        screenSubtitle(model.completionSummary)
-                        screenSubtitle(
-                            model.isDiscoverable
-                                ? "The service says this account is discoverable."
-                                : "The service says this account is not discoverable yet."
-                        )
-                        if let band = readiness.ageBand {
-                            Divider()
-                            FactRow("Age band", band)
+                        HStack {
+                            SectionHeader("Do this next")
+                            Spacer(minLength: Space.sm)
+                            ValueChip(step.rawValue, tint: palette.accent)
                         }
-                        Divider()
-                        FactRow("Identity", readiness.identity.state.rawValue)
-                        FactRow("Profile", readiness.profileState.rawValue)
-                        FactRow("Preferences", readiness.preferencesSet ? "Set" : "Not set")
-                    }
-                }
-
-                if let snapshot, OnboardingViewModel.reportsGateDisagreement(
-                    readiness: readiness, viewer: snapshot
-                ) {
-                    Card {
-                        VStack(alignment: .leading, spacing: Space.sm) {
-                            Text("The client and the service disagree")
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(Ink.restricted)
-                            screenSubtitle(
-                                "The service says this account is discoverable, and the client "
-                                    + "gate says it is not. Discovery is withheld rather than offered "
-                                    + "and refused."
-                            )
+                        if let title = model.nextActionTitle {
+                            Text(title)
+                                .font(Typeface.body)
+                                .foregroundStyle(palette.ink)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
-
-                PrimaryButton("Refresh from the service", action: onRefresh)
             }
-            .padding(Space.md)
+
+            if let waiting = model.waitingOn {
+                Card {
+                    VStack(alignment: .leading, spacing: Space.sm) {
+                        HStack(spacing: Space.sm) {
+                            Image(systemName: "hourglass")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(palette.attention)
+                            Text("We are checking")
+                                .font(Typeface.headline)
+                                .foregroundStyle(palette.ink)
+                        }
+                        Text(waitingExplanation(waiting))
+                            .font(Typeface.callout)
+                            .foregroundStyle(palette.inkSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
+            checklist
+
+            Card {
+                VStack(alignment: .leading, spacing: Space.sm) {
+                    SectionHeader("What the service says")
+                    Text(model.completionSummary)
+                        .font(Typeface.body)
+                        .foregroundStyle(palette.ink)
+                    Text(
+                        model.isDiscoverable
+                            ? "This account is discoverable."
+                            : "This account is not discoverable yet."
+                    )
+                    .font(Typeface.callout)
+                    .foregroundStyle(palette.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                    if let band = readiness.ageBand {
+                        Divider().overlay(palette.hairline)
+                        FactRow("Age band", band)
+                    }
+                    Divider().overlay(palette.hairline)
+                    FactRow("Identity", readiness.identity.state.rawValue)
+                    FactRow("Profile", readiness.profileState.rawValue)
+                    FactRow("Preferences", readiness.preferencesSet ? "Set" : "Not set")
+                }
+            }
+
+            if let snapshot, OnboardingViewModel.reportsGateDisagreement(
+                readiness: readiness, viewer: snapshot
+            ) {
+                Card {
+                    VStack(alignment: .leading, spacing: Space.sm) {
+                        HStack(spacing: Space.sm) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(palette.restricted)
+                            Text("The client and the service disagree")
+                                .font(Typeface.headline)
+                                .foregroundStyle(palette.ink)
+                        }
+                        Text(
+                            "The service says this account is discoverable, and the client "
+                                + "gate says it is not. Discovery is withheld rather than offered "
+                                + "and refused."
+                        )
+                        .font(Typeface.callout)
+                        .foregroundStyle(palette.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
+            PrimaryButton("Refresh from the service", action: onRefresh)
         }
-        .frame(width: phoneWidth)
-        .background(Ink.canvas)
+    }
+
+    /// How far along the checklist is, as a ring rather than a sentence.
+    ///
+    /// The count below it is the same number the server's `outstanding` list
+    /// produces; the ring is a reading of it, not a second source of truth.
+    private var progress: some View {
+        let done = model.rows.count { $0.isComplete }
+        let fraction = model.rows.isEmpty ? 0 : Double(done) / Double(model.rows.count)
+        return Card {
+            HStack(spacing: Space.md) {
+                ProgressRing(fraction: fraction, tint: palette.accent, size: 56)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(done) of \(model.rows.count) done")
+                        .font(Typeface.headline)
+                        .foregroundStyle(palette.ink)
+                    Text(
+                        done == model.rows.count
+                            ? "Every step the service lists is complete."
+                            : "The service lists what is still outstanding, in its own order."
+                    )
+                    .font(Typeface.callout)
+                    .foregroundStyle(palette.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+        }
     }
 
     private var checklist: some View {
         Card {
-            VStack(alignment: .leading, spacing: Space.sm) {
+            VStack(alignment: .leading, spacing: Space.md) {
+                SectionHeader("Checklist")
                 ForEach(model.rows) { row in
-                    HStack(alignment: .firstTextBaseline, spacing: Space.sm) {
+                    HStack(alignment: .center, spacing: Space.sm) {
                         Image(systemName: row.isComplete ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(row.isComplete ? Ink.granted : Color.secondary)
-                        VStack(alignment: .leading, spacing: Space.xs) {
+                            .font(.system(size: 19))
+                            .foregroundStyle(row.isComplete ? palette.granted : palette.inkTertiary)
+                        VStack(alignment: .leading, spacing: 2) {
                             Text(row.title)
-                                .font(.system(size: 15, weight: row.isNext ? .semibold : .regular))
+                                .font(row.isNext ? Typeface.headline : Typeface.body)
+                                .foregroundStyle(palette.ink)
                             Text(row.step.rawValue)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(.tertiary)
+                                .font(Typeface.mono)
+                                .foregroundStyle(palette.inkTertiary)
                         }
-                        Spacer(minLength: 0)
+                        Spacer(minLength: Space.sm)
                         if row.isNext {
-                            ValueChip("Next")
+                            TagChip("Next", systemImage: "arrow.right", tint: palette.accent)
                         }
                     }
                 }

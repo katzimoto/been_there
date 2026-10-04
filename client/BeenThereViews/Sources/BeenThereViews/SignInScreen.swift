@@ -28,52 +28,46 @@ public struct SignInScreen: View {
         self.model = model
     }
 
-    public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Space.md) {
-                VStack(alignment: .leading, spacing: Space.xs) {
-                    screenTitle("Been There")
-                    screenSubtitle(
-                        "A client over the real service. Everything below is read from it; "
-                            + "nothing on this screen is invented."
-                    )
-                }
+    @Environment(\.palette) private var palette
 
-                serviceAddress
-                credentials
-                signUpExtras
-                notice
-            }
-            .padding(Space.md)
+    public var body: some View {
+        Screen("Been There", subtitle: "A client over the real service. Everything below is read from it.") {
+            serviceAddress
+            credentials
+            signUpExtras
+            notice
         }
-        .frame(width: phoneWidth)
-        .background(Ink.canvas)
     }
 
     private var serviceAddress: some View {
         Card {
-            VStack(alignment: .leading, spacing: Space.sm) {
-                Text("Service").font(.system(size: 16, weight: .semibold))
-                TextField("http://127.0.0.1:8787", text: $model.serviceURLText)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 14, design: .monospaced))
-                    .padding(Space.sm)
-                    .background(Ink.canvas)
-                    .clipShape(RoundedRectangle(cornerRadius: Radius.chip, style: .continuous))
+            VStack(alignment: .leading, spacing: Space.md) {
+                HStack(spacing: Space.sm) {
+                    Image(systemName: model.serviceReady == true ? "checkmark.circle.fill" : "server.rack")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(model.serviceReady == true ? palette.granted : palette.inkTertiary)
+                    SectionHeader("Service")
+                    Spacer(minLength: Space.sm)
+                    if model.serviceReady == true {
+                        TagChip("Ready", tint: palette.granted)
+                    }
+                }
 
-                HStack {
+                LabelledField("Address") {
+                    TextField("http://127.0.0.1:8787", text: $model.serviceURLText)
+                        .textFieldStyle(.plain)
+                        .font(Typeface.mono)
+                        .foregroundStyle(palette.ink)
+                                        }
+
+                HStack(spacing: Space.sm) {
                     PrimaryButton("Connect", isEnabled: model.canConnect && !model.isLoading) {
                         Task { await model.connect() }
                     }
-                    Button("Check health") {
-                        Task { await model.checkService() }
-                    }
-                    .font(.system(size: 14, weight: .medium))
                 }
 
                 switch model.serviceReady {
                 case .some(true):
-                    FactRow("Readiness", "ready")
                     ForEach(model.serviceChecks, id: \.name) { check in
                         FactRow(check.name, check.ok ? "ok" : check.detail)
                     }
@@ -83,7 +77,13 @@ public struct SignInScreen: View {
                         FactRow(check.name, check.ok ? "ok" : check.detail)
                     }
                 case .none:
-                    screenSubtitle("Not checked yet.")
+                    Text("Not checked yet.")
+                        .font(Typeface.callout)
+                        .foregroundStyle(palette.inkTertiary)
+                }
+
+                SecondaryButton("Check health") {
+                    Task { await model.checkService() }
                 }
             }
         }
@@ -91,14 +91,17 @@ public struct SignInScreen: View {
 
     private var credentials: some View {
         Card {
-            VStack(alignment: .leading, spacing: Space.sm) {
-                Text("Your account").font(.system(size: 16, weight: .semibold))
+            VStack(alignment: .leading, spacing: Space.md) {
+                SectionHeader("Your account")
                 field("Email or phone", $model.contact)
-                SecureField("Password", text: $model.password)
-                    .textFieldStyle(.plain)
-                    .padding(Space.sm)
-                    .background(Ink.canvas)
-                    .clipShape(RoundedRectangle(cornerRadius: Radius.chip, style: .continuous))
+                LabelledField("Password") {
+                    SecureField("Password", text: $model.password)
+                        .textFieldStyle(.plain)
+                        .foregroundStyle(palette.ink)
+                                        }
+                if let failure = model.authFailure {
+                    FailureNote(failure) { Task { await model.signIn() } }
+                }
                 PrimaryButton("Sign in", isEnabled: model.canSubmitCredentials) {
                     Task { await model.signIn() }
                 }
@@ -108,14 +111,17 @@ public struct SignInScreen: View {
 
     private var signUpExtras: some View {
         Card {
-            VStack(alignment: .leading, spacing: Space.sm) {
-                Text("Or create an account").font(.system(size: 16, weight: .semibold))
+            VStack(alignment: .leading, spacing: Space.md) {
+                SectionHeader("Or create an account")
                 field("Date of birth (YYYY-MM-DD)", $model.dateOfBirth, monospaced: true)
                 field("Terms version", $model.termsVersion, monospaced: true)
-                screenSubtitle(
+                Text(
                     "The terms version is pre-filled as a starting point and is editable. The "
                         + "service refuses a stale one and names the version it wants."
                 )
+                .font(Typeface.caption)
+                .foregroundStyle(palette.inkTertiary)
+                .fixedSize(horizontal: false, vertical: true)
                 PrimaryButton("Sign up", isEnabled: model.canSubmitCredentials) {
                     Task { await model.signUp() }
                 }
@@ -133,20 +139,22 @@ public struct SignInScreen: View {
             if let gate = model.ageGateNotice {
                 Card {
                     VStack(alignment: .leading, spacing: Space.sm) {
-                        Text(gate.title).font(.system(size: 16, weight: .semibold))
-                        screenSubtitle(gate.body)
+                        HStack(spacing: Space.sm) {
+                            Image(systemName: "checkmark.seal.fill")
+                                .foregroundStyle(palette.accent)
+                            Text(gate.title)
+                                .font(Typeface.headline)
+                                .foregroundStyle(palette.ink)
+                        }
+                        Text(gate.body)
+                            .font(Typeface.callout)
+                            .foregroundStyle(palette.inkSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
-            if let failure = model.authFailure {
-                FailureNote(failure) {
-                    Task { await model.signIn() }
-                }
-            }
             if let failure = model.loadFailure, model.authFailure == nil {
-                FailureNote(failure) {
-                    Task { await model.checkService() }
-                }
+                FailureNote(failure) { Task { await model.checkService() } }
             }
         }
     }
@@ -167,9 +175,11 @@ public struct SignInScreen: View {
         monospaced: Bool = false,
         verbatim: Bool = true
     ) -> some View {
-        TextField(placeholder, text: text)
-            .textFieldStyle(.plain)
-            .font(.system(size: 14, design: monospaced ? .monospaced : .default))
+        LabelledField(placeholder) {
+            TextField(placeholder, text: text)
+                .textFieldStyle(.plain)
+                .font(monospaced ? Typeface.mono : Typeface.body)
+                .foregroundStyle(palette.ink)
             // Verbatim entry — a contact address is an identifier, not prose.
             // `.textInputAutocapitalization` exists only in the iOS SDK's
             // SwiftUI (the macOS one has no text-input traits to set), and
@@ -178,12 +188,10 @@ public struct SignInScreen: View {
             // UIKit-backed, which the no-UIKit rule forbids. One `#if` on the
             // modifier is narrower than one on a behaviour: the view, its state
             // and its layout stay shared.
-            #if os(iOS)
-            .textInputAutocapitalization(.never)
-            #endif
-            .autocorrectionDisabled(verbatim)
-            .padding(Space.sm)
-            .background(Ink.canvas)
-            .clipShape(RoundedRectangle(cornerRadius: Radius.chip, style: .continuous))
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                #endif
+                .autocorrectionDisabled(verbatim)
+        }
     }
 }

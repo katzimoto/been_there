@@ -151,58 +151,56 @@ public struct StandingScreen: View {
         self.onSignOut = onSignOut
     }
 
-    public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Space.md) {
-                header
-                facts
+    @Environment(\.palette) private var palette
 
-                if let note = model.disagreementNote {
-                    Card {
-                        VStack(alignment: .leading, spacing: Space.sm) {
+    public var body: some View {
+        Screen(model.summary.title, subtitle: "Standing projection v\(model.projectionVersion)") {
+            facts
+
+            if let note = model.disagreementNote {
+                Card {
+                    VStack(alignment: .leading, spacing: Space.sm) {
+                        HStack(spacing: Space.sm) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(palette.restricted)
                             Text("The service's own numbers disagree")
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(Ink.restricted)
-                            screenSubtitle(note)
+                                .font(Typeface.headline)
+                                .foregroundStyle(palette.ink)
                         }
+                        Text(note)
+                            .font(Typeface.callout)
+                            .foregroundStyle(palette.inkSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-
-                capabilityCards
-                decisionCard
-
-                if let title = model.primaryActionTitle {
-                    PrimaryButton(title, isEnabled: false) {}
-                    screenSubtitle(
-                        "Deletion is not wired up in this build. The capability the service granted "
-                            + "is listed under \"What still works\"."
-                    )
-                }
-
-                Button("Sign out", action: onSignOut)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.secondary)
             }
-            .padding(Space.md)
-        }
-        .frame(width: phoneWidth)
-        .background(Ink.canvas)
-    }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: Space.xs) {
-            screenTitle(model.summary.title)
-            Text("Standing projection version \(model.projectionVersion)")
-                .font(.system(size: 12))
-                .foregroundStyle(.tertiary)
+            capabilityCards
+            decisionCard
+
+            if let title = model.primaryActionTitle {
+                PrimaryButton(title, isEnabled: false) {}
+                Text(
+                    "Deletion is not wired up in this build. The capability the service granted "
+                        + "is listed under \"What still works\"."
+                )
+                .font(Typeface.caption)
+                .foregroundStyle(palette.inkTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            SecondaryButton("Sign out", action: onSignOut)
         }
     }
 
     private var facts: some View {
         Card {
             VStack(alignment: .leading, spacing: Space.sm) {
-                screenSubtitle(model.summary.body)
-                Divider()
+                Text(model.summary.body)
+                    .font(Typeface.body)
+                    .foregroundStyle(palette.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Divider().overlay(palette.hairline)
                 FactRow("Account state", model.state.rawValue)
                 FactRow("Visible in the product", model.standing.visibleInProduct ? "Yes" : "No")
                 if let identityState {
@@ -220,38 +218,46 @@ public struct StandingScreen: View {
         VStack(alignment: .leading, spacing: Space.md) {
             Card {
                 VStack(alignment: .leading, spacing: Space.sm) {
-                    Text("What was removed")
-                        .font(.system(size: 16, weight: .semibold))
+                    SectionHeader("What was removed")
                     if model.removed.isEmpty {
-                        screenSubtitle("Nothing was removed from your account.")
+                        Text("Nothing was removed from your account.")
+                            .font(Typeface.callout)
+                            .foregroundStyle(palette.inkSecondary)
                     } else {
-                        screenSubtitle("\(model.removed.count) capability the service removed.")
-                        FlowChips(model.removed, tint: Ink.restricted)
+                        Text("\(model.removed.count) the service removed.")
+                            .font(Typeface.callout)
+                            .foregroundStyle(palette.inkSecondary)
+                        FlowChips(model.removed, tint: palette.restricted)
                     }
                 }
             }
 
             Card {
                 VStack(alignment: .leading, spacing: Space.sm) {
-                    Text("What still works")
-                        .font(.system(size: 16, weight: .semibold))
-                    screenSubtitle("\(model.retained.count) capability the service still grants.")
-                    FlowChips(model.retained, tint: Ink.granted)
-                    Divider()
-                    screenSubtitle(
+                    SectionHeader("What still works")
+                    Text("\(model.retained.count) the service still grants.")
+                        .font(Typeface.callout)
+                        .foregroundStyle(palette.inkSecondary)
+                    FlowChips(model.retained, tint: palette.granted)
+                    Divider().overlay(palette.hairline)
+                    Text(
                         model.keepsSafetyControls
                             ? "Reporting and blocking survive every restriction."
                             : "The service is not granting reporting or blocking on this account."
                     )
+                    .font(Typeface.callout)
+                    .foregroundStyle(palette.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
             Card {
                 VStack(alignment: .leading, spacing: Space.sm) {
-                    Text("Unrestricted baseline")
-                        .font(.system(size: 16, weight: .semibold))
-                    screenSubtitle("\(model.baseline.count) capability an account with no restriction holds.")
-                    FlowChips(model.baseline, tint: .secondary)
+                    SectionHeader("Unrestricted baseline")
+                    Text("\(model.baseline.count) an account with no restriction holds.")
+                        .font(Typeface.callout)
+                        .foregroundStyle(palette.inkSecondary)
+                    FlowChips(model.baseline, tint: palette.inkSecondary)
                 }
             }
         }
@@ -260,10 +266,12 @@ public struct StandingScreen: View {
     private var decisionCard: some View {
         Card {
             VStack(alignment: .leading, spacing: Space.sm) {
-                Text("Which case decided this")
-                    .font(.system(size: 16, weight: .semibold))
-                ValueChip(model.caseLine, tint: model.hasDecision ? Ink.restricted : .secondary)
-                screenSubtitle(model.referenceExplanation)
+                SectionHeader("Which case decided this")
+                ValueChip(model.caseLine, tint: model.hasDecision ? palette.restricted : palette.inkSecondary)
+                Text(model.referenceExplanation)
+                    .font(Typeface.callout)
+                    .foregroundStyle(palette.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }

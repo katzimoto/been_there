@@ -27,6 +27,36 @@ targets:
         # team is left unset rather than guessed. Xcode fills it on first
         # device build; the simulator needs no signature at all.
         CODE_SIGN_STYLE: Automatic
+  BeenThereIosUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: Tests/BeenThereIosUITests
+    dependencies:
+      - target: BeenThereIos
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.beenthere.BeenThereIosUITests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: BeenThereIos
+schemes:
+  BeenThereIos:
+    build:
+      targets:
+        BeenThereIos: all
+        BeenThereIosUITests: [test]
+    test:
+      targets:
+        - BeenThereIosUITests
+      environmentVariables:
+        # The UI test drives the app against the service `make demo` starts, as
+        # one of the eight seeded people. These are the seeder's own published
+        # development credentials — it prints them on every load — so putting
+        # them here grants no access that reading the repository does not. A
+        # device run points the app at the Mac's LAN address instead.
+        BEEN_THERE_BASE_URL: http://127.0.0.1:8787
+        BEEN_THERE_DEMO_CONTACT: u-avery@been-there.test
+        BEEN_THERE_DEMO_PASSWORD: been-there-demo-42
 packages:
   BeenThereViews:
     path: ../BeenThereViews
