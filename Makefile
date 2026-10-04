@@ -73,7 +73,7 @@ docs: ## Check that documentation links resolve
 research-check: ## Check the research tool still runs
 	node scripts/research/search.mjs --help > /dev/null
 
-check: workflow typecheck typecheck-tests test docs research-check stale-artifacts lockfile migrate seed client-test client-ios parity ## Everything CI runs, in CI order
+check: workflow boundaries typecheck typecheck-tests test docs research-check stale-artifacts lockfile migrate seed client-test client-ios parity ## Everything CI runs, in CI order
 ci: install check ## The whole CI sequence as one command
 
 lockfile: ## Assert the lockfile covers every workspace package
@@ -81,6 +81,13 @@ lockfile: ## Assert the lockfile covers every workspace package
 
 stale-artifacts: ## Assert no compiled output sits beside the source it was built from
 	node scripts/dev/check-stale-artifacts.mjs
+
+# Commitment 6 — no domain imports another. It had no gate of any kind until this
+# target: a direct dating-to-moderation import passes tsc, passes every test, and
+# passed all four other checks in this file. Before the typecheck, because it is
+# a 100ms text scan and a boundary violation should fail before a full build.
+boundaries: ## Assert no domain package imports another
+	node scripts/dev/check-domain-boundaries.mjs
 
 parity: ## Assert the local targets above run exactly what CI runs
 	node scripts/dev/check-ci-parity.mjs

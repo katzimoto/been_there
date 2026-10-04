@@ -95,7 +95,7 @@ question that matters: *would weakening this break a test?*
 | 3 | Risk decays, at most one step | `core/src/states/risk.ts:riskMachine` — one decay row per state, each adjacent only | **Yes.** 10 tests, incl. a negative control proving the shadowed-row detector can itself fail |
 | 4 | Unmatch does not destroy the right to report | `dating/src/interaction.ts` withdraws likes by state rather than deleting; `dating/src/events.ts` types `conversationRetained` as the literal `true`; `conversationMachine` has no delete transition | **Yes.** 14 tests across 6 files. See the caveat in §4.3 |
 | 5 | Exact location is never exposed | `platform/src/location.ts` — `CoarseLocation` has no coordinate field, `StoredAnchor.sensitivity` is `'sensitive'`, `quantiseAnchor` grids the point. `dating/src/location.ts:28` seals `RawCoordinate` by not exporting it | **Partly.** Platform's contract is tested (`expectTypeOf<keyof CoarseLocation>()`; the service asserts against the real `location_anchors` row). **Dating's seal has no test** — `dating/test/location.test.ts` is 10 runtime distance assertions with no type-level test, so adding `export` to `RawCoordinate` would break nothing. See §4.3 |
-| 6 | Domains never call each other's internals | **Nothing.** No boundary test, no lint rule, no dev script. See §4.2 | **No. This is the one commitment with no gate at all.** |
+| 6 | Domains never call each other's internals | `scripts/dev/check-domain-boundaries.mjs` in `make check` — a stated layering, checked over every `src/` and `test/` import | **Yes.** See §4.2 |
 | 7 | Sensitive data classified per field, redacted at the sink | `core/src/domain-event.ts:DataSensitivity` + `isClearedToConsume`; `platform/src/redaction.ts`; `telemetry.ts` redacts at `SPAN_SINK_CLEARANCE`; `moderation/src/evidence.ts:EVIDENCE_POLICY` | **Yes.** 14 tests, incl. recursion into nested records and a refusal on duplicate field names |
 | 8 | Every state is a reviewable transition table | `core/src/transition.ts:defineStateMachine`; all **11** machines in the repository are built from it — identity, account, risk, conversation, message, interaction, profile, verification-request, case, report, media | **Yes.** 8 tests, incl. `assertMachineIsTotal` on every machine |
 
@@ -127,16 +127,46 @@ does it. `docs/delivery-state.md` lists "Risk detection | **built** | no
 behavioural detector escalates alone; corroboration is required" — that claim is
 true of the *domain* and unsupported for the *service*.
 
-### 4.2 Commitment 6 has no enforcement whatsoever
+### 4.2 Commitment 6 had no enforcement whatsoever — now closed
 
-Adding `"@been-there/moderation"` to `packages/dating/package.json` and importing
-from it would pass `tsc --build`, pass every test, and pass `make check`. There is
-no lint config in the repository at all, no boundary test, and no script that
-inspects an import graph. `00-overview.md` §2 item 6 calls a cross-domain call "a
-review rejection" — a human process, which is real but is not a gate.
-`packages/platform/test/moderation-audit-contract.test.ts` and
-`communication-signal-contract.test.ts` read *another domain's source text* to
-keep catalogues in sync; both are explicitly not boundary assertions.
+The gap was real and it was measured, not assumed. Adding `"@been-there/moderation"`
+to `packages/dating/package.json` and importing it from
+`packages/dating/src/profile.ts` produced, at `5025d31`:
+
+```
+npx tsc --build                                exit 0
+npx vitest run packages/dating                 9 files, 176 tests, all passing
+node scripts/dev/check-stale-artifacts.mjs     passed
+node scripts/dev/check-workspace-lockfile.mjs  passed
+node scripts/dev/check-ci-parity.mjs           passed
+```
+
+Nothing failed. A direct dating-to-moderation call was accepted by every gate in
+the repository, so review was the only thing standing between the codebase and
+seven domains collapsing into one. Note *which* import it was: a deep import like
+`@been-there/moderation/dist/case.js` was already a compile error, because every
+manifest publishes a single `"."` export. The hole was always the public entry
+point.
+
+`scripts/dev/check-domain-boundaries.mjs` closes it and runs in `make check` and in
+CI, in the same place in both. It states the layering in a named table rather than
+deriving it from the current imports — a rule computed from the code it governs
+passes by construction and would make the commitment look enforced while
+enforcing nothing. A domain may import `core` and nothing else; `service` and
+`integration` are named composition roots; `database` is an adapter reaching
+`core` and `contracts`, from tests only. It fails on the import, on a `package.json`
+dependency the layering forbids (the setup step of the exploit, caught before the
+import), on type-only imports, on relative paths that escape into another
+package, and on a package added with no declared layer.
+
+Two limits worth stating rather than discovering. It is a text scan, so a domain
+reaching another through a shared runtime value it was handed still passes —
+commitment 6 is about imports. And it does not check the reverse omission: an
+import that no manifest declares resolves through the symlink npm hoists to the
+repository root, and `packages/service/test` does exactly that with
+`@been-there/database` in seven files. That is a real defect and it is not
+commitment 6; it needs a manifest edit and a lockfile change, so it is recorded
+here rather than folded into a boundary check.
 
 ### 4.3 Two safety properties rest on the absence of code
 

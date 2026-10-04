@@ -57,6 +57,15 @@ jobs:
       - name: Check the workflow file
         run: node scripts/dev/check-workflow.mjs
 
+      # Commitment 6 — no domain imports another. This was the one commitment with
+      # no gate at all, and the gap was measured rather than assumed: a direct
+      # dating-to-moderation import passes the typecheck below, passes every test,
+      # and passes the stale-artefact, lockfile and parity checks. A reviewer was
+      # the only thing stopping it. Early, because it is a 100ms text scan and a
+      # boundary violation should fail before the build does any work.
+      - name: Check domain boundaries
+        run: node scripts/dev/check-domain-boundaries.mjs
+
       # The solution build typechecks every package's source through the project
       # graph. It is the check that catches a package added without being wired
       # into tsconfig.json, which `tsc -p` on a single package would not.

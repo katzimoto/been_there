@@ -24,8 +24,9 @@ transactional store. Domain packages may not import each other's internals.
 - Cross-domain consistency is a local transaction, not a saga. A like/match
   write and its event outbox record commit together.
 - We can split a domain out later *without* having paid for it in advance,
-  because the boundary is already expressed in code and enforced by a review
-  rule plus the package graph.
+  because the boundary is already expressed in code and enforced by
+  `scripts/dev/check-domain-boundaries.mjs`, which states the layering and
+  fails on any cross-domain import in `make check` and in CI.
 - Blast radius is the whole service. Mitigated by keeping writes domain-scoped
   and the schema partitioned per domain.
 - We do not need service-to-service auth, distributed tracing propagation, or
