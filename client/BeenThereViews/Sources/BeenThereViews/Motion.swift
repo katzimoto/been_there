@@ -140,7 +140,7 @@ public final class LoadingGate {
 
     /// - Parameter delay: how long a load may run before the placeholder is
     ///   drawn. Defaults to `Motion.placeholderDelay`.
-    public init(after delay: Duration = Motion.placeholderDelay) {
+    public nonisolated init(after delay: Duration = Motion.placeholderDelay) {
         self.delay = delay
     }
 
@@ -273,5 +273,62 @@ public extension View {
     /// Springs this control while a like it sent is in flight.
     func likeSpring(pending: Bool) -> some View {
         modifier(LikeSpring(pending: pending))
+    }
+}
+
+// MARK: - The keyboard
+
+/// The keyboard handling a scrolling form needs, in one modifier.
+///
+/// ## Why the app needed this
+///
+/// `Screen` already carries `scrollDismissesKeyboard(.interactively)`, so a drag
+/// dismisses. That is the only part of the problem it solves, and it leaves two
+/// things undone on a sign-in form:
+///
+/// 1. **Nothing ends the keyboard except a drag.** The Return key submits a
+///    password field in a way that leaves the keyboard up, and a tap on the
+///    card beside the field does nothing at all — so the member has to guess
+///    that dragging is the way out.
+/// 2. **The focused field can sit under the keyboard.** SwiftUI scrolls a
+///    first responder into view, but only as far as the content allows. A form
+///    whose last field is near the bottom of a short page cannot scroll far
+///    enough, and the field the member is typing into is the one that is
+///    hidden.
+///
+/// So this adds a Done key above the keyboard — the control iOS itself puts
+/// there for text views, and the one people reach for — and keeps the form
+/// dismissing on a drag rather than snapping shut under a moving thumb.
+///
+/// ## Why it takes a focus binding
+///
+/// Ending the keyboard means moving the focus, and the focus belongs to the
+/// screen that declared it. There is no way to clear a first responder without
+/// a `FocusState`, and inventing one here would be a second, invisible copy of
+/// the screen's focus. So the screen passes its own binding and this owns only
+/// the affordance.
+public struct KeyboardForm<Field: Hashable>: ViewModifier {
+    let focus: FocusState<Field?>.Binding
+
+    public func body(content: Content) -> some View {
+        content
+            .scrollDismissesKeyboard(.interactively)
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { focus.wrappedValue = nil }
+                }
+            }
+    }
+}
+
+public extension View {
+    /// Adds the keyboard's Done key to this form.
+    ///
+    /// Two lines at the call site: hold a `@FocusState`, and pass it here. Each
+    /// field then claims a value with `.focused($focus, equals: .someCase)`, and
+    /// Done clears it.
+    func keyboardForm<Field: Hashable>(_ focus: FocusState<Field?>.Binding) -> some View {
+        modifier(KeyboardForm(focus: focus))
     }
 }

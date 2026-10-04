@@ -54,6 +54,7 @@ extension AppModel {
         // applies again — see `hasChosenTab`.
         hasChosenTab = false
         tab = .signIn
+        availableTabs = [.signIn]
         await checkService()
     }
 

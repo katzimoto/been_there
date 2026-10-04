@@ -109,6 +109,46 @@ public final class AppModel {
     /// `AppModel+Service.swift` — and it is still unwritable from outside this
     /// module, which is where "a view could invent a server answer" would bite.
     public internal(set) var tab: Tab = .signIn
+    /// The tabs this load can serve, decided once per load.
+    ///
+    /// These used to be derived at render time, one projection at a time, which
+    /// meant the bar reflowed *four* times during a single load — once per GET as
+    /// `session`, `account`, `readiness` and `offersDiscovery` each landed. Four
+    /// surprise reflows, at moments the member cannot predict, is how a thumb
+    /// aiming at Matches ends up on Discovery: the row is centred, so every tab
+    /// added shifts the ones to its left, and a tap aimed at a frame from a moment
+    /// ago lands on a neighbour.
+    ///
+    /// Deciding the whole set at the end of the load makes the bar move exactly
+    /// once, at the same instant the landing tab is chosen — a moment the member
+    /// is watching a screen fill in, not aiming at the bar. The rules are
+    /// unchanged; only the moment they are evaluated has moved.
+    /// Module-internal rather than `private(set)`: `connect()` is in an extension in
+    /// another file, and `private` is scoped to the file. Read access stays public.
+    public internal(set) var availableTabs: [Tab] = [.signIn]
+
+    /// The same set, from the projections a finished load produced.
+    ///
+    /// A pure function of the four facts it names, so it can be reasoned about (and
+    /// tested) without a live model, and so `RootScreen` never has to re-derive it
+    /// while the member is touching it.
+    static func tabs(
+        signedIn: Bool,
+        hasAccount: Bool,
+        hasReadiness: Bool,
+        offersDiscovery: Bool
+    ) -> [Tab] {
+        Tab.allCases.filter { tab in
+            switch tab {
+            case .signIn: return !signedIn
+            case .standing: return hasAccount
+            case .onboarding: return hasReadiness
+            case .discovery: return offersDiscovery
+            case .matches: return signedIn
+            }
+        }
+    }
+
     /// Whether the member has picked a tab themselves.
     ///
     /// Set by `go(to:)`, cleared by `connect()` and `signOut()`. It exists for
@@ -318,6 +358,7 @@ public final class AppModel {
         // tab yet: the landing rule applies to it as it does to a first arrival.
         hasChosenTab = false
         tab = .signIn
+        availableTabs = [.signIn]
     }
 
     // MARK: Matches, conversations and safety
@@ -456,6 +497,14 @@ public final class AppModel {
             if !hasChosenTab {
                 tab = AppModel.landingTab(account: loadedAccount, onboarding: self.onboarding)
             }
+            // Every projection this load produced is in place by now, so the tab
+            // set is decided in one go rather than four times over the load.
+            availableTabs = AppModel.tabs(
+                signedIn: session != nil,
+                hasAccount: account != nil,
+                hasReadiness: readiness != nil,
+                offersDiscovery: offersDiscovery
+            )
         } catch let error as APIError {
             loadFailure = error
         } catch {

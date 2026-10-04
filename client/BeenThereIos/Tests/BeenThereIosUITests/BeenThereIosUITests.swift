@@ -130,9 +130,7 @@ final class BeenThereIosUITests: XCTestCase {
     /// safety actions the server granted.
     func testAMemberSeesTheirMatchesAndTheSafetyActions() throws {
         try signInAsTheMemberWithAMatch()
-        let matchesTab = app.buttons["tab.matches"]
-        XCTAssertTrue(matchesTab.waitForExistence(timeout: 20), "signing in did not unlock Matches")
-        matchesTab.tap()
+        try tapMatchesTab()
 
         // Before the wait, not after the assertions.
         //
@@ -184,6 +182,48 @@ final class BeenThereIosUITests: XCTestCase {
         )
     }
 
+    /// Taps the Matches tab and *verifies* where it landed.
+    ///
+    /// ## Why this is not a plain `tap()`
+    ///
+    /// The bar is populated from what the service has published, so it grows as
+    /// that data lands — and the tabs to the left of a new one shift right to
+    /// make room for it. Matches appears the moment `session` is set, which is
+    /// before Discovery does, so in the frame this test used to tap, XCUITest
+    /// was aiming at a frame that had already moved and the tap landed on the
+    /// neighbour. It is not flaky: it failed the same way on every run, which is
+    /// the only good kind of failure to have had.
+    ///
+    /// So the tap is confirmed rather than assumed, and retried once. This is a
+    /// test change and not a product one: withholding a tab until the data that
+    /// unlocks it exists is the client's stated rule, and a bar that reflows
+    /// under a finger is a real interaction cost — but it is a cost this file
+    /// should describe accurately rather than paper over by sleeping.
+    private func tapMatchesTab() throws {
+        let matchesTab = app.buttons["tab.matches"]
+        // Attached on the failure path, not before the assertion.
+        //
+        // A wait that times out is the run that needs a picture of the screen,
+        // and an attachment placed after the assertion never runs on it — which
+        // is how "signing in did not unlock Matches" went unexamined for as long
+        // as it did. Taken *after* the wait rather than before it, so the tree is
+        // the one the service actually produced rather than the sign-in form.
+        let unlocked = matchesTab.waitForExistence(timeout: 20)
+        if !unlocked {
+            attach("matches-tab-never-arrived")
+        }
+        XCTAssertTrue(unlocked, "signing in did not unlock Matches")
+        matchesTab.tap()
+        // Confirm we are where we meant to go, and tap once more if not.
+        if !app.buttons["tab.matches"].isSelected {
+            matchesTab.tap()
+        }
+        XCTAssertTrue(
+            app.buttons["tab.matches"].isSelected,
+            "the Matches tab did not stay selected after the tap"
+        )
+    }
+
     /// A member with a match opens the conversation behind it and reads it.
     ///
     /// This is the whole chain the product promises — sign in, match, chat — and
@@ -194,9 +234,7 @@ final class BeenThereIosUITests: XCTestCase {
     /// standing carries `send_message`.
     func testAMemberOpensTheConversationBehindAMatch() throws {
         try signInAsTheMemberWithAMatch()
-        let matchesTab = app.buttons["tab.matches"]
-        XCTAssertTrue(matchesTab.waitForExistence(timeout: 20), "signing in did not unlock Matches")
-        matchesTab.tap()
+        try tapMatchesTab()
 
         // What is on screen here is the whole answer if the rows never arrive:
         // an empty state, a progress ring or a failure each look different, and

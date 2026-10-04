@@ -73,30 +73,48 @@ public struct DiscoveryScreen: View {
     /// member wants to report someone is usually *before* they match.
     @State private var sheet: SafetySheet?
 
+    /// The card whose like is in flight, or `nil`.
+    ///
+    /// Held here rather than read off the model because `isLoading` is true for
+    /// every load in the app, and a heart that springs because a background
+    /// refresh happened is a lie about the member's own action. The id is what
+    /// keeps it to *this* card, so liking one person does not animate the other
+    /// nine.
+    @State private var liking: String?
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     public var body: some View {
         Screen(model.headline, subtitle: model.bodyText) {
             outcomeBanner
 
             switch model.content {
             case .cards(let cards):
-                LazyVStack(spacing: Space.sm) {
-                    ForEach(cards) { card in
-                        CandidateRow(
-                            card: card,
-                            offersLike: offersLike,
-                            offersBlock: offersBlock,
-                            offersReport: offersReport,
-                            onLike: { onLike(card) },
-                            onBlock: { sheet = .block(card.userId) },
-                            onReport: { sheet = .report(card.userId) }
-                        )
+                VStack(alignment: .leading, spacing: 0) {
+                    LazyVStack(spacing: Space.sm) {
+                        ForEach(cards) { card in
+                            CandidateRow(
+                                card: card,
+                                offersLike: offersLike,
+                                offersBlock: offersBlock,
+                                offersReport: offersReport,
+                                isLiking: liking == card.userId,
+                                onLike: {
+                                    liking = card.userId
+                                    onLike(card)
+                                },
+                                onBlock: { sheet = .block(card.userId) },
+                                onReport: { sheet = .report(card.userId) }
+                            )
+                        }
                     }
+                    Text("\(model.total) in total · projection v\(model.projectionVersion)")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.tertiary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, Space.xs)
                 }
-                Text("\(model.total) in total · projection v\(model.projectionVersion)")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.top, Space.xs)
+                .revealOnReplace(when: model.projectionVersion)
 
             case .blocked, .empty:
                 EmptyState(
@@ -107,9 +125,11 @@ public struct DiscoveryScreen: View {
                     actionTitle: model.offersRetry ? "Try again" : nil,
                     action: model.offersRetry ? onRetry : nil
                 )
+                .revealOnReplace(when: model.projectionVersion)
 
             case .unavailable(let error):
                 FailureNote(error, retry: onRetry)
+                    .revealOnReplace(when: error)
             }
 
             if model.offersRetry, case .cards = model.content {
@@ -119,6 +139,20 @@ public struct DiscoveryScreen: View {
         .sheet(item: $sheet) { presented in
             SafetySheetView(model: actions, sheet: presented)
         }
+        // The spring is released the moment the service answers, and at
+        // `Motion.likeSettle` regardless — so a request that never comes back
+        // cannot leave a heart stuck open on somebody's card.
+        .task(id: liking) {
+            guard liking != nil else { return }
+            do {
+                try await Task.sleep(for: Motion.likeSettle)
+            } catch {
+                return
+            }
+            liking = nil
+        }
+        .onChange(of: likeOutcome) { liking = nil }
+        .onChange(of: likeFailure) { liking = nil }
     }
 
 /// What the last like did, in the domain's own words.
@@ -145,7 +179,11 @@ private var outcomeBanner: some View {
         .padding(Space.md)
         .background(matched ? palette.accentSoft : palette.fill)
         .clipShape(RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
-        .transition(.opacity.combined(with: .move(edge: .top)))
+        .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
+        // Spring rather than the default ease, because this is the far end of
+        // the like: the heart sprang on the press, and this is the same spring
+        // arriving. An ease-out here would read as a different event.
+        .animation(reduceMotion ? nil : Motion.like, value: outcome)
         .task {
             matched ? feedback.succeed() : feedback.warn()
         }
@@ -187,6 +225,13 @@ struct CandidateRow: View {
     let offersLike: Bool
     let offersBlock: Bool
     let offersReport: Bool
+    /// Whether the like this row sent is still in flight.
+    ///
+    /// The spring is on the control rather than on the row, because the row is
+    /// what disappears when the service answers — animating the row would
+    /// animate it out of existence instead of connecting the press to the
+    /// outcome.
+    let isLiking: Bool
     let onLike: () -> Void
     let onBlock: () -> Void
     let onReport: () -> Void
@@ -212,6 +257,7 @@ struct CandidateRow: View {
                         CircleAction(systemImage: "heart.fill", label: "Like \(card.displayName)") {
                             onLike()
                         }
+                        .likeSpring(pending: isLiking)
                     }
                 }
 
