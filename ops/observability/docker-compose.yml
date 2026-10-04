@@ -1,0 +1,153 @@
+# Local observability stack for the Been There service.
+#
+# Four containers, each with exactly one job, and no collector in between: the
+# service pushes OTLP straight to Tempo, Loki and Prometheus, so a router that
+# would only rename fields and forward them is a fifth thing to configure, debug
+# and keep alive. The reason for four rather than one is that logs, metrics and
+# traces have different storage engines and different query languages; Grafana is
+# the one process that speaks all three.
+#
+# Everything here is local and free: four published images, four volumes, no
+# account and no key.
+#
+# ## Separate project on purpose
+#
+# This file is a second Compose project, not an extension of the root
+# `docker-compose.yml`, which owns Postgres alone. `name:` keeps the two from
+# sharing a default network and a volume prefix, and `stack.mjs` additionally
+# passes `-p been-there-observability` so a `COMPOSE_PROJECT_NAME` in a shell
+# cannot merge the two projects.
+#
+# ## Host ports
+#
+# 3001 for Grafana rather than 3000: a developer's machine frequently already has
+# something on 3000, and the first symptom of a clash is a container that will
+# not start. Prometheus (9090), Loki (3100) and Tempo (3200) keep their canonical
+# ports. Every one is overridable, e.g.
+# `OBS_GRAFANA_PORT=3010 node ops/observability/stack.mjs up`.
+#
+# ## What talks to what
+#
+#   service process  --OTLP/HTTP-->  tempo:3200/v1/traces      one span per request
+#   service process  --OTLP/HTTP-->  loki:3100/otlp/v1/logs     one log per request
+#   service process  --OTLP/HTTP-->  prometheus:9090/.../metrics request rate, latency
+#   ops exporter     --HTTP GET--->  service /v1/health/metrics  the service's catalogue
+#   prometheus       --scrape------>  host:9099/metrics          as exposition text
+#
+# The last two lines are why there is a small Node process on the host at all:
+# the service serves its metric catalogue as JSON over an authenticated route, by
+# design (`packages/service/src/routes/health.ts`), and Prometheus speaks only the
+# text exposition format. The exporter reads it with a real staff session rather
+# than by loosening the route.
+
+name: been-there-observability
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # The OTLP write receiver is what removes the need for a collector on the
+      # metrics path as well: the service pushes OTLP metrics straight into the
+      # TSDB at /api/v1/otlp/v1/metrics.
+      - --web.enable-otlp-receiver
+      - --web.enable-lifecycle
+    ports:
+      - "127.0.0.1:${OBS_PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./provisioning/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    # The metrics bridge runs on the host, not in the network: it reads the
+    # service's authenticated JSON endpoint and republishes it in the text
+    # exposition format. `host-gateway` is the spelling that also works on a plain
+    # Linux engine, not only on OrbStack and Docker Desktop.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:9090/-/healthy"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.5.1
+    command: ["-config.file=/etc/loki/loki.yml"]
+    ports:
+      - "127.0.0.1:${OBS_LOKI_PORT:-3100}:3100"
+    volumes:
+      - ./provisioning/loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3100/ready"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.7.2
+    command: ["-config.file=/etc/tempo/tempo.yml"]
+    ports:
+      - "127.0.0.1:${OBS_TEMPO_PORT:-3200}:3200"
+      # OTLP/HTTP lives on its own port (4318), not on the query port. Tempo's
+      # query API on 3200 answers /ready and /api, which is why posting a span
+      # there returns 404 rather than an error.
+      - "127.0.0.1:${OBS_TEMPO_OTLP_PORT:-4318}:4318"
+    volumes:
+      - ./provisioning/tempo/tempo.yml:/etc/tempo/tempo.yml:ro
+      - tempo-data:/var/tempo
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3200/ready"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    ports:
+      - "127.0.0.1:${OBS_GRAFANA_PORT:-3001}:3000"
+    environment:
+      # Local-only, and documented as such. Anonymous access saves a login prompt
+      # on a machine that is already the only place these containers exist.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: dark
+      GF_FEATURE_TOGGLES_ENABLE: traceqlEditor
+      # The provisioned dashboard is the landing page, so opening Grafana lands on
+      # the data rather than on a welcome wizard.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/been-there-service.json
+      GF_LOG_LEVEL: warn
+    volumes:
+      - ./provisioning/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      # The same directory twice: once where Grafana reads provider definitions
+      # (the `dashboards.yml` that says where the JSON is), and once where it
+      # reads the JSON itself. Grafana ignores the .yml in the second mount.
+      - ./provisioning/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./provisioning/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  grafana-data:
+  prometheus-data:
+  loki-data:
+  tempo-data:

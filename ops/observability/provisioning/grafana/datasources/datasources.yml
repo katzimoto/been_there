@@ -1,0 +1,70 @@
+# Grafana datasources, provisioned as files so a fresh clone needs no clicks.
+#
+# The three are wired to each other, which is the part that matters:
+#
+#   Tempo -> Loki   "logs for this span": filtered on the tag `correlation_id`.
+#   Loki  -> Tempo  a derived field that turns `correlation_id` in a log line
+#                    into a clickable trace.
+#
+# `correlation_id` is the join key because of a property the platform already
+# guarantees rather than one this stack invented: `traceIdFor()` derives the W3C
+# trace id as a truncated SHA-256 of the correlation id, and every span and log
+# line carries both. So the value of the `correlation_id` attribute *is* the
+# trace id, and neither side needs a mapping table or a translation rule.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      prometheusType: Prometheus
+      prometheusVersion: 3.5.0
+      # OTLP-pushed series arrive without a target; the service name resource
+      # attribute is the label the dashboard groups by.
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        - name: TraceID
+          # The trace id, spelled the way `traceIdFor()` derives it: 32 lowercase
+          # hex characters, present on every log line this stack writes.
+          matcherRegex: '"trace_id":"([a-f0-9]{32})"'
+          url: '${__value.raw}'
+          datasourceUid: tempo
+
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      search:
+        hide: false
+      nodeGraph:
+        enabled: true
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: -10m
+        spanEndTimeShift: 10m
+        filterByTraceID: true
+        filterBySpanID: false
+        tags:
+          # The trace id and this attribute are the same value: `traceIdFor()`
+          # derives the W3C trace id from the correlation id, and both the span
+          # and the log line carry the result. That is what makes Tempo's
+          # "logs for this span" a lookup rather than a guess.
+          - key: trace_id

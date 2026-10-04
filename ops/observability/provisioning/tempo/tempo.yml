@@ -1,0 +1,48 @@
+# Tempo, single binary, local backend, for the traces the service pushes.
+#
+# The distributor accepts OTLP/HTTP on 4318, which is where
+# `ops/observability/instrumentation.mjs` sends each request's span. The local
+# backend and the filesystem WAL are the cheapest thing that supports TraceQL
+# search and the trace-to-logs / trace-to-metrics links Grafana needs; S3 or
+# object storage would add a dependency to prove nothing extra locally.
+#
+# No retention block: Tempo's defaults keep everything until the volume is
+# removed, and `node ops/observability/stack.mjs reset` is the reset.
+
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  log_level: warn
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  max_block_duration: 5m
+  trace_idle_period: 10s
+
+compactor:
+  compaction:
+    block_retention: 24h
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+usage_report:
+  reporting_enabled: false
+
+overrides:
+  defaults:
+    ingestion:
+      burst_size_bytes: 20971520
+      rate_limit_bytes: 4194304

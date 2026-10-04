@@ -1,0 +1,18 @@
+# Dashboard provider. `allowUiUpdates: false` is deliberate: the dashboards here
+# are the repository's record of what this stack means, and an edit made in the
+# browser would live only in the Grafana volume and be lost on the next reset.
+# To change a dashboard, edit the JSON under this directory.
+
+apiVersion: 1
+
+providers:
+  - name: been-there
+    orgId: 1
+    folder: Been There
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

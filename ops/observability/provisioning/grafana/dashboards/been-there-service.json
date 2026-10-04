@@ -1,0 +1,304 @@
+{
+  "uid": "been-there-service",
+  "title": "Been There — service",
+  "description": "What the running service is doing, read from the service's own metric catalogue (edge_response_*, served over its authenticated /v1/health/metrics route) and from the request rate and latency the HTTP instrumentation times (http_server_*, pushed as OTLP). Nothing on this dashboard is a placeholder: every panel has a producer, and a panel with no producer is a promise the telemetry does not keep.",
+  "tags": ["been-there", "service"],
+  "editable": false,
+  "schemaVersion": 39,
+  "version": 1,
+  "graphTooltip": 1,
+  "timezone": "browser",
+  "refresh": "5s",
+  "time": { "from": "now-30m", "to": "now" },
+  "timepicker": {},
+  "annotations": { "list": [] },
+  "templating": { "list": [] },
+  "links": [],
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Requests / min",
+      "description": "Every response the HTTP boundary finished writing, across the service and the exporter.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 5, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(http_server_requests_total[2m])) * 60",
+          "legendFormat": "requests/min"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "unit": "reqps",
+          "color": { "mode": "fixed", "fixedColor": "green" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Refusals / min",
+      "description": "4xx. A refusal is the safety system working: a capability denied, a token refused. Rising refusals are a fact about the traffic, not an incident by themselves.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 5, "x": 5, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(http_server_requests_total{outcome=\"denied\"}[2m])) * 60",
+          "legendFormat": "refusals/min"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "unit": "reqps",
+          "color": { "mode": "fixed", "fixedColor": "orange" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "5xx / min",
+      "description": "The service failing. Nothing else on this dashboard should move before this one does.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 5, "x": 10, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(http_server_requests_total{outcome=\"error\"}[2m])) * 60",
+          "legendFormat": "errors/min"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 1,
+          "unit": "reqps",
+          "color": { "mode": "fixed", "fixedColor": "red" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "p95 latency",
+      "description": "Wall-clock seconds from a request arriving to its response finishing, over the service's own histogram buckets.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 5, "x": 15, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket[2m])))",
+          "legendFormat": "p95"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 3,
+          "unit": "s",
+          "color": { "mode": "fixed", "fixedColor": "blue" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Catalogue scrape",
+      "description": "1 when the bridge has read the service's own metric catalogue within the last poll. 0 with empty tiles elsewhere on this dashboard means the bridge or the service stopped, not that the traffic stopped.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "been_there_metrics_exporter_scrape_success",
+          "legendFormat": "scrape"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red", "index": 0 } } },
+            { "type": "value", "options": { "1": { "text": "UP", "color": "green", "index": 1 } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Responses by class",
+      "description": "edge.response, the service's own counter. completed = the service answered; refused = the refusal was the answer; outage = the service could not answer at all.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (class) (rate(edge_response_total[2m]))",
+          "legendFormat": "{{class}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": ["sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Refusals by domain code",
+      "description": "The same counter, sliced by the service's own error code rather than by status class. A flat refusal count with a moving mix is a behaviour change, not an outage.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (code) (rate(edge_response_total{class=\"refused\"}[2m]))",
+          "legendFormat": "{{code}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": ["sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Latency quantiles",
+      "description": "p50, p90 and p99 from the service's own latency histogram. Read the shape before the number: a p99 that rises alone is one slow route, and the panel below names it.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(http_server_request_duration_seconds_bucket[2m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.90, sum by (le) (rate(http_server_request_duration_seconds_bucket[2m])))",
+          "legendFormat": "p90"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket[2m])))",
+          "legendFormat": "p99"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests by route",
+      "description": "Route templates, not paths: every path segment that is not a route word is reduced to {id} before it leaves the process, so this panel cannot become a list of account identifiers.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, sum by (route) (rate(http_server_requests_total[2m])))",
+          "legendFormat": "{{route}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "text",
+      "title": "Log and trace exploration",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 20 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Explore → Logs**: `{service_name=\"been-there-service\"}`. Every line carries `trace_id`; click it to open the matching trace. **Explore → Traces**: `{ resource.service.name=\"been-there-service\" }`. Spans name their correlation id, and Tempo links each one back to its logs. The two meet on `trace_id`, which the platform derives as a hash of the request's correlation id — see `docs/observability.md`."
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Request log",
+      "description": "One line per request, assembled by the platform's own requestLogEntry at a fixed internal clearance. The body is the redacted record and nothing else.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{service_name=\"been-there-service\"}",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "prettifyLogMessage": false
+      }
+    }
+  ]
+}

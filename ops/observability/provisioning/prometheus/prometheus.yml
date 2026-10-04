@@ -1,0 +1,42 @@
+# Scrape configuration for the local stack.
+#
+# There is exactly one target, and it is not a container. The service records
+# its own metric catalogue in an in-process meter and serves it as JSON over an
+# authenticated route; Prometheus cannot read JSON, so `ops/observability/
+# metrics-exporter.mjs` runs on the host, polls that route with a real staff
+# session, and republishes it in the text exposition format on port 9099.
+#
+# The service's request-rate and latency numbers arrive the other way, pushed as
+# OTLP into Prometheus's own write receiver, and need no scrape target at all.
+#
+# Five seconds rather than the usual fifteen: this is a laptop stack someone
+# watches while driving the demo, and a fifteen-second interval makes a
+# single-request demonstration look like no data at all.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+  external_labels:
+    stack: been-there-local
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: been-there-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9099"]
+        labels:
+          service: been-there-service
+
+# The service pushes OTLP metrics, and more than one service process can be
+# running at once — a `make demo` service and the acceptance walk's own. They
+# report the same cumulative counters under the same name, so without a
+# per-process identity their numbers interleave in one series and `rate()` reads
+# the restart as a counter reset. Promoting `service.instance.id` keeps one
+# process one series; `sum(rate(...))` then adds them up correctly.
+otlp:
+  promote_resource_attributes:
+    - service.instance.id

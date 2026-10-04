@@ -1,0 +1,74 @@
+# Loki, single binary, filesystem storage, no retention policy.
+#
+# `auth_enabled: false` because Grafana is the only client and it reaches Loki on
+# the internal network with no tenant header; Loki's multi-tenancy would add a
+# header nothing here sets.
+#
+# `distributor.otlp_config` is what makes Loki a log sink for a process that
+# speaks OTLP: the service pushes to `/otlp/v1/logs` and its log records arrive
+# here as streams. `default_resource_attributes_as_index_labels` is left empty
+# deliberately — indexing every resource attribute is how a log backend turns an
+# attribute somebody added into a cardinality bill. The attributes still ride
+# along on the stream and are queryable; they are just not labels.
+#
+# Retention is a dev-tool decision, not a product one: a laptop's disk is the
+# budget, and the platform's own retention policy for log sinks is a question
+# ADR 0005 has not yet answered. Twenty-four hours is enough to investigate
+# yesterday's demo run and short enough that nobody has to think about it.
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: "2024-01-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+  filesystem:
+    directory: /loki/chunks
+
+limits_config:
+  retention_period: 24h
+  # Structured metadata is what carries the per-stream attributes OTLP records
+  # arrive with. Off by default in some builds; required for the record body to
+  # keep its fields.
+  allow_structured_metadata: true
+
+distributor:
+  otlp_config:
+    # Loki refuses a stream with no labels at all, and this one is also the label
+    # every dashboard query filters on. `service.name` arrives as `service_name`:
+    # Loki normalises the dot.
+    default_resource_attributes_as_index_labels:
+      - service.name
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+  compaction_interval: 10m
