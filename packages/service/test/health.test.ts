@@ -85,10 +85,13 @@ async function startHarnessWith(callers: readonly Caller[], fault?: Partial<Inte
   // One instance, wired into the service and handed back on the harness, so a
   // suite moves the score the service actually reads rather than a copy.
   const provider = harnessVerificationProvider();
+  // The cell the resolver reads per request, so `reloadCallers` is a real swap
+  // rather than a method the type requires and the suite never needs.
+  const cell: { current: readonly Caller[] } = { current: callers };
   const dependencies: ServiceDependencies = {
     stores: fault === undefined ? stores : { ...stores, interaction: withFault(stores.interaction, fault) },
     transaction: createTransaction(pool),
-    actors: resolverFor(callers),
+    actors: resolverFor(callers, undefined, undefined, cell),
     contacts: CONTACTS,
     verification: provider,
     now: () => new Date(),
@@ -103,6 +106,9 @@ async function startHarnessWith(callers: readonly Caller[], fault?: Partial<Inte
     dependencies,
     verification: provider,
     health: createServiceHealth(dependencies),
+    reloadCallers: (next: readonly Caller[]) => {
+      cell.current = next;
+    },
     // No trusted hop is installed above, so every request takes its socket
     // address and there is nothing to present a different one through.
     fromAddress: socketAddressOnly,

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type Caller, type Harness, call, member, staffIdentity, startHarness } from './support/harness.js';
+import type { UserId } from '@been-there/core';
 import { COMPLETE_PROFILE, PASSING_RESULT, createAccount, newPeer, verify } from './support/fixtures.js';
 
 /**
@@ -29,7 +30,7 @@ const ERIN = 'erin';
 describe('a named moderator can reach the queue, and the queue records their name', () => {
   let harness: Harness;
   let callers: Caller[];
-  let bob: string;
+  let bob: UserId;
   let mod: Awaited<ReturnType<typeof staffIdentity>>;
   let bot: Awaited<ReturnType<typeof staffIdentity>>;
 

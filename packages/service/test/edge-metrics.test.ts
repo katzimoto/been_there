@@ -48,6 +48,10 @@ const SESSION_ACTOR: RequestActor = {
   principal: { userId: castId<'UserId'>('00000000-0000-4000-8000-0000000000ed'), role: 'user' },
   automated: false,
   actorId: castId<'ActorId'>('edge-metrics-actor'),
+  // The one session this resolver answers to, named rather than left null: it is
+  // what the router would carry out of a real resolve, and a metric asserted on
+  // an actor must be reading the same actor a client would produce.
+  sessionId: castId<'SessionId'>(KNOWN_SESSION),
 };
 
 /**

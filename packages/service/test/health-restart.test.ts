@@ -309,10 +309,13 @@ describe('committed work across a process restart', () => {
     // One provider, wired into the service and handed back on the harness, so a
     // suite moves the score the service actually reads rather than a copy.
     const provider = harnessVerificationProvider();
+    // The cell the resolver reads per request, so `reloadCallers` is a real swap
+    // rather than a method the type requires and the suite never needs.
+    const cell: { current: readonly Caller[] } = { current: callers };
     const dependencies: ServiceDependencies = {
       stores,
       transaction,
-      actors: resolverFor(callers),
+      actors: resolverFor(callers, undefined, undefined, cell),
       contacts: CONTACTS,
       verification: provider,
       now: () => new Date(),
@@ -326,6 +329,9 @@ describe('committed work across a process restart', () => {
       transaction,
       dependencies,
       verification: provider,
+      reloadCallers: (next: readonly Caller[]) => {
+        cell.current = next;
+      },
       // No trusted hop is installed above, so every request takes its socket
       // address and there is nothing to present a different one through.
       fromAddress: socketAddressOnly,

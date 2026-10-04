@@ -14,6 +14,7 @@ import type { StaffIdentityRow, Stores, Transaction } from '@been-there/contract
 import { requireDatabaseReady, type JsonResponse } from './support/harness.js';
 import { createSessionActorResolver } from '../src/accounts/session-resolver.js';
 import { sessionTokenDigest } from '../src/accounts/session-token.js';
+import { harnessVerificationProvider } from './support/provider.js';
 import { reclaimPrepared } from './support/reclaim.js';
 
 /**
@@ -92,6 +93,11 @@ beforeAll(async () => {
         messages.push(message);
       },
     },
+    // This suite is about which rows a revocation touches, not about verification,
+    // but a service cannot be composed without the port: the default score sits
+    // above the 0.9 floor, so the sign-ins below reach `verified` as they would in
+    // any other suite.
+    verification: harnessVerificationProvider(),
     now: () => new Date(),
   };
   url = (

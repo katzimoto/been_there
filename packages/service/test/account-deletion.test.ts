@@ -227,6 +227,13 @@ const harness = {
   fromAddress(address: string | null): void {
     presentedAddress = address;
   },
+  // The resolver holds this same array, so swapping its contents is the swap.
+  // Nothing here calls it: `beforeAll` edits `callers` in place for the same
+  // reason, and a second way to do it would be a second source of truth.
+  reloadCallers(next: readonly Caller[]): void {
+    callers.length = 0;
+    callers.push(...next);
+  },
   // The fixtures never call it — this file owns the teardown, because the pool and
   // the database both belong to the service this suite built for itself. Present and
   // throwing rather than absent, so the object satisfies `Harness` honestly instead of
