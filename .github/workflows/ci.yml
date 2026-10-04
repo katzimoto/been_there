@@ -78,6 +78,15 @@ jobs:
       # `npm run typecheck` reported zero.
       - name: Typecheck tests
         run: node scripts/dev/typecheck-tests.mjs
+      # Between the typecheck that builds and the suite that consumes. `tsc --build`
+      # decides what to rebuild from a content hash, not a timestamp, so it repairs
+      # neither a dist edited by hand nor a source newer than its output -- and a
+      # test run against either passes while executing code that is not in src.
+      # Placing it here means it is the last thing standing between a lying dist
+      # and a green suite. On a fresh checkout the typecheck above has just built
+      # everything, so this compares a dist against itself and passes.
+      - name: Check compiled dist is fresh
+        run: node scripts/dev/check-dist-freshness.mjs
 
       - name: Test
         run: npm test

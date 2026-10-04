@@ -50,6 +50,10 @@ const MAPPING = [
   { step: 'Check domain boundaries', target: 'boundaries' },
   { step: 'Typecheck', target: 'typecheck' },
   { step: 'Typecheck tests', target: 'typecheck-tests' },
+  // Before the suite, not after: a dist that does not match its source is code
+  // nobody wrote, and the suite passes by executing it. Once the run is green
+  // the lie has already been reported as a truth.
+  { step: 'Check compiled dist is fresh', target: 'dist-freshness' },
   { step: 'Test', target: 'test' },
   { step: 'Check documentation links', target: 'docs' },
   { step: 'Check research tool', target: 'research-check' },

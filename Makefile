@@ -70,7 +70,7 @@ docs: ## Check that documentation links resolve
 research-check: ## Check the research tool still runs
 	node scripts/research/search.mjs --help > /dev/null
 
-check: workflow boundaries typecheck typecheck-tests test docs research-check stale-artifacts no-static-map-set lockfile migrate seed client-test client-ios parity ## Everything CI runs, in CI order
+check: workflow boundaries typecheck typecheck-tests dist-freshness test docs research-check stale-artifacts no-static-map-set lockfile migrate seed client-test client-ios parity ## Everything CI runs, in CI order
 ci: install check ## The whole CI sequence as one command
 
 lockfile: ## Assert the lockfile covers every workspace package
@@ -88,6 +88,13 @@ boundaries: ## Assert no domain package imports another
 
 no-static-map-set: ## Assert no Map or Set stands in for a Record over static keys
 	node scripts/dev/check-no-static-map-set.mjs
+
+# Between the typecheck that builds and the suite that consumes. A dist that does
+# not match its source is code that is not in src, so a test run against one
+# passes by executing something nobody wrote -- and this is the last step before
+# that run happens.
+dist-freshness: ## Assert every built package's dist matches a rebuild of its source
+	node scripts/dev/check-dist-freshness.mjs
 
 parity: ## Assert the local targets above run exactly what CI runs
 	node scripts/dev/check-ci-parity.mjs
