@@ -14,7 +14,7 @@ import {
   type Caller,
   type JsonResponse,
   member,
-  moderator,
+  staffIdentity,
   requireDatabaseReady,
   resolverFor,
 } from './support/harness.js';
@@ -60,7 +60,9 @@ import { harnessVerificationProvider } from './support/provider.js';
  * the route the way a banned account actually would.
  */
 
-const MOD = 'moderator';
+let MOD = 'moderator';
+/** The staff identity's id, which is what a decision body must now name. */
+let MOD_ID = '';
 
 /** §8.1's confirmation phrase, typed rather than tapped. */
 const CONFIRMATION = 'delete my account';
@@ -137,6 +139,17 @@ beforeAll(async () => {
       peerAddressFrom: (message) => presentedAddress ?? message.socket.remoteAddress ?? null,
     })
   ).url;
+
+  // A real staff identity, minted after the service is listening because
+  // provisioning needs the database and the session it mints is resolved by the
+  // running service. This replaces a static token whose `actorId` was the token
+  // string: a ban applied through it recorded a credential as the decision-maker,
+  // which is exactly what this suite asserts survives deletion.
+  const staffRow = await staffIdentity(harness, 'senior_moderator', { suffix: 'deletion' });
+  MOD = staffRow.token;
+  MOD_ID = staffRow.staffId;
+  callers.length = 0;
+  callers.push(staffRow.caller);
 });
 
 afterAll(async () => {
@@ -172,13 +185,16 @@ async function call(
 /**
  * The fixture callers the actor resolver consults before the session table.
  *
- * A moderator signs in through no member credential, so the staff token has to be
- * registered here. Peer fixtures push onto the same array as they create accounts,
- * which is why it is `let`-shaped rather than a literal at the point of use: the
- * resolver reads it per request, so a caller added after the service started is
- * still resolvable.
+ * Peer fixtures push onto this array as they create accounts, so it is
+ * `let`-shaped rather than a literal at the point of use: the resolver reads it
+ * per request, so a caller added after the service started is still resolvable.
+ *
+ * The moderator in it is a REAL staff identity — see `beforeAll`. It is flagged
+ * `realStaff`, which routes its token to the production session resolver rather
+ * than to this table, precisely because this table can only answer with
+ * `actorId = token`.
  */
-const callers: Caller[] = [moderator(MOD)];
+const callers: Caller[] = [];
 
 /**
  * The shared harness shape the fixtures want.
@@ -333,7 +349,7 @@ async function bannedAccount(
 
   const opened = await call('POST', '/v1/moderation/cases', MOD, {
     reportId: reported.body['reportId'],
-    moderatorId: 'senior_moderator',
+    moderatorId: MOD_ID,
   });
   expect(opened.status).toBe(201);
 
@@ -342,7 +358,7 @@ async function bannedAccount(
     `/v1/moderation/cases/${String(opened.body['caseId'])}/decisions`,
     MOD,
     {
-      moderatorId: 'senior_moderator',
+      moderatorId: MOD_ID,
       action: 'ban',
       rationale: 'the threats in this case meet the bar for a ban, and the appeal route stays open',
     },

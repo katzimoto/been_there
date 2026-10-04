@@ -23,6 +23,7 @@ import type {
   OnboardingRow,
   RecoveryRow,
   SessionRow,
+  StaffIdentityRow,
 } from '@been-there/contracts';
 import type { UserId } from '@been-there/core';
 import { isConflict, isRetryable } from './errors.js';
@@ -161,13 +162,26 @@ export function toOnboardingRow(raw: QueryResultRow): OnboardingRow {
 }
 
 export const SESSION_COLUMNS =
-  'session_id, user_id, auth_method, status, token_hash, issued_at, expires_at, refreshable_until, ' +
-  'last_active_at, revoked_reason, superseded_by, device_label, coarse_city';
+  'session_id, user_id, subject_kind, staff_id, automated, auth_method, status, token_hash, issued_at, ' +
+  'expires_at, refreshable_until, last_active_at, revoked_reason, superseded_by, device_label, ' +
+  'coarse_city';
 
 export function toSessionRow(raw: QueryResultRow): SessionRow {
   return {
     sessionId: readText(raw['session_id'], 'account_sessions', 'session_id'),
-    userId: readText(raw['user_id'], 'account_sessions', 'user_id') as UserId,
+    // Nullable since 008: a staff session has no member behind it. `readText`
+    // would throw here, and a throw is the wrong answer — it would make a
+    // perfectly good moderator session undecodable.
+    userId: readNullableText(raw['user_id'], 'account_sessions', 'user_id') as UserId | null,
+    // The discriminator. The schema's CHECK guarantees it agrees with which of
+    // the two subject columns is set, so reading it cannot manufacture a third
+    // possibility — a row that disagreed could not have been written.
+    subjectKind: readText(raw['subject_kind'], 'account_sessions', 'subject_kind'),
+    staffId: readNullableText(raw['staff_id'], 'account_sessions', 'staff_id'),
+    // Read strictly: a non-boolean here would mean the column is being written
+    // by something that does not know what it means, and the automated guard
+    // depends on this value being exactly true or exactly false.
+    automated: readBoolean(raw['automated'], 'account_sessions', 'automated'),
     authMethod: readText(raw['auth_method'], 'account_sessions', 'auth_method'),
     status: readText(raw['status'], 'account_sessions', 'status'),
     tokenHash: readText(raw['token_hash'], 'account_sessions', 'token_hash'),
@@ -179,6 +193,32 @@ export function toSessionRow(raw: QueryResultRow): SessionRow {
     supersededBy: readNullableText(raw['superseded_by'], 'account_sessions', 'superseded_by'),
     deviceLabel: readNullableText(raw['device_label'], 'account_sessions', 'device_label'),
     coarseCity: readNullableText(raw['coarse_city'], 'account_sessions', 'coarse_city'),
+  };
+}
+
+export const STAFF_COLUMNS =
+  'staff_id, contact_kind, contact_identifier, password_hash, display_name, role, status, ' +
+  'created_at, updated_at';
+
+/**
+ * A staff identity, decoded.
+ *
+ * `readText` on `role` and `status` rather than a cast, and `readTimestamp`
+ * on both instants: the schema's CHECKs already refuse a role the platform does
+ * not know, so a value that does not decode is a corrupt row rather than a new
+ * role, and it is said so rather than passed on as one.
+ */
+export function toStaffRow(raw: QueryResultRow): StaffIdentityRow {
+  return {
+    staffId: readText(raw['staff_id'], 'staff_identities', 'staff_id'),
+    contactKind: readText(raw['contact_kind'], 'staff_identities', 'contact_kind'),
+    contactIdentifier: readText(raw['contact_identifier'], 'staff_identities', 'contact_identifier'),
+    passwordHash: readText(raw['password_hash'], 'staff_identities', 'password_hash'),
+    displayName: readText(raw['display_name'], 'staff_identities', 'display_name'),
+    role: readText(raw['role'], 'staff_identities', 'role'),
+    status: readText(raw['status'], 'staff_identities', 'status'),
+    createdAt: readTimestamp(raw['created_at'], 'staff_identities', 'created_at'),
+    updatedAt: readTimestamp(raw['updated_at'], 'staff_identities', 'updated_at'),
   };
 }
 

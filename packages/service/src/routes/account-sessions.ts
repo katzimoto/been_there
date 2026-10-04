@@ -15,7 +15,6 @@ import {
   verifyPassword,
 } from '@been-there/platform';
 import { readString } from '../http/body.js';
-import { MISSING_FIELD } from '../http/failure.js';
 import { okResponse, publicRoute, route, type Route } from '../http/router.js';
 import type { ContactMessage, ServiceDependencies } from '../ports.js';
 import { appendAudit, correlationIdFrom, recordFunnel } from '../accounts/funnel.js';
@@ -253,6 +252,22 @@ export function accountSessionRoutes(dependencies: ServiceDependencies): readonl
           reason: 'unknown_session',
         });
       }
+      // The subject check, and it comes before the write. This route is a member
+      // surface: it echoes a member id and notifies a member's verified channel.
+      // A staff session has no member id, so `row.userId` would echo `null` and
+      // the sign-out would silently do member bookkeeping for a moderator — and
+      // once `user_id` is nullable, "the member whose session this is" is no
+      // longer something the code can read off the row without being told which
+      // kind of row it has. Refusing is the honest answer: a staff session is
+      // signed out through the staff surface, which knows the identity.
+      if (row.subjectKind !== 'member' || row.userId === null) {
+        return domainError(
+          'permission_denied',
+          'service.accounts',
+          'this route signs out a member session; a staff session is signed out as a staff identity',
+          { reason: 'subject_kind_mismatch', subjectKind: row.subjectKind },
+        );
+      }
       await dependencies.stores.accounts.updateSession(
         revokedRow(row, 'user_logout'),
         request.tx,
@@ -279,9 +294,20 @@ export function accountSessionRoutes(dependencies: ServiceDependencies): readonl
      * different for each of the sessions an attacker holds, and each would deliver.
      */
     route('DELETE', '/v1/account-sessions/all', async (request) => {
+      // "All devices" means *this member's* devices. Deriving the owner from
+      // `actor.userId` alone is what made the hazard possible: with `user_id`
+      // nullable, that field is null for a staff session, and the tempting next
+      // step — falling back to the staff id, or to the session row's other
+      // column — would revoke across the wrong subject entirely. Staff sessions
+      // are listed by `staff_id` (`listSessionsForStaff`) and revoked there.
       const userId = request.actor.userId;
       if (userId === null) {
-        return MISSING_FIELD('session');
+        return domainError(
+          'permission_denied',
+          'service.accounts',
+          'this route signs out every device for a member; a staff identity is signed out as a staff identity',
+          { reason: 'subject_kind_mismatch' },
+        );
       }
       const credential = await dependencies.stores.accounts.findCredential(userId, request.tx);
       if (credential === null) {

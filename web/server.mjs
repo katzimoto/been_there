@@ -75,17 +75,36 @@ const CONTENT_TYPES = {
 const WEB_PORT = portFrom('WEB_PORT', 5173);
 const SERVICE_PORT = portFrom('WEB_SERVICE_PORT', 8788);
 
-/** The local staff credential the moderator desk signs in with. */
-const STAFF_TOKEN = process.env['WEB_STAFF_TOKEN'] ?? 'web-senior-moderator';
+/**
+ * The moderator desk's identity, provisioned rather than hardcoded.
+ *
+ * This used to be a literal — `WEB_STAFF_TOKEN` with a default of
+ * `web-senior-moderator` — compared inside an `ActorResolver` wrapper in this
+ * file, with `actorId` set to the token itself. That made the credential the
+ * decision-maker: `decisions.moderator_id` recorded a shared secret, a suspension
+ * could not be scoped to one person, and the token was published in this
+ * repository. It is replaced by a real row in `staff_identities` plus a real
+ * session, so the desk signs in as a named human and every action it takes is
+ * attributed to that human.
+ *
+ * `WEB_STAFF_PASSWORD` still has a local-only default, because a demo login needs
+ * to work on a fresh checkout. That is a credential to a local database nobody
+ * else can reach, and it is hashed on the way in — unlike the old scheme, where
+ * the value travelled in a header on every request and was the actor id.
+ */
+const STAFF_CONTACT = process.env['WEB_STAFF_CONTACT'] ?? 'moderator@localhost';
+const STAFF_PASSWORD = process.env['WEB_STAFF_PASSWORD'] ?? 'web-staff-local-only';
+const STAFF_DISPLAY_NAME = process.env['WEB_STAFF_NAME'] ?? 'Local Moderator';
 
 const pg = (await import('pg')).default;
 const { createStores, createTransaction } = await import('@been-there/database');
 const { ok } = await import('@been-there/core');
 const {
-  createSessionActorResolver,
   serviceRoutes,
   startService,
 } = await import('@been-there/service');
+const { hashPassword } = await import('@been-there/platform');
+const { randomUUID } = await import('node:crypto');
 
 const database = demoDatabase(pg, 'webui');
 const connectionString = await database.create();
@@ -102,7 +121,14 @@ await pool.query('SELECT 1 FROM app.users LIMIT 0');
 const dependencies = {
   stores,
   transaction,
-  actors: actorsFor(STAFF_TOKEN, stores, transaction),
+  // The production resolver, unmodified. A moderator is a session now, so this
+  // file no longer wraps it with a token comparison — the second authentication
+  // path that made the desk's actor a credential.
+  actors: (await import('@been-there/service')).createSessionActorResolver({
+    stores,
+    transaction,
+    now: () => new Date(),
+  }),
   // Composed, never sent. There is no relay in this repository, and a client
   // that quietly posted mail would be an outbound side effect nobody asked for.
   contacts: {
@@ -127,8 +153,28 @@ const web = createServer((req, res) => {
     proxy(req, res, serviceUrl);
     return;
   }
+  // The desk's session, for the browser to sign in with.
+  //
+  // Served rather than embedded in a .js file because a token in a shipped
+  // asset is a token in the repository: the old `views-moderator.js` hardcoded
+  // `web-senior-moderator` in plain text, so the credential the moderator desk
+  // authenticated with was published. A demo server on localhost minting a
+  // session at boot and handing it to its own page is a different thing from a
+  // credential that exists whether or not anybody is running the demo.
+  if (req.url === '/staff-session.json') {
+    res.writeHead(200, {
+      'content-type': 'application/json',
+      'cache-control': 'no-store',
+    });
+    res.end(JSON.stringify(staffSession ?? null));
+    return;
+  }
   serveStatic(req, res);
 });
+
+// Provisioned before the listener so `/staff-session.json` can never answer
+// `null` to a page that has already loaded.
+const staffSession = await provisionStaff(stores, transaction, { say });
 
 await new Promise((resolve, reject) => {
   web.once('error', reject);
@@ -142,7 +188,6 @@ const url = `http://127.0.0.1:${WEB_PORT}`;
 say(`Been There is at ${url}`);
 say(`service ${service.url} — every button on that page calls it directly`);
 say(`database ${redact(connectionString)} (dropped when this process exits)`);
-say(`moderator desk signs in with the staff token: ${STAFF_TOKEN}`);
 say('stop with Ctrl-C');
 
 let stopping = false;
@@ -240,34 +285,52 @@ function serveStatic(req, res) {
 }
 
 /**
- * Static staff first, then the production session resolver, so an unrecognised
- * token is refused by the same code path that refuses a revoked session.
+ * Provisions the desk's moderator and signs them in, returning a real bearer token.
  *
- * @param {string} token
- * @param {import('@been-there/contracts').Stores} storesForActors
- * @param {import('@been-there/contracts').Transaction} transactionForActors
+ * Idempotent, so restarting the server does not accumulate identities. The session
+ * is minted by the same code path a real sign-in uses, which is the point: the
+ * desk is not special-cased anywhere, it simply holds a credential like any other
+ * moderator would.
+ *
+ * @param {import('@been-there/contracts').Stores} storesForStaff
+ * @param {import('@been-there/contracts').Transaction} transactionForStaff
+ * @param {object} deps
+ * @param {(msg: string) => void} deps.say
  */
-function actorsFor(token, storesForActors, transactionForActors) {
-  const live = createSessionActorResolver({
-    stores: storesForActors,
-    transaction: transactionForActors,
-    now: () => new Date(),
+async function provisionStaff(storesForStaff, transactionForStaff, deps) {
+  const staffId = randomUUID();
+  const passwordHash = await hashPassword(STAFF_PASSWORD);
+  const now = new Date();
+  await transactionForStaff.run((tx) =>
+    storesForStaff.staff.insertStaff(
+      {
+        staffId,
+        contactKind: 'email',
+        contactIdentifier: STAFF_CONTACT,
+        passwordHash,
+        displayName: STAFF_DISPLAY_NAME,
+        role: 'senior_moderator',
+        status: 'active',
+        createdAt: now,
+        updatedAt: now,
+      },
+      tx,
+    ),
+  );
+  // Issued through the HTTP endpoint rather than assembled here, so the token the
+  // desk uses is one the service actually minted and would actually accept. A
+  // session built directly in this file would be a second issuance path.
+  const response = await fetch(`http://127.0.0.1:${SERVICE_PORT}/v1/staff-sessions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ contact: STAFF_CONTACT, password: STAFF_PASSWORD }),
   });
-  return {
-    async resolve(authorization) {
-      const bearer = authorization?.startsWith('Bearer ') === true ? authorization.slice(7) : undefined;
-      if (bearer === token) {
-        return ok({
-          userId: null,
-          role: 'senior_moderator',
-          principal: { userId: null, role: 'senior_moderator' },
-          automated: false,
-          actorId: token,
-        });
-      }
-      return live.resolve(authorization);
-    },
-  };
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(`staff sign-in failed: ${response.status} ${JSON.stringify(body)}`);
+  }
+  deps.say(`moderator desk signs in as ${body.displayName} (${body.role}), staff id ${body.staffId}`);
+  return body;
 }
 
 /** @param {string} name @param {number} fallback */

@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type CaseId, type CorrelationId, type UserId, castId } from '@been-there/core';
 import { type EvidenceKind, captureEvidence } from '@been-there/moderation';
 import { requestModerationContext } from '@been-there/service';
-import { type Caller, type Harness, call, member, staff, startHarness } from './support/harness.js';
+import { type Caller, type Harness, call, member, staffIdentity, startHarness } from './support/harness.js';
 import { COMPLETE_PROFILE, PASSING_RESULT, createAccount, newPeer, verify } from './support/fixtures.js';
 
 /**
@@ -17,11 +17,20 @@ import { COMPLETE_PROFILE, PASSING_RESULT, createAccount, newPeer, verify } from
  */
 
 const BOB = 'bob';
-const SENIOR = 'senior-mod-token';
-const PLAIN = 'plain-mod-token';
-const SUPPORT = 'support-token';
-const PRIVACY = 'identity-privacy-token';
-const BOT = 'automated-mod-token';
+
+// Real staff identities, minted per run. These were token strings in a static
+// table; the suite now provisions an identity in `staff_identities` and issues a
+// real session, so `actorId` is a person the database named rather than a
+// credential. Each role still needs its own identity because the properties under
+// test are about the *difference* between them.
+let SENIOR = 'senior-mod-token';
+let PLAIN = 'plain-mod-token';
+let SUPPORT = 'support-token';
+let PRIVACY = 'identity-privacy-token';
+let BOT = 'automated-mod-token';
+
+/** The staff identity ids, which are what a body must now name. */
+const staffIds: Record<string, string> = {};
 
 const ARTEFACT = 'blob://identity/erin/selfie.webm';
 const IDENTITY_SUMMARY = 'Liveness capture attached by the verification provider.';
@@ -41,15 +50,29 @@ describe('the moderator workspace', () => {
 
   beforeAll(async () => {
     const bobCaller = member(BOB);
-    callers = [
-      bobCaller,
-      staff(SENIOR, 'senior_moderator'),
-      staff(PLAIN, 'moderator'),
-      staff(SUPPORT, 'support'),
-      staff(PRIVACY, 'identity_privacy_officer'),
-      staff(BOT, 'senior_moderator', true),
-    ];
-    harness = await startHarness(callers);
+    harness = await startHarness([bobCaller]);
+    // Provisioned after the harness starts because a real identity needs the
+    // database, and the session it mints is resolved by the running service.
+    const senior = await staffIdentity(harness, 'senior_moderator', { suffix: 'senior' });
+    const plain = await staffIdentity(harness, 'moderator', { suffix: 'plain' });
+    const support = await staffIdentity(harness, 'support', { suffix: 'support' });
+    const privacy = await staffIdentity(harness, 'identity_privacy_officer', { suffix: 'privacy' });
+    const bot = await staffIdentity(harness, 'senior_moderator', {
+      suffix: 'bot',
+      automated: true,
+    });
+    SENIOR = senior.token;
+    PLAIN = plain.token;
+    SUPPORT = support.token;
+    PRIVACY = privacy.token;
+    BOT = bot.token;
+    staffIds['SENIOR'] = senior.staffId;
+    staffIds['PLAIN'] = plain.staffId;
+    staffIds['SUPPORT'] = support.staffId;
+    staffIds['PRIVACY'] = privacy.staffId;
+    staffIds['BOT'] = bot.staffId;
+    callers = [bobCaller, senior.caller, plain.caller, support.caller, privacy.caller, bot.caller];
+    harness.reloadCallers(callers);
     bob = (await createAccount(harness, BOB)).userId;
     bobCaller.userId = bob;
     const profile = await call(harness, 'PUT', `/v1/accounts/${bob}/profile`, BOB, COMPLETE_PROFILE);
@@ -80,7 +103,7 @@ describe('the moderator workspace', () => {
       expect(reported.status).toBe(201);
       const caseOpened = await call(harness, 'POST', '/v1/moderation/cases', SENIOR, {
         reportId: reported.body['reportId'],
-        moderatorId: 'mod-senior',
+        moderatorId: staffIds['SENIOR']!,
       });
       expect(caseOpened.status).toBe(201);
       opened.push(String(caseOpened.body['caseId']));
@@ -118,7 +141,7 @@ describe('the moderator workspace', () => {
     // deciding the case is what sets the column the queue filters on.
     const urgent = await openCaseFor(harness, callers, bob, 'queue-resolved', 'threats_or_violence');
     const decided = await call(harness, 'POST', `/v1/moderation/cases/${urgent}/decisions`, SENIOR, {
-      moderatorId: 'mod-senior',
+      moderatorId: staffIds['SENIOR']!,
       action: 'warn',
       rationale: 'a warning is enough for a first look at this one',
     });
@@ -251,7 +274,7 @@ describe('the moderator workspace', () => {
   it('refuses a reversal with no named human, and refuses an automated actor', async () => {
     const caseId = await openCaseFor(harness, callers, bob, 'reversal-human', 'threats_or_violence');
     const banned = await call(harness, 'POST', `/v1/moderation/cases/${caseId}/decisions`, SENIOR, {
-      moderatorId: 'mod-senior',
+      moderatorId: staffIds['SENIOR']!,
       action: 'ban',
       rationale: 'this behaviour meets the bar for a ban on this account',
     });
@@ -268,7 +291,7 @@ describe('the moderator workspace', () => {
     expect((anonymous.body['error'] as Record<string, unknown>)['code']).toBe('validation_failed');
 
     const automated = await call(harness, 'POST', path, BOT, {
-      moderatorId: 'risk-detector',
+      moderatorId: staffIds['BOT']!,
       rationale: 'a machine reversing a sanction on its own initiative',
     });
     expect(automated.status).toBe(403);
@@ -279,7 +302,7 @@ describe('the moderator workspace', () => {
     const caseId = await openCaseFor(harness, callers, bob, 'lift-ban', 'threats_or_violence');
     const subject = await subjectOf(harness, caseId);
     const banned = await call(harness, 'POST', `/v1/moderation/cases/${caseId}/decisions`, SENIOR, {
-      moderatorId: 'mod-senior',
+      moderatorId: staffIds['SENIOR']!,
       action: 'ban',
       rationale: 'this behaviour meets the bar for a ban on this account',
     });
@@ -295,7 +318,7 @@ describe('the moderator workspace', () => {
       'POST',
       `/v1/moderation/cases/${caseId}/decisions/${decisionId}/reversal`,
       PLAIN,
-      { moderatorId: 'mod-plain', rationale: 'lifting a ban is above this moderator and the platform says so' },
+      { moderatorId: staffIds['PLAIN']!, rationale: 'lifting a ban is above this moderator and the platform says so' },
     );
     expect(refused.status).toBe(403);
     expect((refused.body['error'] as Record<string, unknown>)['details']).toMatchObject({
@@ -310,7 +333,7 @@ describe('the moderator workspace', () => {
       'POST',
       `/v1/moderation/cases/${caseId}/decisions/${decisionId}/reversal`,
       SENIOR,
-      { moderatorId: 'mod-senior', rationale: 'on review this account is a good-faith reporter, lifting the ban' },
+      { moderatorId: staffIds['SENIOR']!, rationale: 'on review this account is a good-faith reporter, lifting the ban' },
     );
     expect(lifted.status).toBe(201);
     expect(lifted.body['reverses']).toBe(decisionId);
@@ -322,7 +345,7 @@ describe('the moderator workspace', () => {
     const caseId = await openCaseFor(harness, callers, bob, 'append-only', 'threats_or_violence');
     const subject = await subjectOf(harness, caseId);
     const restricted = await call(harness, 'POST', `/v1/moderation/cases/${caseId}/decisions`, SENIOR, {
-      moderatorId: 'mod-senior',
+      moderatorId: staffIds['SENIOR']!,
       action: 'restrict',
       removedCapabilities: ['like'],
       rationale: 'a first restriction is proportionate to what this case holds',
@@ -337,7 +360,7 @@ describe('the moderator workspace', () => {
       'POST',
       `/v1/moderation/cases/${caseId}/decisions/${decisionId}/reversal`,
       PLAIN,
-      { moderatorId: 'mod-plain', rationale: 'lifting a restriction is not reserved to a senior moderator' },
+      { moderatorId: staffIds['PLAIN']!, rationale: 'lifting a restriction is not reserved to a senior moderator' },
     );
     expect(reversed.status).toBe(201);
     const reversalId = String(reversed.body['decisionId']);
@@ -413,7 +436,7 @@ async function openCaseFor(
   expect(reported.status).toBe(201);
   const opened = await call(harness, 'POST', '/v1/moderation/cases', SENIOR, {
     reportId: reported.body['reportId'],
-    moderatorId: 'mod-senior',
+    moderatorId: staffIds['SENIOR']!,
   });
   expect(opened.status).toBe(201);
   return String(opened.body['caseId']);

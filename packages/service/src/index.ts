@@ -14,6 +14,7 @@ import { reportRoutes } from './routes/reports.js';
 import { profileRoutes } from './routes/profile.js';
 import { goalRoutes } from './routes/goal.js';
 import { verificationRoutes } from './routes/verification.js';
+import { staffSessionRoutes } from './routes/staff-sessions.js';
 
 export * from './ports.js';
 export * from './http/body.js';
@@ -41,6 +42,7 @@ export function serviceRoutes(dependencies: ServiceDependencies): readonly Route
     ...readinessRoutes(dependencies),
     ...accountRoutes(dependencies),
     ...accountSessionRoutes(dependencies),
+    ...staffSessionRoutes(dependencies),
     ...profileRoutes(dependencies),
     ...discoveryRoutes(dependencies),
     ...goalRoutes(dependencies),
@@ -61,4 +63,5 @@ export * from './health/lifecycle.js';
 export * from './health/service.js';
 export * from './routes/health.js';
 export * from './routes/readiness.js';
+export * from './routes/staff-sessions.js';
 export * from './accounts/session-resolver.js';

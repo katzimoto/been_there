@@ -22,6 +22,7 @@ import {
 import { APPOINTMENT_BY_ROLE, authorize, protectedActionForAccountEvent } from '@been-there/platform';
 import { MISSING_FIELD, NOT_FOUND } from '../http/failure.js';
 import { readString } from '../http/body.js';
+import { namedModerator } from './moderation-actor.js';
 import { okResponse, route, type HttpResponse, type Route, type RouteRequest } from '../http/router.js';
 import type { ServiceDependencies } from '../ports.js';
 import { subjectStandingFor } from '../wiring/standing.js';
@@ -238,15 +239,11 @@ async function reverseADecision(
   if (decisionId.length === 0) {
     return MISSING_FIELD('decisionId');
   }
-  const moderatorRaw = readString(request.body, 'moderatorId');
-  if (!moderatorRaw.ok) {
-    return domainError(
-      'validation_failed',
-      'service.http',
-      'a reversal must name the moderator who took it',
-      { field: 'moderatorId' },
-    );
+  const named = namedModerator(request);
+  if (!named.ok) {
+    return named;
   }
+  const moderatorId = named.value;
   const rationale = readString(request.body, 'rationale');
   if (!rationale.ok) {
     return rationale;
@@ -262,7 +259,6 @@ async function reverseADecision(
   if (original === undefined) {
     return NOT_FOUND('decision');
   }
-  const moderatorId = castId<'ActorId'>(moderatorRaw.value);
 
   // The authority a reversal needs is the authority of the *lift*, not of the
   // sanction it answers, and the lift is a different permission: a plain

@@ -177,9 +177,35 @@ export interface OnboardingRow {
   readonly updatedAt: Date;
 }
 
+/**
+ * One row of `account_sessions`.
+ *
+ * The row's subject is *discriminated*: `subjectKind` says which of `userId` and
+ * `staffId` is the subject, and exactly one of them is set. A nullable `userId`
+ * on its own is not enough, and that is the whole reason for the extra columns —
+ * "there is no user" and "there is a moderator" are different facts, and a
+ * reader given only `user_id IS NULL` cannot tell a moderator's session from a
+ * row that was written by something that never resolved a subject at all. Every
+ * "whose session is this" question would then have two answers, which is the
+ * hazard the `account_sessions_one_subject` CHECK exists to remove at the
+ * storage layer rather than in each reader.
+ */
 export interface SessionRow {
   readonly sessionId: string;
-  readonly userId: UserId;
+  /** The member subject, or `null` when `subjectKind` is `'staff'`. */
+  readonly userId: UserId | null;
+  /** `'member'` or `'staff'` — the discriminator the two columns below agree with. */
+  readonly subjectKind: string;
+  /** The staff subject, or `null` when `subjectKind` is `'member'`. */
+  readonly staffId: string | null;
+  /**
+   * Whether the holder is a machine. Stored rather than carried on the in-memory
+   * session, because `moderation.decision` refuses an automated actor and that
+   * refusal reads this value on a *later* request. A flag that existed only at
+   * issue time would read back as `false` and switch the guard off, which is the
+   * one direction this column must never fail in.
+   */
+  readonly automated: boolean;
   readonly authMethod: string;
   readonly status: string;
   readonly tokenHash: string;
@@ -191,6 +217,74 @@ export interface SessionRow {
   readonly supersededBy: string | null;
   readonly deviceLabel: string | null;
   readonly coarseCity: string | null;
+}
+
+/**
+ * A staff identity: a named human who may hold a moderation session, and the
+ * credential that lets them sign in as one.
+ *
+ * `role` and `status` live here rather than on the session on purpose — see
+ * migration 008. A demotion that only reached live sessions would take effect
+ * one refresh window late, which is exactly when it is needed. The resolver
+ * reads them on every request.
+ */
+export interface StaffIdentityRow {
+  readonly staffId: string;
+  /** `'email'` or `'phone'`, normalised by the edge, never stored in another form. */
+  readonly contactKind: string;
+  readonly contactIdentifier: string;
+  /** `scrypt:N:r:p$salt$digest`, the same shape and verifier as a member's. */
+  readonly passwordHash: string;
+  /** The name that lands in `decisions.moderator_id` and every audit row. */
+  readonly displayName: string;
+  /** One of the four staff roles; the schema's CHECK refuses `'user'` and `'system'`. */
+  readonly role: string;
+  /** `'active'` or `'suspended'`. Suspension is the off switch. */
+  readonly status: string;
+  readonly createdAt: Date;
+  readonly updatedAt: Date;
+}
+
+/**
+ * `StaffIdentityStore`: the directory, and the sessions a named moderator holds.
+ *
+ * It is deliberately a separate port from `AccountPlatformStore` rather than
+ * more methods on it. A moderator is not a member — the migration says so and
+ * the schema refuses to write one as the other — so a caller that reaches for
+ * this port is a caller that has already decided it is acting as staff.
+ */
+export interface StaffIdentityStore {
+  /**
+   * Writes one identity. A second identity for the same contact is refused by
+   * the unique index rather than resolved here: two staff sharing an address
+   * would leave a session naming whichever row the store returned first.
+   */
+  insertStaff(row: StaffIdentityRow, tx: Transaction): Promise<void>;
+
+  /** Sign-in's first read: the identity this contact belongs to, if any. */
+  findStaffByContact(contactIdentifier: string, tx: Transaction): Promise<StaffIdentityRow | null>;
+
+  /** The identity behind a live session, read on every authenticated request. */
+  findStaff(staffId: string, tx: Transaction): Promise<StaffIdentityRow | null>;
+
+  /**
+   * Moves an identity in or out of `'suspended'`, stamping `updated_at`. The
+   * boolean is the affected-row count, so a suspension of an identity that does
+   * not exist says so instead of reading as success.
+   */
+  updateStaffStatus(staffId: string, status: string, at: Date, tx: Transaction): Promise<boolean>;
+
+  /**
+   * Revocation by identity: every session one named moderator holds.
+   *
+   * This is what signs a moderator out *everywhere* at once, which a member's
+   * sign-out cannot do — a member owns exactly the sessions `listSessionsFor`
+   * returns. The hazard this whole table exists to close is that the two queries
+   * must not overlap: a member's sign-out that could see a moderator's session
+   * would revoke a moderator's access because the member pressed a button, and
+   * `listSessionsFor` filters on `user_id = $1`, which a staff row cannot match.
+   */
+  listSessionsForStaff(staffId: string, tx: Transaction): Promise<readonly SessionRow[]>;
 }
 
 export interface RecoveryRow {
@@ -871,6 +965,8 @@ export interface Stores {
   readonly accounts: AccountPlatformStore;
   /** The personal dating goal and the completed-date history (#48, #49). */
   readonly goals: GoalStore;
+  /** The staff directory and the sessions a named moderator holds. */
+  readonly staff: StaffIdentityStore;
 }
 
 import type { ActorId } from '@been-there/core';

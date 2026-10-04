@@ -1,7 +1,7 @@
 import type { ActorId, DomainError, EventPublisher, Result, UserId } from '@been-there/core';
 import type { VerificationProvider } from '@been-there/identity';
 import type { Stores, Transaction } from '@been-there/contracts';
-import type { Principal, Role } from '@been-there/platform';
+import type { Principal, Role, SessionId } from '@been-there/platform';
 /**
  * What the service is given at the edge, and nothing else.
  *
@@ -57,6 +57,21 @@ export interface RequestActor {
    */
   readonly automated: boolean;
   readonly actorId: ActorId;
+  /**
+   * The session this actor was resolved from, or `null` for a caller that had
+   * none (the anonymous actor on a public route).
+   *
+   * Carried so that work already in flight can be abandoned when the credential
+   * behind it dies. `resolve` runs in its own transaction *before* the request's,
+   * which is right for deciding whether a request may proceed but means a session
+   * revoked one millisecond later would otherwise keep authorising until the
+   * request finished. A moderator whose access is withdrawn mid-decision must not
+   * land that decision, so the handlers re-check this id inside their own
+   * transaction. `null` for anonymous callers is honest: there is no session to
+   * re-check, which is exactly why a public route cannot be the subject of the
+   * revocation race.
+   */
+  readonly sessionId: SessionId | null;
 }
 
 /**

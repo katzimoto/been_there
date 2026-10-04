@@ -45,12 +45,17 @@ const BOOT_TIMEOUT_MS = 30_000;
 const STOP_TIMEOUT_MS = 10_000;
 
 /**
- * The moderator: a named human with decision authority, and the only staff token
- * this walk uses. The repository has no staff sign-in, so `scripts/demo/server.mjs`
- * is handed this token as a static caller — the same seam the test harness uses,
- * and the same seam production does not have yet.
+ * The moderator: a named human with decision authority, and the only staff
+ * credential this walk uses.
+ *
+ * Previously this was a token string handed to the demo server as a static caller,
+ * because the repository had no staff sign-in. It now has one:
+ * `scripts/demo/server.mjs` provisions an identity and signs in over
+ * `POST /v1/staff-sessions`, emitting a `staff` line that this walk reads. So the
+ * `token` and the `moderatorId` are both real values the database minted — and
+ * they are the *same* identity, which is what the service now requires.
  */
-const MODERATOR = { token: 'journey-senior-moderator', moderatorId: 'senior_moderator' };
+const MODERATOR = { token: '', moderatorId: '' };
 
 // Everything the signal handlers and the teardown need is declared before the
 // first `await`, because the handlers are registered below and before it. The
@@ -309,9 +314,10 @@ async function boot(label, connectionString) {
       // An ephemeral port, so a walk never collides with a `make demo` already
       // running on this machine.
       DEMO_PORT: '0',
-      DEMO_STAFF_TOKENS: JSON.stringify([
-        { token: MODERATOR.token, role: 'senior_moderator', automated: false },
-      ]),
+      // The demo server signs its moderator in itself and announces the identity;
+      // the walk reads that line below rather than being handed a token.
+      DEMO_STAFF_CONTACT: 'moderator@demo.localhost',
+      DEMO_STAFF_PASSWORD: 'demo-staff-local-only',
     },
   });
   // Prefixed per line rather than per chunk: a chunk that ends mid-line would
@@ -342,6 +348,14 @@ async function boot(label, connectionString) {
           payload = JSON.parse(line.slice(space + 1));
         } catch {
           payload = {};
+        }
+        // The staff line carries the identity the walk acts as. Read it here
+        // rather than being handed a token: the moderator id is only meaningful
+        // alongside the token that resolves to it, and a walk that chose them
+        // separately would be asserting a pairing the service now refuses.
+        if (kind === 'staff') {
+          MODERATOR.token = payload.token ?? '';
+          MODERATOR.moderatorId = payload.staffId ?? '';
         }
         const index = waiters.findIndex((waiter) => waiter.kind === kind);
         if (index >= 0) {
