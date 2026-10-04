@@ -50,6 +50,11 @@ const MAPPING = [
   { step: 'Check domain boundaries', target: 'boundaries' },
   { step: 'Typecheck', target: 'typecheck' },
   { step: 'Typecheck tests', target: 'typecheck-tests' },
+  // Before `dist-freshness`: a gate is only a gate for as long as it still
+  // fails, and this is what keeps that true. The two failures the check exists
+  // for are both invisible to a timestamp comparison, so an mtime-only
+  // simplification would pass here, in the step below, and in the suite.
+  { step: 'Check the dist freshness check still catches its own failures', target: 'dist-freshness-selftest' },
   // Before the suite, not after: a dist that does not match its source is code
   // nobody wrote, and the suite passes by executing it. Once the run is green
   // the lie has already been reported as a truth.

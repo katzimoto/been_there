@@ -78,6 +78,18 @@ jobs:
       # `npm run typecheck` reported zero.
       - name: Typecheck tests
         run: node scripts/dev/typecheck-tests.mjs
+      # The step below is a gate only for as long as it still fails. Two of the
+      # failures it exists for are invisible to comparing timestamps -- a
+      # hand-edited dist is *newer* than its source, and an orphaned output has
+      # no source to be compared against -- so a simplification of the check to
+      # mtime alone would restore both and stay green here and everywhere else.
+      # This plants each and asserts the step below goes red on it. Before it,
+      # because the point is to know the check is honest before its verdict is
+      # believed. It builds one throwaway package in a temp directory, so
+      # `packages` is never opened and it needs no build of its own.
+      - name: Check the dist freshness check still catches its own failures
+        run: node scripts/dev/check-dist-freshness-selftest.mjs
+
       # Between the typecheck that builds and the suite that consumes. `tsc --build`
       # decides what to rebuild from a content hash, not a timestamp, so it repairs
       # neither a dist edited by hand nor a source newer than its output -- and a

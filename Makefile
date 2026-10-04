@@ -70,7 +70,7 @@ docs: ## Check that documentation links resolve
 research-check: ## Check the research tool still runs
 	node scripts/research/search.mjs --help > /dev/null
 
-check: workflow boundaries typecheck typecheck-tests dist-freshness test docs research-check stale-artifacts no-static-map-set lockfile migrate seed client-test client-ios parity ## Everything CI runs, in CI order
+check: workflow boundaries typecheck typecheck-tests dist-freshness-selftest dist-freshness test docs research-check stale-artifacts no-static-map-set lockfile migrate seed client-test client-ios parity ## Everything CI runs, in CI order
 ci: install check ## The whole CI sequence as one command
 
 lockfile: ## Assert the lockfile covers every workspace package
@@ -95,6 +95,15 @@ no-static-map-set: ## Assert no Map or Set stands in for a Record over static ke
 # that run happens.
 dist-freshness: ## Assert every built package's dist matches a rebuild of its source
 	node scripts/dev/check-dist-freshness.mjs
+
+# Before `dist-freshness`, and not after it: this is the check that the check
+# still catches the two failures it exists for -- a hand-edited `dist` newer
+# than its source, and an output no source compiles to. Both are invisible to
+# comparing timestamps, so a cleanup that reduced the check to mtime would
+# restore them and pass every other gate here. Verified before the check whose
+# verdict it underwrites, in a temp directory, so it never touches `packages`.
+dist-freshness-selftest: ## Assert the dist freshness check still catches a hand-edited dist and an orphan
+	node scripts/dev/check-dist-freshness-selftest.mjs
 
 parity: ## Assert the local targets above run exactly what CI runs
 	node scripts/dev/check-ci-parity.mjs
