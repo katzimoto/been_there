@@ -489,5 +489,15 @@ describe('committed work across a process restart', () => {
     child.signal('SIGTERM');
     await child.expect('STOPPED');
     expect(await stopped).toBe(0);
-  }, 60_000);
+    // 120 seconds, not 60, and the reason is the machine rather than the test.
+    // This one starts a real service in a child process, waits for it to bind and
+    // report itself serving, then SIGTERMs it and waits for the exit code. It
+    // takes about two and a half seconds here and timed out at sixty on the
+    // GitHub runner, where a fixed wall clock is being shared by the whole suite.
+    //
+    // Raising it is not making a hang pass: a child that never reported READY,
+    // or never exited, still fails here — just with enough room to be the
+    // process-scheduling problem it actually was rather than a timeout that says
+    // nothing about which of the two happened.
+  }, 120_000);
 });
