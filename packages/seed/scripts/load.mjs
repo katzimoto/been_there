@@ -200,7 +200,7 @@ function requireBuilt() {
 function datasetIds(dataset) {
   const names = [];
   for (const person of dataset.users) {
-    names.push(person.userId, person.verificationId);
+    names.push(person.userId, person.verificationId, `photo-${person.userId}-primary`);
   }
   for (const attempt of dataset.attempts) {
     names.push(attempt.verificationId);

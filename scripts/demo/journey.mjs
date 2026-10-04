@@ -423,7 +423,9 @@ function report() {
   say('   account cannot hold a conversation and the block would close nothing. The');
   say('   deviation is printed inside the step.');
   say('5. No UI is started by this walk. It exercises the server and the rules it');
-  say('   enforces, driven as a client would drive it. A web client exists and is the');
-  say('   way to look at this rather than read it: node web/server.mjs, then');
-  say('   http://127.0.0.1:5173. It is not started here, and there is no iOS app.');
+  say('   enforces, driven as a client would drive it. Two clients exist and both are');
+  say('   the way to look at this rather than read it: node web/server.mjs, then');
+  say('   http://127.0.0.1:5173, and the iOS app over client/BeenThereIos —');
+  say('   docs/run-ios.md has the build, the simulator run and the physical phone.');
+  say('   Neither is started here. The iOS app talks to this service, not to itself.')
 }
