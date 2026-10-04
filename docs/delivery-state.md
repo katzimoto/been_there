@@ -1,7 +1,10 @@
 # Where the v0.1 build stands
 
-> Written 2026-09-25, against commit `d668ab3`. A map of what exists, what is
-> proven, and what is decided but not built. Updated as the delivery proceeds.
+> First written 2026-09-25. A map of what exists, what is proven, and what is
+> decided but not built, updated as the delivery proceeds. Every count and every
+> named module below has been re-checked against the code at `29564dd`; where an
+> earlier version of this file claimed something that is no longer true, the
+> correction says so rather than quietly replacing it.
 
 ## The MVP chain, end to end
 
@@ -16,7 +19,7 @@ Where each link stands:
 
 | Link | State | Proven by |
 |---|---|---|
-| Persistence | **built** | 8 stores, 131 tests against real Postgres |
+| Persistence | **built** | 10 stores composed in `compose.ts`, 159 tests against real Postgres |
 | HTTP service | **built** | real server, real HTTP, real database |
 | Verified identity | **built** | identity machine; a provider result below the floor does not grant `verified` |
 | Profile & preferences | **built** | four route modules — body, photos, preferences and the legacy surface — all funnelling writes through one `saveProfile` |
@@ -24,7 +27,7 @@ Where each link stands:
 | Like → match | **built** | reciprocal like creates exactly one match |
 | Chat | **built** | through the communication gate; refusal is symmetric |
 | Block & report | **built** | a report after an unmatch works — evidence is retained independently |
-| Risk detection | **wired, but the metric cannot move** | routes now emit observations and `createServiceSafety` feeds the risk store — but every detector is `corroboration_only` against a `0.5` gate, so **nothing escalates a subject on its own**. `safety.detected_before_first_report` is structurally stuck, not merely unwired |
+| Risk detection | **wired; the metric cannot move** | routes now emit observations and `createServiceSafety` feeds the risk store, and `replaySignals` rebuilds a ledger that survives a restart — but no detector reaches `high`/`critical` without depending on a report, so **`safety.detected_before_first_report` is structurally unmeasurable**, not merely unwired. See below |
 | Moderation | **built** | a decision with no named human, or by an automated actor, is refused |
 | Enforcement | **built** | restrictions cannot strip `report` or `block` |
 
@@ -34,13 +37,28 @@ around* it — onboarding, profiles, the moderator's view — not in the safety 
 ### Why the safety metric is stuck, and why that may be correct
 
 Every detector in `packages/trust-safety/src/detectors.ts` is
-`corroboration_only`, and the escalation gate is `0.5` (`ESCALATION_GATE`, `escalation.ts`). The arithmetic: no single
-detector carries a subject from `normal` past `elevated`. Only
-`interaction.unmatch_report` (score `0.6`, `high` reliability) can, and it
-requires `moderation.report_pairing` — which is emitted **only when
-`RISK_PAIRING_SECRET` is set**. The repository ships no value for it.
+`corroboration_only`, and the escalation gate is `0.5` (`ESCALATION_GATE`,
+`escalation.ts`). Computed through the policy layer rather than asserted —
+`highestReachableFromNormal` grants every `corroboration_only` detector two
+independent corroborating detectors and repeats at their cap — the highest any
+detector reaches from `normal` is `elevated`, except
+`interaction.unmatch_report`, which reaches `high` (`0.6 × 1.25 × 1.15 = 0.8625`
+against the `0.7` high gate).
 
-So the wiring can be perfect and the metric still read zero, forever.
+**The repository ships a value for `RISK_PAIRING_SECRET`, and setting it does
+not make this metric move.** `Makefile:37` defaults it to
+`been_there_local_pairing_only` and exports it, and `.env.example:63` ships the
+same value, so `interaction.unmatch_report` is constructible in every `make`
+workflow. It still cannot be the *first* thing to have raised a subject: the
+metric's numerator is an account whose risk first reached `high` or `critical`
+**before the first report naming it** (`safety-metric.ts`, §3.6), and this
+detector only fires once such a report already exists. That is also why
+`detectionReachability` reports `measurable: false` — it asks whether any
+detector that does *not* depend on reports reaches a counted state, and none
+does.
+
+So the wiring can be perfect and the metric still read zero, forever. The
+reason is the metric's own definition, not a missing secret.
 
 **This may be the correct policy, not a defect.** "Two accounts behaving like
 this is a pattern; one is an anecdote" is the reason every detector is
@@ -64,9 +82,16 @@ Two related gaps are known and not fixed:
   a partial history is therefore visible instead of silent. What is still
   process-local is the observation window behind `createSafetySeam`, not the
   ledger.
-- **`report_against` has no producer**, so the mass-report quarantine in
-  `assessSignal` is unreachable from any detector. The domain logic is built and
-  tested; nothing can reach it.
+- **`report_against` is produced, and is discarded on purpose.** The detector
+  `report.pattern.coordinated_target` emits one such signal per report, with the
+  *reporter* as the actor and the reported account as the subject, fed by the
+  `moderation.report_submitted` reduction. It is never scored: `assessSignal`
+  returns `next: current, discarded: true` before any score is computed, so no
+  number of reports can move the victim's risk state. The signals exist for
+  `corroborate`, which counts their distinct actors; at
+  `MASS_REPORT_CLUSTER_SIZE` distinct reporters the campaign itself becomes a
+  cluster review candidate. The quarantine is therefore reachable from a real
+  detector — and unreachable as a way to escalate the account reported.
 
 
 ## What is decided but not built
@@ -93,13 +118,14 @@ removes the match gate — see
 
 ## The two things nobody should assume are true
 
-**Nothing is gated until the age gate is reachable over HTTP.** `evaluateAgeGate`
-exists and is unit-testable; the account route still accepted an empty body when
-this was written, so an account could be created with no date of birth at all.
-The age gate **is** enforced: `POST /v1/accounts` evaluates it before any write,
-and `npm run demo:journey` step 1 asserts a `422 not_eligible` for an under-18
-date of birth with no row written. (An earlier version of this file said
-otherwise, when the gate existed but no route called it.)
+**The age gate is enforced, and an earlier version of this file said it was
+not.** That claim — "nothing is gated until the age gate is reachable over
+HTTP" — was true once and stopped being true when a route started calling the
+gate. `POST /v1/accounts` evaluates `evaluateAgeGate` before any write: an
+under-18 date of birth returns `422 not_eligible` with no row created, and an
+empty body is refused rather than defaulted. `npm run demo:journey` step 1
+asserts that 422, and the check fires in `accounts/sign-up.ts` before the
+password is even hashed.
 
 **There is a web client; there is no iOS app yet.** `web/` is a working browser
 client against the real service — `node web/server.mjs`, then
@@ -107,10 +133,16 @@ client against the real service — `node web/server.mjs`, then
 block, report and a moderator desk, and it renders service refusals verbatim rather
 than interpreting them.
 
-**No iOS app exists.** `client/BeenThereKit` is the tested safety gate with no
-views. A macOS SwiftUI app *could* be built today — macOS needs no simulator
-runtime — but has not been. So no issue can be *accepted* in the sense of "a person
-did the thing on a phone".
+**There is no iOS app, and there is a macOS one.** `client/BeenThereKit` is the
+tested safety gate. The SwiftUI views now live in a shared target,
+`client/BeenThereViews`, and `client/BeenThereMac` is a macOS app that consumes
+them and compiles — macOS needs no simulator runtime, so it builds and runs on a
+machine with zero runtimes installed. The views are written against a fixed
+iPhone-width frame so the layout survives the move to a phone, which is the
+point of the shared target: the iOS app will consume the same files. (An earlier
+version of this file said no such app had been built.) So no issue can be
+*accepted* in the sense of "a person did the thing on a phone" — but the UI
+layer is no longer hypothetical.
 
 ## What the service now answers about itself
 
@@ -169,8 +201,11 @@ killed leaves nothing behind — asserted against the rows, not a count.
 
 ## What CI proves, and what it does not
 
-Nine steps, parity-checked against `make check` so a green local run and a green
-CI run mean the same thing.
+Thirteen steps, parity-checked against `make check` so a green local run and a
+green CI run mean the same thing: workflow, typecheck, typecheck-tests, test,
+docs, research-check, stale-artifacts, lockfile, migrate, seed, client-test,
+client-ios, parity. (An earlier version of this file said nine. The steps were
+added since; the parity check itself was what failed to notice.)
 
 Two limits worth naming, both learned the hard way:
 
@@ -204,4 +239,7 @@ gaps, establish the running application, **deliver onboarding and discovery**,
 then matching and chat with safety controls, then proactive detection and
 moderation, then quality and readiness.
 
-The first two are done. Onboarding (#34) and profile (#35) are in progress.
+The first two are done, and so is profile (#35) — four route modules funnel every
+write through one `saveProfile`. Onboarding (#34) is in progress: the order is
+now read from the server's own `OnboardingReadiness.Step` walk rather than
+restated client-side, but the moderator's view is still to come.
