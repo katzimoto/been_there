@@ -63,16 +63,12 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      # `set -e` is load-bearing: without it the loop's exit status is the last
-      # `echo`, so a failing package is masked by a later one that compiles.
+      # The test projects are not in the solution graph, so `tsc --build` never
+      # opens them and a test file that does not compile is invisible to the
+      # step above. Seven such errors sat in test projects for a session while
+      # `npm run typecheck` reported zero.
       - name: Typecheck tests
-        run: |
-          set -euo pipefail
-          for pkg in packages/*/test/tsconfig.json; do
-            echo "::group::$pkg"
-            npx tsc -p "$pkg"
-            echo "::endgroup::"
-          done
+        run: node scripts/dev/typecheck-tests.mjs
 
       - name: Test
         run: npm test

@@ -80,8 +80,18 @@ If you want to see the ADR reasoning rather than the summary:
 ### Local runs match CI
 
 `make check` is not a summary of CI, it is CI: `npm ci`'s sibling
-`npm run typecheck`, the per-package test typecheck loop, `npm test`, the
+`npm run typecheck`, `node scripts/dev/typecheck-tests.mjs`, `npm test`, the
 documentation link check and the research-tool check, in the same order.
+
+`typecheck-tests` is a separate step from `typecheck` because `tsc --build`
+walks the *package* project graph and the test projects are not in it: each
+`packages/<pkg>/test/tsconfig.json` is referenced by nothing, so the solution
+build never opens it. Seven type errors sat in test projects for a session
+while `npm run typecheck` reported zero, because the gate being quoted did not
+cover the files being edited. The step is one script called by the Makefile
+target, the CI step and `npm run check`, rather than three copies of the loop —
+and it exits non-zero if it finds no projects at all, since a glob matching
+nothing is a green gate that checks nothing.
 
 That equivalence is asserted rather than assumed. `scripts/dev/check-ci-parity.mjs`
 reads `.github/workflows/ci.yml` and the `Makefile`, compares the *commands*
