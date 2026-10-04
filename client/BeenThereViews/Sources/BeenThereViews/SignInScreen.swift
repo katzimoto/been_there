@@ -154,13 +154,12 @@ public struct SignInScreen: View {
     /// The field itself, not a labelled column.
     ///
     /// A helper returning `some View` erases its concrete type, so the caller
-    /// cannot attach `.autocapitalization` afterwards. `verbatim` is a plain
-    /// `Bool` rather than `UITextContentType` and
-    /// `TextInputAutocapitalization` on purpose: those live in UIKit, and this
-    /// package imports neither UIKit nor AppKit so the same files build for the
-    /// iOS app later. A contact field that autocorrects or capitalises silently
-    /// refuses a valid address, which is a failure the user cannot see the
-    /// cause of — hence on by default.
+    /// cannot attach `.textInputAutocapitalization` afterwards.
+    /// `verbatim` is a plain `Bool` rather than a UIKit-typed constant on
+    /// purpose: those live in UIKit, and this package imports neither UIKit nor
+    /// AppKit so the same files build for the iOS app later. A contact field
+    /// that autocorrects or capitalises silently refuses a valid address, which
+    /// is a failure the user cannot see the cause of — hence on by default.
     private func field(
         _ placeholder: String,
         _ text: Binding<String>,
@@ -170,14 +169,14 @@ public struct SignInScreen: View {
         TextField(placeholder, text: text)
             .textFieldStyle(.plain)
             .font(.system(size: 14, design: monospaced ? .monospaced : .default))
-            // `.autocapitalization` and `.disableAutocorrection` are UIKit-backed
-            // and exist only on iOS. They are applied inside `#if os(iOS)` because
-            // this package must compile for macOS today and for the iOS app later
-            // out of one copy of this file — which is the whole reason the views
-            // are their own package. On macOS the text entry behaviour has no
-            // equivalent to ask for.
+            // `.textInputAutocapitalization` and `.disableAutocorrection` are
+            // UIKit-backed and exist only on iOS. They are applied inside
+            // `#if os(iOS)` because this package compiles for macOS and for the
+            // iOS app out of one copy of this file — which is the whole reason
+            // the views are their own package. On macOS the text entry behaviour
+            // has no equivalent to ask for.
             #if os(iOS)
-            .autocapitalization(.never)
+            .textInputAutocapitalization(.never)
             .disableAutocorrection(verbatim)
             #endif
             .padding(Space.sm)
