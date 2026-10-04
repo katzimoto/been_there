@@ -95,6 +95,8 @@ import {
   createModerationStore,
   createTransaction,
 } from '@been-there/database';
+import { PgAccountPlatformStore } from '@been-there/database';
+import { hashPassword, normalizeContact } from '@been-there/platform';
 import { attemptRowOf, caseRowOf, reportRowOf } from '@been-there/service';
 import { loadDevelopmentDataset } from '../../../scripts/seed/development-dataset.mjs';
 import { verifyDataset } from '../../../scripts/seed/dataset-invariants.mjs';
@@ -108,7 +110,7 @@ const REPO_ROOT = resolve(HERE, '..', '..', '..');
  * Named so a missing build says which package, rather than surfacing as a module
  * resolution failure pointing into node_modules.
  */
-const ALSO_REQUIRED = ['database', 'service'];
+const ALSO_REQUIRED = ['database', 'platform', 'service'];
 
 /**
  * One fixed namespace, so `u-avery` is the same uuid on every machine and every
@@ -135,6 +137,15 @@ const accountIdOf = (userId) => seedUuid(`account:${userId}`);
 
 /** The instant every seeded timestamp the dataset does not itself date comes from. */
 const EPOCH = new Date(SEED_EPOCH);
+
+/**
+ * The password every seeded person has, and the only one this repository ever
+ * hands out. Printed by `make seed` so the sign-in screen has something to type.
+ * A development credential for a local database of fictional people, and the
+ * reason it is named here rather than buried in a fixture is that it is a
+ * published value: anyone reading the repository already has it.
+ */
+const SEED_PASSWORD = 'been-there-demo-42';
 
 // ---------------------------------------------------------------- the target --
 
@@ -413,11 +424,36 @@ const units = [
     name: 'accounts',
     run: async (tx, dataset, ids) => {
       const users = new PostgresUserStore();
+      const accounts = new PgAccountPlatformStore();
       const identity = new PostgresIdentityStore();
       const interaction = new PostgresInteractionStore();
       for (const person of dataset.users) {
         const userId = ids.uuid(person.userId);
         await users.create({ userId, accountId: accountIdOf(person.userId), createdAt: EPOCH }, tx);
+        // A credential, so the person is *reachable*. Without one the eight
+        // accounts exist and none can be signed into, which makes the dataset
+        // useless for the thing it exists to demonstrate: the app, the web
+        // client and a person testing either of them all begin at a sign-in
+        // screen. The password is hashed by the platform's own `hashPassword`
+        // and the contact is normalised by its own `normalizeContact`, so a
+        // seeded credential is verified by the same code that verifies a real
+        // one and the seeder cannot invent a second hashing scheme.
+        const contact = normalizeContact('email', `${person.userId}@been-there.test`);
+        if (!contact.ok) {
+          throw new Error(`seed contact for ${person.userId} was refused: ${contact.error.code}`);
+        }
+        await accounts.insertCredential(
+          {
+            userId,
+            contactKind: contact.value.kind,
+            contactIdentifier: contact.value.identifier,
+            contactVerified: true,
+            passwordHash: await hashPassword(SEED_PASSWORD),
+            createdAt: EPOCH,
+            updatedAt: EPOCH,
+          },
+          tx,
+        );
         await identity.insert(
           {
             userId,
@@ -818,6 +854,14 @@ function summarise(dataset) {
     "  Not loaded: the risk signal ledger, and the platform audit log's clearance gate, which has " +
       'no column to hold it. Both are named at the top of load.mjs.',
   );
+  // The credentials, printed, because a sign-in screen with nothing to type is a
+  // dataset nobody can use. Every seeded person signs in with the same password
+  // and their own address, and the list is here rather than in a document so it
+  // cannot drift from what was actually written.
+  console.log('  Sign in as any of these, with the password shown:');
+  for (const person of dataset.users) {
+    console.log(`    ${`${person.userId}@been-there.test`.padEnd(34)} ${SEED_PASSWORD}`);
+  }
   console.log('  `make seed-print` prints the dataset; `make audit-log` shows who may read its log.');
 }
 
