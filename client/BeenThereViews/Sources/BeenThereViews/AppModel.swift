@@ -109,8 +109,25 @@ public final class AppModel {
     /// `AppModel+Service.swift` — and it is still unwritable from outside this
     /// module, which is where "a view could invent a server answer" would bite.
     public internal(set) var tab: Tab = .signIn
+    /// Whether the member has picked a tab themselves.
+    ///
+    /// Set by `go(to:)`, cleared by `connect()` and `signOut()`. It exists for
+    /// one bug: `refresh()` used to decide the landing tab on *every* load, so a
+    /// member who tapped Matches while a load was still in flight was moved back
+    /// by that load finishing — the tab became tappable at the moment `session`
+    /// was set, which is before any of the four GETs have answered. The same
+    /// race made pull-to-refresh throw anyone who is not yet discoverable back to
+    /// Setup.
+    ///
+    /// So the landing tab is a property of arriving, not of loading: it applies to
+    /// sign-in, sign-up and a fresh connect, and to nothing the member triggered.
+    /// Module-internal rather than `private(set)`: `connect()` lives in an extension in
+    /// another file and `private` is scoped to the file.
+    public internal(set) var hasChosenTab = false
+
     public func go(to tab: Tab) {
         self.tab = tab
+        self.hasChosenTab = true
     }
     public internal(set) var session: IssuedSession?
     public private(set) var account: AccountView?
@@ -297,6 +314,9 @@ public final class AppModel {
         session = nil
         password = ""
         await resetProjections()
+        // Signing out ends this member's session, so the next one has not chosen a
+        // tab yet: the landing rule applies to it as it does to a first arrival.
+        hasChosenTab = false
         tab = .signIn
     }
 
@@ -430,7 +450,12 @@ public final class AppModel {
                 matchesFailure = .transport(String(describing: error))
             }
 
-            tab = AppModel.landingTab(account: loadedAccount, onboarding: self.onboarding)
+            // Only when the member has not already chosen. A load they asked for —
+            // pull to refresh, a like, the checklist's refresh — updates what is on
+            // screen and must not move them off the tab they are reading.
+            if !hasChosenTab {
+                tab = AppModel.landingTab(account: loadedAccount, onboarding: self.onboarding)
+            }
         } catch let error as APIError {
             loadFailure = error
         } catch {

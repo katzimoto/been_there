@@ -135,6 +135,24 @@ function seedUuid(name) {
 /** The account id a user holds: derived from the same namespace, so it is stable. */
 const accountIdOf = (userId) => seedUuid(`account:${userId}`);
 
+/**
+ * The distance a person's coarse band stands for, in kilometres.
+ *
+ * The bands are the service's own vocabulary (`lt_5_km` and so on), so this maps
+ * each to the low end of the distance it names. It is a fixture's reading of a
+ * band, not a rule: the service derives distance from two anchors when it has
+ * them, and this dataset has one coarse band per person.
+ */
+function distanceKmFor(band) {
+  switch (band) {
+    case 'lt_5_km': return 5;
+    case '5_25_km': return 25;
+    case '25_50_km': return 50;
+    case '50_100_km': return 100;
+    default: return 200;
+  }
+}
+
 /** The instant every seeded timestamp the dataset does not itself date comes from. */
 const EPOCH = new Date(SEED_EPOCH);
 
@@ -487,6 +505,33 @@ const units = [
             termsAcceptedAt: EPOCH,
             coarseArea: null,
             updatedAt: EPOCH,
+          },
+          tx,
+        );
+        // Preferences, so the checklist's last step is honestly done.
+        //
+        // The readiness projection asks whether `preferencesSet` is true, which it
+        // answers from *any* expressed dimension. With none written, every seeded
+        // member's checklist ended on "Preferences: Not set", the account was not
+        // discoverable, and the app did the right thing and kept browsing withheld
+        // — against a dataset that had simply never been asked. What is written
+        // here is the band the profile already carries and a plain distance, both
+        // per person, so the seeded population can actually see each other.
+        await interaction.upsertPreferences(
+          userId,
+          {
+            // All five keys, present, with `null` for the two this dataset does
+            // not express. The read refuses a *partial* set — "a stored
+            // preference set is partial" is the error it raises — because a
+            // half-written row cannot say which dimensions were never answered,
+            // and an absent key reads the same as an unexpressed one.
+            ageRange: { min: 28, max: 45 },
+            maxDistanceKm: distanceKmFor(person.profileContent.location),
+            seekingGenders: person.profileContent.genderIdentities.includes('woman')
+              ? ['woman', 'non_binary']
+              : ['woman', 'man', 'non_binary'],
+            openTo: null,
+            locationPrecision: null,
           },
           tx,
         );

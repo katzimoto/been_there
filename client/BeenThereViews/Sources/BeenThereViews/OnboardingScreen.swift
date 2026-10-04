@@ -53,12 +53,23 @@ public struct OnboardingScreen: View {
                         }
                         if let title = model.nextActionTitle {
                             Text(title)
-                                .font(Typeface.body)
+                                .font(ScaledTypeface.body)
                                 .foregroundStyle(palette.ink)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
+                // The chip is the server's own name for the step and is useless
+                // spoken alone, so the card is announced as a label and a value:
+                // the step the service named, then what the client tells the
+                // member to do about it.
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Do this next")
+                .accessibilityValue(
+                    [spokenWords(step.rawValue), model.nextActionTitle]
+                        .compactMap { $0 }
+                        .joined(separator: ". ")
+                )
             }
 
             if let waiting = model.waitingOn {
@@ -66,18 +77,21 @@ public struct OnboardingScreen: View {
                     VStack(alignment: .leading, spacing: Space.sm) {
                         HStack(spacing: Space.sm) {
                             Image(systemName: "hourglass")
-                                .font(.system(size: 15, weight: .semibold))
+                                .font(ScaledTypeface.symbol)
                                 .foregroundStyle(palette.attention)
                             Text("We are checking")
-                                .font(Typeface.headline)
+                                .font(ScaledTypeface.headline)
                                 .foregroundStyle(palette.ink)
                         }
                         Text(waitingExplanation(waiting))
-                            .font(Typeface.callout)
+                            .font(ScaledTypeface.callout)
                             .foregroundStyle(palette.inkSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("We are checking")
+                .accessibilityValue(waitingExplanation(waiting))
             }
 
             checklist
@@ -86,25 +100,29 @@ public struct OnboardingScreen: View {
                 VStack(alignment: .leading, spacing: Space.sm) {
                     SectionHeader("What the service says")
                     Text(model.completionSummary)
-                        .font(Typeface.body)
+                        .font(ScaledTypeface.body)
                         .foregroundStyle(palette.ink)
                     Text(
                         model.isDiscoverable
                             ? "This account is discoverable."
                             : "This account is not discoverable yet."
                     )
-                    .font(Typeface.callout)
+                    .font(ScaledTypeface.callout)
                     .foregroundStyle(palette.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                    if let band = readiness.ageBand {
-                        Divider().overlay(palette.hairline)
-                        FactRow("Age band", band)
-                    }
                     Divider().overlay(palette.hairline)
-                    FactRow("Identity", readiness.identity.state.rawValue)
-                    FactRow("Profile", readiness.profileState.rawValue)
-                    FactRow("Preferences", readiness.preferencesSet ? "Set" : "Not set")
+                    VStack(alignment: .leading, spacing: Space.sm) {
+                        ForEach(publishedFacts, id: \.label) { fact in
+                            FactRow(fact.label, fact.value)
+                        }
+                    }
+                    // Four rows are four swipes and four separate announcements
+                    // for one block of published facts, so the block is one
+                    // element spoken from the same list it draws.
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("What the service publishes")
+                    .accessibilityValue(spokenFacts(publishedFacts))
                 }
             }
 
@@ -115,9 +133,10 @@ public struct OnboardingScreen: View {
                     VStack(alignment: .leading, spacing: Space.sm) {
                         HStack(spacing: Space.sm) {
                             Image(systemName: "exclamationmark.triangle.fill")
+                                .font(ScaledTypeface.symbol)
                                 .foregroundStyle(palette.restricted)
                             Text("The client and the service disagree")
-                                .font(Typeface.headline)
+                                .font(ScaledTypeface.headline)
                                 .foregroundStyle(palette.ink)
                         }
                         Text(
@@ -125,11 +144,17 @@ public struct OnboardingScreen: View {
                                 + "gate says it is not. Discovery is withheld rather than offered "
                                 + "and refused."
                         )
-                        .font(Typeface.callout)
+                        .font(ScaledTypeface.callout)
                         .foregroundStyle(palette.inkSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("The client and the service disagree")
+                .accessibilityValue(
+                    "The service says this account is discoverable, and the client gate "
+                        + "says it is not. Discovery is withheld rather than offered and refused."
+                )
             }
 
             PrimaryButton("Refresh from the service", action: onRefresh)
@@ -148,20 +173,51 @@ public struct OnboardingScreen: View {
                 ProgressRing(fraction: fraction, tint: palette.accent, size: 56)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(done) of \(model.rows.count) done")
-                        .font(Typeface.headline)
+                        .font(ScaledTypeface.headline)
                         .foregroundStyle(palette.ink)
                     Text(
                         done == model.rows.count
                             ? "Every step the service lists is complete."
                             : "The service lists what is still outstanding, in its own order."
                     )
-                    .font(Typeface.callout)
+                    .font(ScaledTypeface.callout)
                     .foregroundStyle(palette.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
             }
         }
+        // `ProgressRing` carries a value and no name, so on its own it is
+        // announced as "38 percent complete" with nothing to attach it to. The
+        // ring and the sentence beside it are one fact, so they are one element
+        // with a name, and the value is the count the server's `outstanding`
+        // list produces rather than the ring's own percentage.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Setup progress")
+        .accessibilityValue("\(done) of \(model.rows.count) steps complete")
+        .accessibilityHint(
+            done == model.rows.count
+                ? "Every step the service lists is complete."
+                : "The service lists what is still outstanding, in its own order."
+        )
+    }
+
+    /// The facts this screen read, as the rows it draws and as the sentence it
+    /// speaks.
+    ///
+    /// One list rather than four `FactRow` calls and a fourth copy of the same
+    /// strings: a screen that draws a fact and does not speak it is a screen
+    /// that is shorter for the member using VoiceOver than for the member
+    /// looking at it.
+    private var publishedFacts: [(label: String, value: String)] {
+        var facts: [(label: String, value: String)] = []
+        if let band = readiness.ageBand {
+            facts.append((label: "Age band", value: band))
+        }
+        facts.append((label: "Identity", value: readiness.identity.state.rawValue))
+        facts.append((label: "Profile", value: readiness.profileState.rawValue))
+        facts.append((label: "Preferences", value: readiness.preferencesSet ? "Set" : "Not set"))
+        return facts
     }
 
     private var checklist: some View {
@@ -171,21 +227,39 @@ public struct OnboardingScreen: View {
                 ForEach(model.rows) { row in
                     HStack(alignment: .center, spacing: Space.sm) {
                         Image(systemName: row.isComplete ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 19))
-                            .foregroundStyle(row.isComplete ? palette.granted : palette.inkTertiary)
+                            .font(ScaledTypeface.symbolStrong)
+                            .foregroundStyle(row.isComplete ? palette.granted : palette.inkSecondary)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(row.title)
-                                .font(row.isNext ? Typeface.headline : Typeface.body)
+                                .font(row.isNext ? ScaledTypeface.headline : ScaledTypeface.body)
                                 .foregroundStyle(palette.ink)
-                            Text(row.step.rawValue)
-                                .font(Typeface.mono)
-                                .foregroundStyle(palette.inkTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(spokenWords(row.step.rawValue))
+                                .font(ScaledTypeface.mono)
+                                .foregroundStyle(palette.inkSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                         Spacer(minLength: Space.sm)
                         if row.isNext {
                             TagChip("Next", systemImage: "arrow.right", tint: palette.accent)
                         }
                     }
+                    // A row is a tick, a sentence and a step name: three elements
+                    // saying one thing about one step, and the monospaced step
+                    // name is the least useful of the three to hear. So the row
+                    // is one element whose value is the state the service
+                    // published — which is the fact the tick was drawing — and
+                    // whose hint is the step's own name, so a member who cannot
+                    // see the row still hears which step it is and whether it is
+                    // outstanding.
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(row.title)
+                    .accessibilityValue(
+                        row.isComplete
+                            ? "Complete"
+                            : row.isNext ? "Outstanding. This is the next step." : "Outstanding"
+                    )
+                    .accessibilityHint("The service calls this step \(spokenWords(row.step.rawValue)).")
                 }
             }
         }

@@ -162,17 +162,21 @@ public struct StandingScreen: View {
                     VStack(alignment: .leading, spacing: Space.sm) {
                         HStack(spacing: Space.sm) {
                             Image(systemName: "exclamationmark.triangle.fill")
+                                .font(ScaledTypeface.symbol)
                                 .foregroundStyle(palette.restricted)
                             Text("The service's own numbers disagree")
-                                .font(Typeface.headline)
+                                .font(ScaledTypeface.headline)
                                 .foregroundStyle(palette.ink)
                         }
                         Text(note)
-                            .font(Typeface.callout)
+                            .font(ScaledTypeface.callout)
                             .foregroundStyle(palette.inkSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("The service's own numbers disagree")
+                .accessibilityValue(note)
             }
 
             capabilityCards
@@ -180,12 +184,16 @@ public struct StandingScreen: View {
 
             if let title = model.primaryActionTitle {
                 PrimaryButton(title, isEnabled: false) {}
+                    // The button is drawn dimmed and does nothing, which
+                    // VoiceOver already reports as "dimmed"; saying why costs one
+                    // phrase and saves a member the tap that would prove it.
+                    .accessibilityHint("Not available in this build.")
                 Text(
                     "Deletion is not wired up in this build. The capability the service granted "
                         + "is listed under \"What still works\"."
                 )
-                .font(Typeface.caption)
-                .foregroundStyle(palette.inkTertiary)
+                .font(ScaledTypeface.caption)
+                .foregroundStyle(palette.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -193,24 +201,46 @@ public struct StandingScreen: View {
         }
     }
 
+    /// What the projection published about this account.
+    ///
+    /// The summary sentence and the facts below it are one block of published
+    /// state, and the facts are two elements per row when read separately. So
+    /// the rows are drawn from one list and spoken from that same list: a screen
+    /// that draws a fact and does not say it is shorter for the member using
+    /// VoiceOver than for the member looking at it.
     private var facts: some View {
         Card {
             VStack(alignment: .leading, spacing: Space.sm) {
                 Text(model.summary.body)
-                    .font(Typeface.body)
+                    .font(ScaledTypeface.body)
                     .foregroundStyle(palette.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Divider().overlay(palette.hairline)
-                FactRow("Account state", model.state.rawValue)
-                FactRow("Visible in the product", model.standing.visibleInProduct ? "Yes" : "No")
-                if let identityState {
-                    FactRow("Identity", identityState.rawValue)
+                VStack(alignment: .leading, spacing: Space.sm) {
+                    ForEach(publishedFacts, id: \.label) { fact in
+                        FactRow(fact.label, fact.value)
+                    }
                 }
-                if let identityGeneration {
-                    FactRow("Identity generation", "\(identityGeneration)")
-                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("What the service publishes about this account")
+                .accessibilityValue(spokenFacts(publishedFacts))
             }
         }
+    }
+
+    /// The same facts, in the order they are drawn.
+    private var publishedFacts: [(label: String, value: String)] {
+        var facts: [(label: String, value: String)] = [
+            (label: "Account state", value: model.state.rawValue),
+            (label: "Visible in the product", value: model.standing.visibleInProduct ? "Yes" : "No")
+        ]
+        if let identityState {
+            facts.append((label: "Identity", value: identityState.rawValue))
+        }
+        if let identityGeneration {
+            facts.append((label: "Identity generation", value: "\(identityGeneration)"))
+        }
+        return facts
     }
 
     /// The three capability lists, and nothing derived from them.
@@ -221,22 +251,30 @@ public struct StandingScreen: View {
                     SectionHeader("What was removed")
                     if model.removed.isEmpty {
                         Text("Nothing was removed from your account.")
-                            .font(Typeface.callout)
+                            .font(ScaledTypeface.callout)
                             .foregroundStyle(palette.inkSecondary)
                     } else {
                         Text("\(model.removed.count) the service removed.")
-                            .font(Typeface.callout)
+                            .font(ScaledTypeface.callout)
                             .foregroundStyle(palette.inkSecondary)
                         FlowChips(model.removed, tint: palette.restricted)
                     }
                 }
             }
+            // A list of capability names is the whole of what the projection
+            // published, and heard one chip at a time it is six swipes through
+            // six underscores. So the card is one element, and its value is the
+            // same list with the underscores read as spaces — the names are
+            // unchanged, only how they sound.
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("What was removed")
+            .accessibilityValue(removedSentence)
 
             Card {
                 VStack(alignment: .leading, spacing: Space.sm) {
                     SectionHeader("What still works")
                     Text("\(model.retained.count) the service still grants.")
-                        .font(Typeface.callout)
+                        .font(ScaledTypeface.callout)
                         .foregroundStyle(palette.inkSecondary)
                     FlowChips(model.retained, tint: palette.granted)
                     Divider().overlay(palette.hairline)
@@ -245,22 +283,57 @@ public struct StandingScreen: View {
                             ? "Reporting and blocking survive every restriction."
                             : "The service is not granting reporting or blocking on this account."
                     )
-                    .font(Typeface.callout)
+                    .font(ScaledTypeface.callout)
                     .foregroundStyle(palette.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("What still works")
+            .accessibilityValue(retainedSentence)
 
             Card {
                 VStack(alignment: .leading, spacing: Space.sm) {
                     SectionHeader("Unrestricted baseline")
                     Text("\(model.baseline.count) an account with no restriction holds.")
-                        .font(Typeface.callout)
+                        .font(ScaledTypeface.callout)
                         .foregroundStyle(palette.inkSecondary)
                     FlowChips(model.baseline, tint: palette.inkSecondary)
                 }
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Unrestricted baseline")
+            .accessibilityValue(baselineSentence)
         }
+    }
+
+    /// The three capability lists as sentences.
+    ///
+    /// Each is the count the screen already draws, followed by the names the
+    /// server published in the order it published them. Nothing here is derived
+    /// from a capability — a client that decided what a name *means* would be
+    /// describing a grant the service never described.
+    private var removedSentence: String {
+        model.removed.isEmpty
+            ? "Nothing was removed from your account."
+            : "\(model.removed.count) the service removed: \(spokenList(model.removed))."
+    }
+
+    private var retainedSentence: String {
+        let safety = model.keepsSafetyControls
+            ? "Reporting and blocking survive every restriction."
+            : "The service is not granting reporting or blocking on this account."
+        return "\(model.retained.count) the service still grants: "
+            + "\(spokenList(model.retained)). \(safety)"
+    }
+
+    private var baselineSentence: String {
+        "\(model.baseline.count) an account with no restriction holds: "
+            + "\(spokenList(model.baseline))."
+    }
+
+    private func spokenList(_ values: [String]) -> String {
+        values.map(spokenWords).joined(separator: ", ")
     }
 
     private var decisionCard: some View {
@@ -269,11 +342,19 @@ public struct StandingScreen: View {
                 SectionHeader("Which case decided this")
                 ValueChip(model.caseLine, tint: model.hasDecision ? palette.restricted : palette.inkSecondary)
                 Text(model.referenceExplanation)
-                    .font(Typeface.callout)
+                    .font(ScaledTypeface.callout)
                     .foregroundStyle(palette.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+        // The chip is an identifier with nothing attached to it, so it is the
+        // card's value rather than its label: a case number announced on its own
+        // is a number, and the sentence explaining what to do with it is what
+        // the member is actually owed.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Which case decided this")
+        .accessibilityValue(model.caseReference ?? model.caseLine)
+        .accessibilityHint(model.referenceExplanation)
     }
 }
 
@@ -315,7 +396,7 @@ struct FlowChips: View {
         var row: [String] = []
         var used: CGFloat = 0
         for value in values {
-            let width = FlowChips.width(of: value) + (Space.sm * 2)
+            let width = FlowChips.width(of: value, size: chipSize) + (Space.sm * 2)
             if !row.isEmpty, used + width > limit {
                 rows.append(row)
                 row = []
@@ -328,6 +409,16 @@ struct FlowChips: View {
         return rows
     }
 
+    /// The size the chips are drawn at, which is the caption size the member
+    /// has set.
+    ///
+    /// `ValueChip` still draws `Typeface.mono`, a fixed 12pt, so this reads 12
+    /// today and the layout is unchanged. It is resolved from the text size
+    /// rather than written into the measurement below, because the one thing a
+    /// wrapping row must never do is lay itself out against a font size other
+    /// than the one it is about to draw.
+    @ScaledMetric(relativeTo: .caption) private var chipSize: CGFloat = 12
+
     /// Measured with the font that actually draws the chip, so a chip never
     /// clips its own text. `ValueChip` draws `.system(size: 12, weight: .medium,
     /// design: .monospaced)`; CoreText derives the same monospaced system font
@@ -337,11 +428,15 @@ struct FlowChips: View {
     /// UIKit nor AppKit, and CoreText is the one text engine that compiles for
     /// both platforms from one source file. Measured 163.195 on macOS against
     /// the AppKit call's 163.195 before the swap.
-    private static func width(of text: String) -> CGFloat {
-        let system = CTFontCreateUIFontForLanguage(.system, 12, nil)!
+    private static func width(of text: String, size: CGFloat) -> CGFloat {
+        // A font that cannot be created means this measurement is wrong, and a
+        // width that under-reports is worse than one that over-reports: it puts
+        // two chips on a line that cannot hold them. An infinite width puts each
+        // chip on its own line, which is wrong but never overlaps.
+        guard let system = CTFontCreateUIFontForLanguage(.system, size, nil) else { return .infinity }
         let monospaced = CTFontCreateCopyWithSymbolicTraits(
             system,
-            12,
+            size,
             nil,
             CTFontSymbolicTraits.traitMonoSpace,
             CTFontSymbolicTraits.traitMonoSpace

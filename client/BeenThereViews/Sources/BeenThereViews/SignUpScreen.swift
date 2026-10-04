@@ -45,17 +45,24 @@ public struct SignUpScreen: View {
                     VStack(alignment: .leading, spacing: Space.sm) {
                         HStack(spacing: Space.sm) {
                             Image(systemName: "person.badge.shield.checkmark")
+                                .font(ScaledTypeface.symbol)
                                 .foregroundStyle(palette.accent)
                             Text(notice.title)
-                                .font(Typeface.headline)
+                                .font(ScaledTypeface.headline)
                                 .foregroundStyle(palette.ink)
                         }
                         Text(notice.body)
-                            .font(Typeface.callout)
+                            .font(ScaledTypeface.callout)
                             .foregroundStyle(palette.inkSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                // One sentence from the service, announced as one sentence: a
+                // heading element followed by a paragraph element makes a member
+                // swipe twice and reassemble the notice in their head.
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(notice.title)
+                .accessibilityValue(notice.body)
             }
 
             credentials
@@ -66,14 +73,20 @@ public struct SignUpScreen: View {
                 Card {
                     HStack(spacing: Space.sm) {
                         Image(systemName: "checkmark.seal.fill")
+                            .font(ScaledTypeface.symbol)
                             .foregroundStyle(palette.granted)
                         Text("You're in the \(band) band. Nobody is shown your date of birth.")
-                            .font(Typeface.callout)
+                            .font(ScaledTypeface.callout)
                             .foregroundStyle(palette.ink)
                             .fixedSize(horizontal: false, vertical: true)
                         Spacer(minLength: 0)
                     }
                 }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Age band")
+                .accessibilityValue(
+                    "You're in the \(band) band. Nobody is shown your date of birth."
+                )
             }
 
             if let failure = model.authFailure {
@@ -94,10 +107,13 @@ public struct SignUpScreen: View {
                 LabelledField("Email or phone") {
                     TextField("you@example.com", text: $model.contact)
                         .textFieldStyle(.plain)
-                        .font(Typeface.body)
+                        .font(ScaledTypeface.body)
                         .foregroundStyle(palette.ink)
                         .autocorrectionDisabled()
                         .textContentType(.emailAddress)
+                        .accessibilityLabel("Email or phone")
+                        .accessibilityHint("The address or number you signed up with.")
+                        .dynamicTypeSize(...DynamicTypeSize.accessibility3)
                         #if os(iOS)
                         .textInputAutocapitalization(.never)
                         .keyboardType(.emailAddress)
@@ -106,8 +122,11 @@ public struct SignUpScreen: View {
                 LabelledField("Password") {
                     SecureField("At least 10 characters", text: $model.password)
                         .textFieldStyle(.plain)
+                        .font(ScaledTypeface.body)
                         .foregroundStyle(palette.ink)
                         .textContentType(.newPassword)
+                        .accessibilityLabel("Password")
+                        .dynamicTypeSize(...DynamicTypeSize.accessibility3)
                 }
                 // A count, not a strength score. The service owns what a password
                 // may be — including the breached-password list this client knows
@@ -115,8 +134,8 @@ public struct SignUpScreen: View {
                 // and a member could game. This says only how much they typed.
                 HStack {
                     Text("\(model.password.count) characters")
-                        .font(Typeface.caption)
-                        .foregroundStyle(palette.inkTertiary)
+                        .font(ScaledTypeface.caption)
+                        .foregroundStyle(palette.inkSecondary)
                     Spacer(minLength: 0)
                 }
             }
@@ -140,9 +159,32 @@ public struct SignUpScreen: View {
                 .datePickerStyle(.compact)
                 .labelsHidden()
                 .tint(palette.accent)
+                // `labelsHidden()` takes the label out of the accessibility tree
+                // with it on this control, so the name is put back explicitly:
+                // without it the picker announces as an unlabelled date field.
+                .accessibilityLabel("Date of birth")
+                .accessibilityHint("The service works out your age band from this date.")
+                // A compact date picker is drawn at a fixed height by the
+                // platform, so its own text is held at the first accessibility
+                // size — past that it clips rather than grows. The written-out
+                // date below it is not held, so the member still reads their date
+                // at whatever size they set.
+                .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+                // The compact picker is drawn by the platform at about 32pt, and
+                // this brings the row it sits in up to the 44pt this app uses
+                // everywhere else, so it is not crowded between the heading and
+                // the date below it. What the frame does *not* do is extend the
+                // picker's own control: the pad is layout, not hit area.
+                // Reaching 44pt for this control needs the style itself —
+                // `.graphical` in a sheet, or a wrapper the design system owns —
+                // and neither is a change this screen may make, so it is
+                // reported rather than faked here.
+                .frame(minHeight: minimumTapTarget, alignment: .leading)
                 Text(model.signUpDateOfBirth.formatted(.dateTime.year().month(.wide).day()))
-                    .font(Typeface.body)
+                    .font(ScaledTypeface.body)
                     .foregroundStyle(palette.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel("Date of birth, as it will be sent")
             }
         }
     }
@@ -157,18 +199,27 @@ public struct SignUpScreen: View {
         Card {
             HStack(alignment: .top, spacing: Space.sm) {
                 Image(systemName: "doc.text")
-                    .foregroundStyle(palette.inkTertiary)
+                    .font(ScaledTypeface.symbol)
+                    .foregroundStyle(palette.inkSecondary)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Terms version \(model.termsVersion)")
-                        .font(Typeface.mono)
+                        .font(ScaledTypeface.mono)
                         .foregroundStyle(palette.ink)
                     Text("The service tells us which version it accepts, and refuses anything else.")
-                        .font(Typeface.caption)
-                        .foregroundStyle(palette.inkTertiary)
+                        .font(ScaledTypeface.caption)
+                        .foregroundStyle(palette.inkSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
             }
         }
+        // The version and the sentence about it are one published fact, so they
+        // are announced as one: a version read on its own tells a member nothing
+        // about what to do with it.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Terms version \(model.termsVersion)")
+        .accessibilityValue(
+            "The service tells us which version it accepts, and refuses anything else."
+        )
     }
 }

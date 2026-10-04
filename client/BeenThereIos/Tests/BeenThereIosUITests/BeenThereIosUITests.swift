@@ -134,6 +134,17 @@ final class BeenThereIosUITests: XCTestCase {
         XCTAssertTrue(matchesTab.waitForExistence(timeout: 20), "signing in did not unlock Matches")
         matchesTab.tap()
 
+        // Before the wait, not after the assertions.
+        //
+        // `waitForMatchesToLoad()` is where this test fails, and an attachment
+        // placed after it never runs on the failure path — so the one run that
+        // needed a picture of the screen produced no picture. On the failure
+        // paths the four states are distinguishable and mean different bugs: a
+        // `FailureNote` is a decode throwing, the progress ring is a fetch that
+        // never landed, an `EmptyState` is an empty list from a working request,
+        // and rows without the affordances is `ClientGate` withholding them.
+        attach("matches")
+
         try waitForMatchesToLoad()
 
         // Avery's capabilities carry `block` and `report` on an active account,
@@ -147,8 +158,7 @@ final class BeenThereIosUITests: XCTestCase {
             app.buttons["Block"].waitForExistence(timeout: 5),
             "the service granted `block`, so the affordance must be on the page"
         )
-
-        attach("matches")
+        attach("matches-after-assertions")
     }
 
     /// Waits until a match row is actually on screen.

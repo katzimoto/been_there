@@ -50,6 +50,9 @@ extension AppModel {
         await resetProjections()
         authFailure = nil
         loadFailure = nil
+        // Pointing at a different service is a new arrival, so the landing rule
+        // applies again — see `hasChosenTab`.
+        hasChosenTab = false
         tab = .signIn
         await checkService()
     }
