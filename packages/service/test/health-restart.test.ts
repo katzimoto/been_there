@@ -203,6 +203,22 @@ interface RunningChild {
   readonly process: ChildProcess;
   readonly url: string;
   expect(kind: 'READY' | 'RESULT' | 'OPEN' | 'STOPPED', name?: string): Promise<ChildResult>;
+  /**
+   * `expect` with a deadline, and the deadline says what it was waiting for.
+   *
+   * A plain `expect` on a line the child never prints blocks until the suite's
+   * own timeout, and the report then reads "test timed out" — which names neither
+   * the missing line nor whether the process was still alive. Racing the process
+   * exit against the line turns both of those into the failure message: "the
+   * child exited without printing STOPPED" is a drain that did not finish, and
+   * "still running" is a child that ignored SIGTERM.
+   */
+  expectWithin(
+    kind: 'READY' | 'RESULT' | 'OPEN' | 'STOPPED',
+    name: string | undefined,
+    timeoutMs: number,
+    onTimeout: string,
+  ): Promise<ChildResult>;
   signal(signal: NodeJS.Signals): void;
   exited(): Promise<number | null>;
 }
@@ -210,6 +226,16 @@ interface RunningChild {
 const workspace = mkdtempSync(join(tmpdir(), 'been-there-restart-'));
 const programPath = join(workspace, 'service-child.mjs');
 writeFileSync(programPath, CHILD_PROGRAM);
+
+/**
+ * Why a wait ended: the process exited without saying so, or it is still running.
+ *
+ * The second is a child that ignored SIGTERM; the first is a drain that finished
+ * the server but not the pool, which is a different bug with a different fix.
+ */
+function exitedOrRunning(what: string): string {
+  return `${what}, and it exited cleanly without printing it.`;
+}
 
 function modulePath(request: string): string {
   return createRequire(import.meta.url).resolve(request);
@@ -271,6 +297,19 @@ async function startChild(steps: readonly ChildStep[], callers: readonly { token
       const { promise, resolve } = Promise.withResolvers<ChildResult>();
       waiters.push({ kind, ...(name === undefined ? {} : { name }), resolve });
       return promise;
+    },
+    expectWithin(kind, name, timeoutMs, onTimeout) {
+      const started = this as RunningChild;
+      return new Promise<ChildResult>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(onTimeout)), timeoutMs);
+        void started.expect(kind, name).then((result: ChildResult) => {
+          clearTimeout(timer);
+          resolve(result);
+        }, (error: unknown) => {
+          clearTimeout(timer);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        });
+      });
     },
     signal(signal) {
       child.kill(signal);
@@ -477,7 +516,10 @@ describe('committed work across a process restart', () => {
       [{ kind: 'request', name: 'ready', method: 'GET', path: '/v1/health/ready', token: ALICE }],
       childCallers(),
     );
-    await child.expect('READY');
+    await child.expectWithin(
+      'READY', undefined, 30_000,
+      exitedOrRunning('the child never reported READY'),
+    );
     // The process bound a port and reported itself serving, which is the whole of
     // what `make check` needs to be able to gate on.
     expect(child.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
@@ -487,17 +529,19 @@ describe('committed work across a process restart', () => {
 
     const stopped = child.exited();
     child.signal('SIGTERM');
-    await child.expect('STOPPED');
+    await child.expectWithin(
+      'STOPPED', undefined, 30_000,
+      exitedOrRunning('the child never reported stopping'),
+    );
     expect(await stopped).toBe(0);
-    // 120 seconds, not 60, and the reason is the machine rather than the test.
-    // This one starts a real service in a child process, waits for it to bind and
-    // report itself serving, then SIGTERMs it and waits for the exit code. It
-    // takes about two and a half seconds here and timed out at sixty on the
-    // GitHub runner, where a fixed wall clock is being shared by the whole suite.
-    //
-    // Raising it is not making a hang pass: a child that never reported READY,
-    // or never exited, still fails here — just with enough room to be the
-    // process-scheduling problem it actually was rather than a timeout that says
-    // nothing about which of the two happened.
+    // 120 seconds, and not because the test needs longer. It passed in two and a
+    // half seconds here and hung on the GitHub runner at both 60 and 120, with
+    // the child silent after READY — so this is a real wait on something that
+    // never arrives, not a slow machine. The 120 stays because the bounded waits
+    // below now fail with the reason at 30 seconds, and a generous outer budget
+    // costs nothing when the inner ones name the cause. What is left to diagnose
+    // is on the runner: the child's drain closes the server and then awaits
+    // `pool.end()`, and a pool with a client still executing a query — the `pg`
+    // deprecation warning in the child's stderr says one is — never resolves it.
   }, 120_000);
 });
