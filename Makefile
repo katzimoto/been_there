@@ -59,10 +59,7 @@ typecheck: ## Typecheck every package through the project graph
 	npm run typecheck
 
 typecheck-tests: ## Typecheck each package's test project
-	@set -e; for pkg in packages/*/test/tsconfig.json; do \
-		echo "$$pkg"; \
-		npx tsc -p "$$pkg"; \
-	done
+	node scripts/dev/typecheck-tests.mjs
 
 test: ## Run the vitest suite
 	npm test

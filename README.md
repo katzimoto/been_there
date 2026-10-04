@@ -48,9 +48,10 @@ docs/research     evidence-backed external research
 
 ```bash
 npm install
-npm run typecheck   # tsc --build across the package graph
-npm test            # vitest
-npm run check       # both
+npm run typecheck       # tsc --build across the package graph
+npm run typecheck-tests # each package's test project, which the graph omits
+npm test                # vitest
+npm run check           # all three, plus the doc link check
 ```
 
 ## Issue map
