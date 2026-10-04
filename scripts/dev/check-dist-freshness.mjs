@@ -9,10 +9,11 @@
  *
  *   1. A `dist` file edited by hand is never repaired. No source changed, so
  *      the project is up to date and the build skips it. The suite then loads
- *      the edited file and passes: hand-editing
- *      `packages/core/dist/result.js` to export `STALE_DIST_OLD` left
- *      `src/result.ts` exporting `STALE_DIST_PROBE` and the run green. A green
- *      run then reports that code which does not exist in `src` is correct.
+ *      the edited file and passes: hand-editing `packages/core/dist/result.js`
+ *      so that `ok()` returned a constant instead of `{ ok: true, value }` left
+ *      the source untouched, `tsc --build` exited 0, and the suite loaded the
+ *      edited file. A green run then reports as correct code which does not
+ *      exist in `src` at all.
  *
  *   2. A source file newer than its output is skipped for the same reason, so a
  *      touched-but-unbuilt tree serves the previous build's code.
