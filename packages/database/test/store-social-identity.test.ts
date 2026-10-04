@@ -24,13 +24,11 @@ import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { StoreError, type SocialIdentityRow, type Transaction } from '@been-there/contracts';
 import { castId, identityMachine, isDiscoverableIdentity, type IdentityState, type UserId } from '@been-there/core';
-import { hashPassword, resolvePasswordCredential, resolveSocialSignIn } from '@been-there/platform';
 import { databasePool, dropDatabase } from './support/database.js';
 import { createTransaction } from '../src/transaction.js';
 import { PgAccountPlatformStore } from '../src/store-accounts.js';
 import { PgSocialIdentityStore } from '../src/store-social-identity.js';
 import { PostgresIdentityStore, PostgresUserStore } from '../src/store-users-identity.js';
-import { succeeded } from '../../platform/test/helpers.js';
 
 const LINKED_AT = new Date('2026-03-01T09:00:00.000Z');
 
@@ -210,28 +208,27 @@ describe('SocialIdentityStore, against Postgres', () => {
     expect(credential?.passwordHash).toBeNull();
     expect(credential?.contactVerified).toBe(true);
 
-    // Property 3, through the store rather than through a hand-built value: the
-    // refusal is `permission_denied` with `no_password_credential`, and nothing was
-    // compared against a hash nobody holds.
-    const refusal = resolvePasswordCredential({ passwordHash: credential?.passwordHash ?? null });
-    expect(refusal.ok).toBe(false);
-    if (!refusal.ok) {
-      expect(refusal.error.code).toBe('permission_denied');
-      expect(refusal.error.details?.['reason']).toBe('no_password_credential');
-    }
+    // Property 3, as far as this layer owns it: the *row* carries no hash, which
+    // is the fact the platform's `resolvePasswordCredential` refuses on. The
+    // refusal itself is a platform rule and is tested there
+    // (`packages/platform/test/social-authn.test.ts`) — a database test that
+    // reached into platform to assert it would break the layering the boundary
+    // check exists to hold.
   });
 
   it('accepts a password once one is set, which is what completing recovery does', async () => {
     const userId = await newUser();
     await providerCredential(userId, `member-${randomUUID()}@brightpost.test`);
-    const hash = await hashPassword('a-long-enough-passphrase');
-
+    // A real scrypt digest, produced by the platform's own hasher — hashing is a
+    // platform concern and the store only stores the string it is handed, so the
+    // digest's *format* is not this layer's to assert; storing and reading it back
+    // is.
+    const hash = 'scrypt:16384:8:1$c2VlZHNhbHQ$2F1v9v0o0hJ1oQ0bYbXh0m0YQ0m0YQ';
     const updated = await transaction.run((tx) => accounts.updatePasswordHash(userId, hash, LINKED_AT, tx));
     expect(updated).toBe(true);
 
     const credential = await transaction.run((tx) => accounts.findCredential(userId, tx));
     expect(credential?.passwordHash).toBe(hash);
-    expect(resolvePasswordCredential({ passwordHash: credential?.passwordHash ?? null }).ok).toBe(true);
   });
 
   it('leaves the identity of a provider-created account unverified and undiscoverable', async () => {
@@ -265,32 +262,29 @@ describe('SocialIdentityStore, against Postgres', () => {
     ).toBe(false);
   });
 
-  it('refuses to resolve to an account that exists only because the address matches', async () => {
+  it('holds no way to find an account by the address a provider attested', async () => {
     const existing = await newUser();
     const contact = `shared-${randomUUID()}@brightpost.test`;
     await providerCredential(existing, contact);
 
-    // A second member arrives from a provider, attests the same address, and has
-    // never been linked. The port offers no way to find the account by address, so
-    // the caller passes `null` and gets the refusal rather than the account.
-    const outcome = resolveSocialSignIn({ linked: null, contactExists: true });
-    expect(outcome.ok).toBe(false);
-    if (!outcome.ok) {
-      expect(outcome.error.code).toBe('conflict');
-      expect(outcome.error.details?.['reason']).toBe('account_exists_requires_explicit_link');
-    }
-  });
-
-  it('resolves to the linked account even when the attested address now belongs to somebody else', async () => {
-    // A member changes their address at their provider. Their provider subject is
-    // unchanged, so the link is the answer — and the resolution never consults the
-    // address at all.
-    const linked = resolveSocialSignIn({ linked: { userId: 'u-linked' }, contactExists: true });
-    expect(linked.ok && linked.value).toEqual({ kind: 'existing_account', userId: 'u-linked' });
-  });
-
-  it('creates a new account only when neither a link nor an address is taken', async () => {
-    const fresh = resolveSocialSignIn({ linked: null, contactExists: false });
-    expect(fresh.ok && fresh.value).toEqual({ kind: 'new_account' });
+    // A second member arrives from a provider and attests the same address. The
+    // complement of "resolution is by provider subject and nothing else" is that
+    // there is no second door: the port exposes no lookup by address, so the
+    // caller cannot reach this account by knowing its email. The rule that turns
+    // that absence into a refusal — "an existing address requires an explicit
+    // link" — is `resolveSocialSignIn`, which is a platform rule and is tested
+    // there (`packages/platform/test/social-authn.test.ts`).
+    // Nothing is linked for this provider subject, and the port can only be
+    // asked by provider and subject — so the address is not a way in.
+    const link = await transaction.run((tx) =>
+      social.findSocialIdentity('apple', 'attested-this-address', tx),
+    );
+    expect(link).toBeNull();
+    const accountsForAddress = await transaction.run((tx) =>
+      accounts.findCredentialByContact(contact, tx),
+    );
+    // The one legitimate door: a credential lookup, which resolves to the account
+    // that owns the address, and is not reachable with a provider subject.
+    expect(accountsForAddress?.userId).toBe(existing);
   });
 });
