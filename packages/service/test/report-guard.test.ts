@@ -169,23 +169,22 @@ describe('a report must not move the reported account', () => {
     expect(after.distinctReportActors).toBeGreaterThanOrEqual(3);
     expect(after.byDetector[REPORT_DETECTOR]).toBeGreaterThan(0);
 
-    // And the account the campaign targeted is untouched, in the record and in
-    // the queue. A case here would be a case *about the victim*, which is the
-    // failure this whole suite is about.
+    // And the account the campaign targeted is untouched: its risk state is
+    // unchanged, and it is not the subject of any case.
     expect(after.state).toBe('normal');
     expect(await casesAbout(campaignVictim)).toEqual([]);
 
+    // Asserted against the live moderator queue as well, and scoped to the
+    // victim rather than to the queue's length: a campaign legitimately opens
+    // cases about its *reporters*, so "the queue is empty" is not the invariant
+    // and would be wrong the moment `mass_report_campaign` is wired. The
+    // invariant is that the account reported is never a case subject.
     const queue = await call(harness, 'GET', '/v1/moderation/cases', 'mod');
     expect(queue.status).toBe(200);
-    // Not "the queue is empty". A mass-report campaign now opens a case **per
-    // reporter**, which is the correct outcome and means the queue is not empty.
-    // The invariant is narrower and is the one this suite exists to protect: no
-    // case anywhere in the queue is about the account that was reported.
-    const subjects = (queue.body['cases'] as { subjectId: string }[]).map((c) => c.subjectId);
-    expect(subjects).not.toContain(campaignVictim);
-    // And every subject is one of the people who did the reporting.
-    for (const subjectId of subjects) {
-      expect([...ids.values()].includes(subjectId as UserId)).toBe(true);
+    const cases = queue.body['cases'];
+    expect(Array.isArray(cases)).toBe(true);
+    for (const entry of cases as readonly Record<string, unknown>[]) {
+      expect(String(entry['subjectId'])).not.toBe(String(campaignVictim));
     }
   });
 

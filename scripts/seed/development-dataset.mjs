@@ -89,6 +89,88 @@ const verifiedPeople = [
 ];
 
 /**
+ * What each person's profile says.
+ *
+ * This is not decoration. `standingFor` completes every profile through
+ * `profileMachine`, and `evaluateProfileCompleteness` is what decides whether
+ * that is allowed — so a seeded person marked `complete` whose content would
+ * not pass the dating domain's own requirements is a dataset claiming something
+ * the domain would refuse. It was also a real 500: the standing projection
+ * decodes stored content strictly (`profileContentOf` in
+ * `packages/service/src/wiring/standing.ts`), and the loader used to write
+ * `{ displayName }` alone, so `GET /v1/discovery` failed with
+ * `store_failure` for every member.
+ *
+ * So the content is here, per person, and `verifyDataset` decodes every one of
+ * them through the same function the service uses — a mismatch fails
+ * `make seed-verify` rather than the first discovery request. The photo is not
+ * in this list because it is not content the member typed: the loader writes
+ * one approved photo row per person and mirrors it into content, exactly as
+ * `saveProfile` does with `photosFor`.
+ *
+ * Bands are the service's own vocabulary (`standing.ts:148`), never the media
+ * service's coarser distance buckets, because content carries the former.
+ */
+const PROFILE_CONTENT = {
+  'u-avery': {
+    bio: 'Ask me about the trip where the train stopped for six hours and everyone got off.',
+    prompt: 'A perfect Sunday looks like',
+    genderIdentities: ['non_binary'],
+    birthdate: '1993-04-11',
+    location: 'lt_5_km',
+  },
+  'u-blair': {
+    bio: 'I will beat you at trivia and then apologise for winning. Bring a wrong answer.',
+    prompt: 'The quickest way to my heart',
+    genderIdentities: ['woman'],
+    birthdate: '1991-09-02',
+    location: 'lt_5_km',
+  },
+  'u-frankie': {
+    bio: 'Plays bass badly, cooks well, and will message you about it more than once.',
+    prompt: 'I am most myself when',
+    genderIdentities: ['man'],
+    birthdate: '1992-01-23',
+    location: '5_25_km',
+  },
+  'u-riley': {
+    bio: 'Long walks, short deadlines, and an unreasonable number of houseplants.',
+    prompt: 'We will get along if',
+    genderIdentities: ['woman'],
+    birthdate: '1994-06-30',
+    location: '5_25_km',
+  },
+  'u-ellis': {
+    bio: 'Here for the climb, the book, or the excuse that it is on the way to both.',
+    prompt: 'My most recent obsession',
+    genderIdentities: ['self_described'],
+    birthdate: '1990-11-08',
+    location: '25_50_km',
+  },
+  'u-sasha': {
+    bio: 'Ex-chef, current bread enthusiast, permanently out of pastry.',
+    prompt: 'The meal I would make for you',
+    genderIdentities: ['man'],
+    birthdate: '1989-03-17',
+    location: '25_50_km',
+  },
+  'u-casey': {
+    bio: 'Mid-verification and mid-move, which is a theme.',
+    prompt: 'Currently learning',
+    genderIdentities: ['woman'],
+    birthdate: '1995-12-01',
+    location: '50_100_km',
+  },
+  'u-devon': {
+    bio: 'Borderline provider result, whole person. Waiting on a human.',
+    prompt: 'Ask me anything',
+    genderIdentities: ['man'],
+    birthdate: '1996-07-19',
+    location: '50_100_km',
+  },
+};
+
+/**
  * Builds the dataset. Everything below is a real domain call: the identity
  * provider flow, the account machine, the risk machine, the like/match/block
  * rules, the send path, and the report → triage → case → review queue walk.
@@ -466,7 +548,9 @@ export function loadDevelopmentDataset() {
 
   return {
     epoch: SEED_EPOCH,
-    users,
+    // Each person carries what their profile says, so the loader writes content
+    // the standing projection can read back rather than a name and nothing else.
+    users: users.map((person) => ({ ...person, profileContent: PROFILE_CONTENT[person.userId] })),
     attempts,
     riskAssessments,
     // Both ledgers, in their final state: the block has already withdrawn the

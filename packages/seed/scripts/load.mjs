@@ -428,6 +428,31 @@ const units = [
           },
           tx,
         );
+        // The published photo set, written as a row the way a member's own
+        // upload writes one: `media_asset_id` opaque, alt text present, and
+        // approval and position moved together as the schema ties them. Content
+        // then carries that row rather than an invented photo — `saveProfile`
+        // reads the same rows through `photosFor`, so a seeded profile and a
+        // posted one disagree about nothing.
+        const photoId = ids.uuid(`photo-${person.userId}-primary`);
+        await interaction.insertProfilePhoto(
+          {
+            photoId,
+            userId,
+            mediaAssetId: `seed-${person.userId}-primary`,
+            altText: `${person.displayName}'s profile photo`,
+            state: 'approved',
+            position: 0,
+            reasonCode: null,
+          },
+          tx,
+        );
+        // The content is the dataset's, verbatim: bio, prompt, gender identities,
+        // birthdate and the coarse band, plus the photo above. Writing
+        // `{ displayName }` alone instead produced rows the standing projection
+        // refuses to decode — a 500 (`store_failure`) on every discovery
+        // request, which is how this line was found.
+        //
         // `profile_id` is the profile's own id, which the dataset does not model
         // as a separate entity; it is named after its owner so it is stable and
         // says whose profile it is.
@@ -436,7 +461,15 @@ const units = [
             profileId: `profile-${person.userId}`,
             userId,
             state: person.standing.profile.state,
-            content: { displayName: person.displayName },
+            content: {
+              displayName: person.displayName,
+              bio: person.profileContent.bio,
+              photos: [{ photoId, approval: 'approved' }],
+              prompts: [{ promptId: `${person.userId}-prompt-1`, text: person.profileContent.prompt }],
+              genderIdentities: person.profileContent.genderIdentities,
+              birthdate: person.profileContent.birthdate,
+              location: person.profileContent.location,
+            },
             updatedAt: EPOCH,
           },
           tx,

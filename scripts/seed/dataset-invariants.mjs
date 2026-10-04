@@ -14,6 +14,8 @@
  */
 import { capabilitiesFor, identityMachine, accountMachine, riskMachine } from '@been-there/core';
 import { CLEARANCE_BY_ROLE, authorize, isWithinClearance } from '@been-there/platform';
+import { evaluateProfileCompleteness } from '@been-there/dating';
+import { profileContentOf } from '@been-there/service';
 import { asUser } from './dataset-steps.mjs';
 
 /** The confidence floor the identity machine's provider guard enforces. */
@@ -88,6 +90,42 @@ export function verifyDataset(dataset) {
     }
     if (capabilities.join() !== person.capabilities.join()) {
       problems.push(`${person.userId}: the recorded capabilities differ from the kernel's for ${person.accountState}`);
+    }
+
+    // The profile a person claims to have finished has to be one the service can
+    // read and the dating domain would have called complete. Two checks, both
+    // against live code rather than a restatement: the decoder is the service's
+    // own `profileContentOf`, and the requirements are the domain's own
+    // `evaluateProfileCompleteness`. A seeded `complete` profile that fails
+    // either one is exactly the silent untruth this file exists to catch — and
+    // the first symptom of it was a 500 on every discovery request.
+    const profileState = person.standing.profile.state;
+    if (profileState === 'complete') {
+      const content = {
+        displayName: person.displayName,
+        bio: person.profileContent.bio,
+        // The photo is the row the loader writes; content sees it as an entry,
+        // which is what `photosFor` would have handed `saveProfile`.
+        photos: [{ photoId: `photo-${person.userId}-primary`, approval: 'approved' }],
+        prompts: [{ promptId: `${person.userId}-prompt-1`, text: person.profileContent.prompt }],
+        genderIdentities: person.profileContent.genderIdentities,
+        birthdate: person.profileContent.birthdate,
+        location: person.profileContent.location,
+      };
+      let decoded = null;
+      try {
+        decoded = profileContentOf(content, asUser(person.userId));
+      } catch (error) {
+        problems.push(`${person.userId}: the service cannot decode this profile's content — ${error.message}`);
+      }
+      if (decoded !== null) {
+        const completeness = evaluateProfileCompleteness(decoded, new Date(dataset.epoch));
+        if (!completeness.complete) {
+          problems.push(
+            `${person.userId}: the profile is complete but the dating domain is still missing ${completeness.missing.join(', ')}`,
+          );
+        }
+      }
     }
   }
 
