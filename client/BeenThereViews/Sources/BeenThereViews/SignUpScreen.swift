@@ -32,6 +32,15 @@ import BeenThereKit
 public struct SignUpScreen: View {
     @Environment(\.palette) private var palette
 
+    /// Which field the keyboard is on — so the **Done** key exists, and so a
+    /// successful sign-up does not carry the keyboard to the screen it lands on.
+    @FocusState private var focus: Field?
+
+    private enum Field: Hashable {
+        case contact
+        case password
+    }
+
     @Bindable var model: AppModel
 
     public init(model: AppModel) {
@@ -98,6 +107,12 @@ public struct SignUpScreen: View {
             }
             .disabled(model.isLoading)
         }
+        .keyboardForm($focus)
+        .onChange(of: model.session) { _, next in
+            // The account exists; whatever comes next should not inherit the
+            // keyboard from the form that created it.
+            if next != nil { focus = nil }
+        }
     }
 
     private var credentials: some View {
@@ -111,6 +126,7 @@ public struct SignUpScreen: View {
                         .foregroundStyle(palette.ink)
                         .autocorrectionDisabled()
                         .textContentType(.emailAddress)
+                        .focused($focus, equals: .contact)
                         .accessibilityLabel("Email or phone")
                         .accessibilityHint("The address or number you signed up with.")
                         .dynamicTypeSize(...DynamicTypeSize.accessibility3)
@@ -125,6 +141,7 @@ public struct SignUpScreen: View {
                         .font(ScaledTypeface.body)
                         .foregroundStyle(palette.ink)
                         .textContentType(.newPassword)
+                        .focused($focus, equals: .password)
                         .accessibilityLabel("Password")
                         .dynamicTypeSize(...DynamicTypeSize.accessibility3)
                 }

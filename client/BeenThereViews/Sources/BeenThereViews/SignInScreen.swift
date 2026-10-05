@@ -30,6 +30,23 @@ public struct SignInScreen: View {
 
     @Environment(\.palette) private var palette
 
+    /// Which field the keyboard is on.
+    ///
+    /// Two reasons it exists. The obvious one is the **Done** key
+    /// `keyboardForm` adds: today the only way out of the keyboard is to drag the
+    /// form, and nobody is going to guess that. The less obvious one is the bug it
+    /// also fixes: focus outlives the screen, so a member presses Sign in, lands on
+    /// People, and finds the keyboard still covering the lower third of their
+    /// screen — and the tab bar with it, which is how a tap aimed at a tab lands on
+    /// a letter.
+    @FocusState private var focus: Field?
+
+    private enum Field: Hashable {
+        case address
+        case contact
+        case password
+    }
+
     /// Whether the sign-up sheet is up. Local to this screen: the tab bar has no
     /// business knowing that creating an account is a sheet, and the sheet is not
     /// a destination anybody can be sent back to.
@@ -40,6 +57,12 @@ public struct SignInScreen: View {
             serviceAddress
             credentials
             notice
+        }
+        .keyboardForm($focus)
+        .onChange(of: model.session) { _, next in
+            // Signing in replaces this screen with another one; carrying the focus
+            // with it would leave the keyboard up over whatever came next.
+            if next != nil { focus = nil }
         }
     }
 
@@ -154,13 +177,14 @@ public struct SignInScreen: View {
         Card {
             VStack(alignment: .leading, spacing: Space.md) {
                 SectionHeader("Your account")
-                field("Email or phone", $model.contact)
+                field("Email or phone", $model.contact, focusValue: .contact)
                 LabelledField("Password") {
                     SecureField("Password", text: $model.password)
                         .textFieldStyle(.plain)
                         .font(ScaledTypeface.body)
                         .foregroundStyle(palette.ink)
                         .accessibilityLabel("Password")
+                        .focused($focus, equals: .password)
                         .dynamicTypeSize(...DynamicTypeSize.accessibility3)
                     }
                 if let failure = model.authFailure {
@@ -254,12 +278,14 @@ public struct SignInScreen: View {
     private func field(
         _ placeholder: String,
         _ text: Binding<String>,
+        focusValue: Field,
         monospaced: Bool = false,
         verbatim: Bool = true
     ) -> some View {
         LabelledField(placeholder) {
             TextField(placeholder, text: text)
                 .textFieldStyle(.plain)
+                .focused($focus, equals: focusValue)
                 .font(monospaced ? ScaledTypeface.mono : ScaledTypeface.body)
                 .foregroundStyle(palette.ink)
                 .accessibilityLabel(placeholder)

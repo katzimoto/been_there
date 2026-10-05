@@ -235,13 +235,26 @@ final class BeenThereIosUITests: XCTestCase {
         }
         XCTAssertTrue(unlocked, "signing in did not unlock Matches")
 
-        matchesTab.tapCentre()
-        if !app.buttons["tab.matches"].isSelected {
+        // Tapped, then *waited on*, and retried.
+        //
+        // The bar deliberately ignores taps for a moment after it reflows — a
+        // tap must not be delivered to a tab that was mid-flight — so a tap
+        // fired the instant the button appears can be swallowed. Measured: this
+        // exact helper passes when the test runs alone and fails when it runs
+        // third in the suite, which is the timing signature of that deaf window
+        // rather than of anything wrong with the control.
+        //
+        // So the tap is not fired once and trusted. It is fired, waited on, and
+        // fired again if the bar has not answered, which is what a person does.
+        let isSelected = NSPredicate(format: "isSelected == true")
+        for _ in 1...3 {
             matchesTab.tapCentre()
+            let answered = XCTWaiter().wait(
+                for: [XCTNSPredicateExpectation(predicate: isSelected, object: matchesTab)],
+                timeout: 1.5
+            ) == .completed
+            if answered { break }
         }
-        // Same reasoning again, one step further on: the tree after the tap is
-        // the only thing that distinguishes "the tap went to a neighbour" from
-        // "the tap landed and the bar disagrees about what is selected".
         let landed = app.buttons["tab.matches"].isSelected
         if !landed {
             attach("matches-tab-tap-missed")
