@@ -185,16 +185,18 @@ public final class AppModel {
     /// answer, so the sign-up screen can say why it is asking before it asks.
     /// `nil` when the service published none — the screen then shows nothing,
     /// because the alternative is this client stating the policy in its own words.
-    public private(set) var preflightAgeGate: TermsDeclaration.AgeGate?
+    /// Module-internal rather than `private(set)`: `checkService()` reads it off the
+    /// readiness answer and lives in an extension in another file.
+    public internal(set) var preflightAgeGate: TermsDeclaration.AgeGate?
 
     /// Kept so a later refresh does not re-probe readiness for a session it has
     /// already read.
-    private var terms: TermsDeclaration?
+    var terms: TermsDeclaration?
 
     /// The terms version the service says it accepts. Falls back to the last known
     /// value when readiness has not answered, so a sign-up is never blocked by a
     /// probe that has not landed.
-    public private(set) var termsVersion: String = AppModel.currentTermsVersion
+    public internal(set) var termsVersion: String = AppModel.currentTermsVersion
 
     /// The age band the service derived at sign-up, shown back to the member. It
     /// publishes a band and never a date, so this is the only form of the answer
@@ -431,18 +433,6 @@ public final class AppModel {
     /// — `POST /v1/interactions/likes` may create a match, and a block ends one
     /// — and both go through `refresh()`.
     public func refresh() async {
-        // The readiness probe runs before any session exists: the sign-up screen
-        // needs the age-gate notice and the accepted terms version, and both are
-        // public answers. A failure here is not a load failure — nothing on screen
-        // depends on it, so it is silently absent rather than an error the member
-        // cannot act on.
-        if preflightAgeGate == nil, let report = try? await client.readiness() {
-            terms = report.terms
-            if let terms = report.terms {
-                preflightAgeGate = terms.ageGate
-                termsVersion = terms.currentVersion
-            }
-        }
         guard let held = session else { return }
         let api = client
         isLoading = true

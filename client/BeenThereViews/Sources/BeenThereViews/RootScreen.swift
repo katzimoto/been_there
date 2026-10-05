@@ -83,7 +83,11 @@ public struct RootScreen: View {
                     // The bar is chrome for moving between tabs, and a chat is
                     // not a tab — it is pushed over one. Leaving it visible would
                     // invite a tap that throws the conversation away.
-                    if model.chat == nil {
+                    // A one-tab bar is not navigation, it is a label pretending to
+                    // be navigation. The signed-out screen has exactly one tab and
+                    // no destination to move between, so the bar only appears once
+                    // there is somewhere to go.
+                    if model.chat == nil, availableTabs.count > 1 {
                         TabBar(tabs: availableTabs, selected: model.tab) { tab in
                             model.go(to: tab)
                         }

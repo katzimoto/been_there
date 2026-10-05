@@ -166,6 +166,41 @@ final class BeenThereIosUITests: XCTestCase {
         attach("matches-after-assertions")
     }
 
+    /// A person who has no account must be able to find the way to make one.
+    ///
+    /// The sign-in screen is the first thing anyone sees, and "Create account"
+    /// sits below the credentials card — which means a member who has no account
+    /// has to scroll to discover that the app can give them one. This walks that
+    /// path: the button is reachable, it opens the form, and the form says why it
+    /// is asking for a date of birth before it asks.
+    func testSomeoneWithoutAnAccountCanReachTheFormThatMakesOne() throws {
+        guard serviceURL() != nil else {
+            throw XCTSkip("BEEN_THERE_BASE_URL is needed; `make demo` prints it")
+        }
+
+        let createAccount = app.buttons["create-account"]
+        XCTAssertTrue(
+            createAccount.waitForExistence(timeout: 10),
+            "the way to create an account is not on the sign-in screen"
+        )
+        // Reachability, not just existence: on a 390pt screen the button is below
+        // the fold, and a control nobody can scroll to is a control nobody taps.
+        createAccount.tap()
+        attach("create-account-sheet")
+
+        // The notice is the service's own sentence, and it is the reason the
+        // screen asks at all — so it has to be on screen before the field.
+        XCTAssertTrue(
+            app.staticTexts["Been There is 18+."].waitForExistence(timeout: 10),
+            "the age-gate notice the service publishes is not shown on the sign-up form"
+        )
+        XCTAssertTrue(
+            app.buttons["Create account"].waitForExistence(timeout: 5),
+            "the sign-up form has no action"
+        )
+        attach("sign-up-form")
+    }
+
     /// Waits until a match row is actually on screen.
     ///
     /// ## Why not the screen title

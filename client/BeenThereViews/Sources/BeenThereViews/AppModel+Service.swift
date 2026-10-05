@@ -71,6 +71,16 @@ extension AppModel {
             let report = try await client.readiness()
             serviceReady = report.ready
             serviceChecks = report.checks
+            // The terms version and the age-gate notice come off the same answer.
+            // They are read *here* rather than in `refresh()` because this is the
+            // only probe that runs before a member has a session, and the sign-up
+            // form needs both before it asks for anything — which is the whole
+            // point of publishing them on readiness in the first place.
+            if let terms = report.terms {
+                self.terms = terms
+                preflightAgeGate = terms.ageGate
+                termsVersion = terms.currentVersion
+            }
         } catch let error as APIError {
             serviceReady = false
             serviceChecks = []

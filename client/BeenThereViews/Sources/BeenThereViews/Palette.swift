@@ -35,6 +35,22 @@ public struct Palette: Sendable, Equatable {
     // Text, strongest to weakest.
     public let ink: Color
     public let inkSecondary: Color
+    /**
+     * The weakest ink, for captions and metadata — and it is the one token that
+     * has to be *measured* rather than eyeballed.
+     *
+     * The light value was `#9A9089`, which measures 2.49:1 on the worst
+     * background in the palette. That is below the 4.5:1 floor for body text and
+     * below 3:1 even as large text, at the 11–12pt it is actually used at — so the
+     * "tertiary" ink was not tertiary, it was failing. Both values are now the
+     * ones `Accessibility.swift` states as the decision, measured against
+     * `placeholder` rather than the friendlier canvas: 4.54:1 light and 4.54:1
+     * dark, 5.34:1 and 6.12:1 on the canvas.
+     *
+     * What is traded: tertiary ink is now closer to secondary than "barely there"
+     * looked. That is the honest direction — a third weight of grey that nobody
+     * can read is not a hierarchy.
+     */
     public let inkTertiary: Color
     public let onAccent: Color
 
@@ -67,7 +83,7 @@ public struct Palette: Sendable, Equatable {
         placeholder: Color(hex: 0xEDE4DC),
         ink: Color(hex: 0x1B1614),
         inkSecondary: Color(hex: 0x6B615B),
-        inkTertiary: Color(hex: 0x9A9089),
+        inkTertiary: Color(hex: 0x6E655E),
         onAccent: Color(hex: 0xFFFFFF),
         hairline: Color(hex: 0xE7DED6),
         fill: Color(hex: 0xF6F1EC),
@@ -89,7 +105,7 @@ public struct Palette: Sendable, Equatable {
         placeholder: Color(hex: 0x2E2A27),
         ink: Color(hex: 0xF6F0EA),
         inkSecondary: Color(hex: 0xB0A69E),
-        inkTertiary: Color(hex: 0x7C736C),
+        inkTertiary: Color(hex: 0x99908A),
         onAccent: Color(hex: 0x1A0F13),
         hairline: Color(hex: 0x322D2A),
         fill: Color(hex: 0x232020),

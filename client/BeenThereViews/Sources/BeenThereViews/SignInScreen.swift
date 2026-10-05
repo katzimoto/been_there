@@ -47,6 +47,13 @@ public struct SignInScreen: View {
         case password
     }
 
+    /// Whether the readiness rows are expanded.
+    ///
+    /// Off by default, and the reason is reachability: the address, the two
+    /// buttons a member actually needs, and the reason the app wants their birth
+    /// date all have to fit above the fold.
+    @State private var showingReadiness = false
+
     /// Whether the sign-up sheet is up. Local to this screen: the tab bar has no
     /// business knowing that creating an account is a sheet, and the sheet is not
     /// a destination anybody can be sent back to.
@@ -93,17 +100,19 @@ public struct SignInScreen: View {
                     }
                 }
 
-                switch model.serviceReady {
-                case .some(true), .some(false):
+                // The checks are a developer's answer, so they are one tap away
+                // rather than the first screen's furniture: expanded, they pushed
+                // "Sign in" and "Create account" below the fold on a 390pt phone,
+                // which is the same as not offering them at all.
+                if showingReadiness {
                     readinessChecks
-                case .none:
-                    Text("Not checked yet.")
-                        .font(ScaledTypeface.callout)
-                        .foregroundStyle(palette.inkSecondary)
                 }
 
-                SecondaryButton("Check health") {
-                    Task { await model.checkService() }
+                SecondaryButton(showingReadiness ? "Hide service checks" : "Check health") {
+                    if showingReadiness {
+                        Task { await model.checkService() }
+                    }
+                    withAnimation(Motion.replace) { showingReadiness.toggle() }
                 }
             }
         }

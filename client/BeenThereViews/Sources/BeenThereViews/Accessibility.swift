@@ -48,13 +48,14 @@ import SwiftUI
 /// and the four soft state fills. The bar is 4.5:1 for body text, 3:1 for large
 /// text and for non-text.
 ///
-/// Every ink passes on every background except one:
+/// **Every ink passes on every background.** This table was written when one did
+/// not; the failing value and the fix are recorded under the table.
 ///
 /// | pair | light | dark |
 /// | --- | --- | --- |
 /// | `ink` | 14.28 – 17.93 | 12.58 – 16.93 |
 /// | `inkSecondary` | 4.80 – 6.02 | 5.96 – 8.02 |
-/// | `inkTertiary` | **2.49 – 3.12** | **3.06 – 4.13** |
+/// | `inkTertiary` | 4.54 – 5.34 (was **2.49 – 3.12**) | 4.54 – 6.12 (was **3.06 – 4.13**) |
 /// | `accent` | 4.61 – 5.79 | 5.81 – 7.82 |
 /// | `accentInk` | 6.48 – 8.13 | 7.94 – 10.69 |
 /// | `granted` | 5.13 – 6.44 | 7.26 – 9.78 |
@@ -67,23 +68,16 @@ import SwiftUI
 /// background measures 4.70 – 6.91 light and 6.10 – 8.02 dark; the tint is
 /// composited over `surface` and over `canvas` and both were checked.
 ///
-/// **The one failure is `inkTertiary`, and it is a palette failure, not a screen
-/// failure.** At 2.49:1 light it is below the floor for body text by nearly
-/// two points and below the floor for *every* background in the app, and it is
-/// used at 11pt (`SectionHeader`) and 12pt (`caption`, `mono`) — sizes that are
-/// never large text, so the 3:1 relaxation never applies to any of it. The
-/// screens this file covers therefore draw that tier in `inkSecondary`, which
-/// clears 4.5:1 everywhere in both schemes. `Components.swift` still uses it for
-/// `SectionHeader`, the disabled primary button and `ValueChip`'s fallback, and
-/// that is a change for the palette's owner.
-///
-/// What the palette would have to change, stated so the decision is not silently
-/// re-litigated: `inkTertiary` light `#9A9089` → `#6E655E` and dark `#7C736C` →
-/// `#99908A`. Both are the same hue and lightness as the current value, walked
-/// toward the readable end until they clear 4.5:1 on `placeholder`, the worst
-/// background in the palette. The alternative — keeping the tier and calling it
-/// decorative — costs the app its third text weight, which is the weight
-/// `SectionHeader` is built on.
+/// **The one failure this file found has been fixed.** `inkTertiary` was 2.49:1
+/// light — below the floor for body text by nearly two points, and below the
+/// floor for *every* background in the app — at the 11pt (`SectionHeader`) and
+/// 12pt (`caption`, `mono`) it is used at, which are never large text, so the 3:1
+/// relaxation never applied to any of it. The palette owner took the values this
+/// file stated (`light #6E655E`, `dark #99908A`, the same hue and lightness
+/// walked toward the readable end), and both now clear 4.5:1 on
+/// `placeholder` — the worst background in the palette — and the canvas. The
+/// tier survives: what is given up is the *look* of a third weight that nobody
+/// could read, which was not a weight.
 public enum ScaledTypeface {
     /// A screen title. Rounded and bold, as `Typeface.display`.
     public static let display = Font.system(.largeTitle, design: .rounded).weight(.bold)
