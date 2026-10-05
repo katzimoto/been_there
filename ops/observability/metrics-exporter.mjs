@@ -58,6 +58,16 @@ const say = (message) => process.stdout.write(`[metrics-exporter] ${message}\n`)
  * is honest, and a dashboard that empties the moment the service restarts is not.
  */
 let snapshot = [];
+/**
+ * The reachability verdict the same route serves beside the catalogue
+ * (`body.detection`): whether `safety.detected_before_first_report` can be
+ * non-zero at all, and why not when it cannot.
+ *
+ * Held beside the snapshot rather than recomputed, and served stale in the same
+ * way, because a reachability answer invented from nothing would be a guess
+ * about the detector catalogue dressed as a measurement.
+ */
+let detection = null;
 let scrapeSuccess = false;
 let scrapeDurationSeconds = 0;
 let lastSuccessAt = 0;
@@ -115,6 +125,11 @@ async function poll() {
     }
     const body = await response.json();
     snapshot = body.metrics ?? [];
+    // The verdict is a sibling of the catalogue in the same body. Reading
+    // `body.metrics` and discarding `body.detection` is what left a permanently
+    // zero metric reaching Prometheus with nothing on the dashboard able to say
+    // the zero is the arithmetic rather than a failure.
+    detection = body.detection ?? null;
     scrapeSuccess = true;
     lastSuccessAt = Date.now();
   } catch (error) {
@@ -137,16 +152,122 @@ function metricName(name, instrument) {
 const escapeHelp = (text) => String(text ?? '').replace(/\\/g, '\\\\').replace(/\n/g, '\\n');
 const escapeLabel = (value) => String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
 
+/**
+ * The one metric whose standing zero is a property of the detector catalogue
+ * rather than a wiring failure. See `unreachabilityReason` for why it is the
+ * only one.
+ */
+const REACHABILITY_TARGET = 'safety.detected_before_first_report';
+
+/** Fixed, so a panel can name it without reading the catalogue first. */
+const MEASURABLE_METRIC = 'safety_detected_before_first_report_measurable';
+
+/** The verdict, or `null` while it is unknown (never successfully read). */
+function verdict() {
+  return detection !== null && typeof detection === 'object' ? detection : null;
+}
+
+/**
+ * Why this metric cannot be non-zero, or `null` when it is measurable and the
+ * number should be read as a number.
+ *
+ * Only ever non-null for `REACHABILITY_TARGET`, and only when the service has
+ * said so. A second metric that turned out to be permanently zero would need
+ * the same treatment; guessing which ones those are is how a dashboard ends up
+ * explaining a metric that was merely quiet.
+ */
+function unreachabilityReason(name) {
+  if (metricName(REACHABILITY_TARGET, 'counter') !== name) {
+    return null;
+  }
+  const served = verdict();
+  if (served === null || served.measurable === true) {
+    return null;
+  }
+  return typeof served.reason === 'string' && served.reason.length > 0 ? served.reason : null;
+}
+
+/**
+ * The HELP text, carrying the reason when there is one.
+ *
+ * The service describes what a metric measures; that description is the same
+ * whether or not the metric can move. The verdict is a separate fact, so it is
+ * appended rather than written over — which means someone reading the raw
+ * exposition with `curl` sees why the number is zero, and not only someone who
+ * happened to open the dashboard.
+ */
+function helpFor(metric, reason) {
+  return reason === null ? metric.description : `${metric.description} NOT MEASURABLE IN THIS DEPLOYMENT: ${reason}`;
+}
+
+/**
+ * The verdict as two metrics rather than as a dashboard comment.
+ *
+ * A panel can show the flag as a number and quote the reason beside it, and both
+ * move when the catalogue moves: a detector that fires without a prior report
+ * flips `measurable` to 1 and the reason disappears with it, rather than
+ * outliving the fact it explained.
+ */
+function renderReachability(lines) {
+  const served = verdict();
+  if (served === null) {
+    return;
+  }
+  const measurable = served.measurable === true;
+  lines.push(
+    `# HELP ${MEASURABLE_METRIC} Whether safety.detected_before_first_report can be non-zero at all. 1 when some detector both reaches a counted state and can fire without a prior report; 0 when the metric's comparison is unsatisfiable by construction. A 0 is a property of the detector catalogue, not a broken pipeline.`,
+    `# TYPE ${MEASURABLE_METRIC} gauge`,
+    `${MEASURABLE_METRIC} ${measurable ? 1 : 0}`,
+  );
+  if (measurable) {
+    return;
+  }
+  // The explanation rides as labels on a value-1 "info" metric, which is the
+ // OpenTelemetry convention for a state whose content is the interesting part.
+ // The label values are fixed by the detector catalogue rather than by traffic,
+ // so this is at most one series — the opposite of the per-subject label that
+ // `defineMetrics` refuses at construction time in `packages/platform`.
+  const info = `${MEASURABLE_METRIC}_info`;
+  const labels = [
+    `reason="${escapeLabel(typeof served.reason === 'string' ? served.reason : 'unspecified')}"`,
+    `below_threshold="${escapeLabel((served.belowThreshold ?? []).join(','))}"`,
+    `report_dependent="${escapeLabel((served.reportDependent ?? []).join(','))}"`,
+    `detector_count="${Array.isArray(served.detectors) ? served.detectors.length : 0}"`,
+  ].join(',');
+  lines.push(
+    `# HELP ${info} Why safety.detected_before_first_report reads zero, published as data so the explanation tracks the detector catalogue instead of rotting in a dashboard comment. Present only when the metric is unmeasurable.`,
+    `# TYPE ${info} gauge`,
+    `${info}{${labels}} 1`,
+  );
+}
+
 function render() {
   const lines = [];
   const emitted = new Set();
   for (const metric of snapshot) {
     const name = metricName(metric.name, metric.instrument);
     const type = metric.instrument === 'counter' ? 'counter' : 'gauge';
+    // A counter that declares no dimensions has exactly one series, and until
+    // something records one it is zero — not absent. Absence is what made a
+    // dashboard render "No data", which nobody can tell apart from a broken
+    // pipeline, for a counter that is simply quiet.
+    //
+    // A counter that DOES declare dimensions is left absent on purpose. Its
+    // series are keyed by label values this process has not produced, and
+    // publishing an unlabelled zero would assert a series the product can never
+    // legitimately record — which is the "invented a metric to fill a panel"
+    // failure wearing a zero's clothes.
+    const emptyCounter =
+      metric.samples.length === 0 && type === 'counter' && (metric.dimensions ?? []).length === 0;
+
     if (!emitted.has(name)) {
       emitted.add(name);
-      lines.push(`# HELP ${name} ${escapeHelp(metric.description)}`);
+      lines.push(`# HELP ${name} ${escapeHelp(helpFor(metric, unreachabilityReason(name)))}`);
       lines.push(`# TYPE ${name} ${type}`);
+    }
+    if (emptyCounter) {
+      lines.push(`${name} 0`);
+      continue;
     }
     for (const sample of metric.samples) {
       const suffix = sample.statistic === 'value' ? '' : `_${sample.statistic}`;
@@ -158,6 +279,8 @@ function render() {
       );
     }
   }
+
+  renderReachability(lines);
 
   // The bridge's own numbers. `scrape_success 0` with the service's last known
   // series still listed above is the shape that says "the service is down" rather
