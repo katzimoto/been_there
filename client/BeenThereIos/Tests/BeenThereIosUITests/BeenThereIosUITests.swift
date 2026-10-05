@@ -18,11 +18,11 @@ import XCTest
 ///
 /// ## The credentials
 ///
-/// `BEEN_THERE_DEMO_CONTACT` and `BEEN_THERE_DEMO_PASSWORD`, which the seeder
-/// prints. One of the eight seeded people. Signing in as a seeded member rather
-/// than signing up is deliberate: a seeded person has a profile and a standing, so
-/// the People tab has something to show, and a signup would need four API calls
-/// this file has no business making.
+/// `BEEN_THERE_DEMO_CONTACTS` and `BEEN_THERE_DEMO_PASSWORD`, which the seeder
+/// prints. One of the eight seeded people, chosen by index.
+/// Signing in as a seeded member rather than signing up is deliberate: a seeded
+/// person has a profile and a standing, so the People tab has something to show,
+/// and a signup would need four API calls this file has no business making.
 final class BeenThereIosUITests: XCTestCase {
 
     private var app: XCUIApplication!
@@ -91,7 +91,12 @@ final class BeenThereIosUITests: XCTestCase {
     func testAMemberCanSignInAndReachTheirPeople() throws {
         // Another seeded person, not the one with the match: this test asserts
         // that sign-in works, and it does not care who.
-        try signIn(as: 1)
+        // A third person, deliberately: the two match-dependent tests own Avery
+        // and Blair between them, and the service allows five sign-ins per account
+        // per fifteen minutes. Two tests sharing an account spend that budget
+        // twice per run, and after three local runs the third run is refused —
+        // which reads as a UI failure and is not one.
+        try signIn(as: 2)
 
         // The proof: the form the member just filled in is not on screen any
         // more. Before the fix the tap hit the tab bar and this was still true
@@ -129,7 +134,9 @@ final class BeenThereIosUITests: XCTestCase {
     /// The matches page lists what `GET /v1/matches` published, and offers the
     /// safety actions the server granted.
     func testAMemberSeesTheirMatchesAndTheSafetyActions() throws {
-        try signInAsTheMemberWithAMatch()
+        // Avery, not Blair: one sign-in per account per run, and the two
+        // match-dependent tests must not share a budget. See `MatchedMember`.
+        try signIn(as: MatchedMember.first)
         try tapMatchesTab()
 
         // Before the wait, not after the assertions.
@@ -184,21 +191,35 @@ final class BeenThereIosUITests: XCTestCase {
 
     /// Taps the Matches tab and *verifies* where it landed.
     ///
-    /// ## Why this is not a plain `tap()`
+    /// ## Why a coordinate tap, and not `tap()`
+    ///
+    /// XCUITest reports every button in this app's custom tab bar as
+    /// `isHittable == false` while simultaneously reporting it as `exists` with
+    /// a correct, fully on-screen frame, and `.tap()` — which asks XCUITest to
+    /// scroll the element into view and synthesise at the point it computes —
+    /// does nothing at all. It logs `Scroll element to visible` followed by
+    /// `Computed hit point {-1, -1}` and the app never moves.
+    ///
+    /// That was measured, not guessed, and it is *not* a client defect:
+    ///
+    ///   * all four tabs report the same, so it is not one misplaced button;
+    ///   * it reproduces with the tab stacking removed and with `.refreshable`
+    ///     removed, so neither is the cause;
+    ///   * a coordinate tap at the button's centre selects the tab on the first
+    ///     try, every time — so the control receives a real touch perfectly well.
+    ///
+    /// So the bar is fine and XCUITest's hittability heuristic is not, and this
+    /// taps the way a thumb does. `fill` below already taps this way for the
+    /// same class of reason.
+    ///
+    /// ## Why the landing is verified rather than assumed
     ///
     /// The bar is populated from what the service has published, so it grows as
-    /// that data lands — and the tabs to the left of a new one shift right to
-    /// make room for it. Matches appears the moment `session` is set, which is
-    /// before Discovery does, so in the frame this test used to tap, XCUITest
-    /// was aiming at a frame that had already moved and the tap landed on the
-    /// neighbour. It is not flaky: it failed the same way on every run, which is
-    /// the only good kind of failure to have had.
-    ///
-    /// So the tap is confirmed rather than assumed, and retried once. This is a
-    /// test change and not a product one: withholding a tab until the data that
-    /// unlocks it exists is the client's stated rule, and a bar that reflows
-    /// under a finger is a real interaction cost — but it is a cost this file
-    /// should describe accurately rather than paper over by sleeping.
+    /// that data lands, and a tab that appears shifts the ones beside it. The
+    /// tap is confirmed and retried once so that a reflow costs a retry rather
+    /// than the test. Withholding a tab until the data that unlocks it exists is
+    /// the client's stated rule — a bar that reflows under a finger is a real
+    /// interaction cost, and it is documented as one in `RootScreen.swift`.
     private func tapMatchesTab() throws {
         let matchesTab = app.buttons["tab.matches"]
         // Attached on the failure path, not before the assertion.
@@ -213,15 +234,19 @@ final class BeenThereIosUITests: XCTestCase {
             attach("matches-tab-never-arrived")
         }
         XCTAssertTrue(unlocked, "signing in did not unlock Matches")
-        matchesTab.tap()
-        // Confirm we are where we meant to go, and tap once more if not.
+
+        matchesTab.tapCentre()
         if !app.buttons["tab.matches"].isSelected {
-            matchesTab.tap()
+            matchesTab.tapCentre()
         }
-        XCTAssertTrue(
-            app.buttons["tab.matches"].isSelected,
-            "the Matches tab did not stay selected after the tap"
-        )
+        // Same reasoning again, one step further on: the tree after the tap is
+        // the only thing that distinguishes "the tap went to a neighbour" from
+        // "the tap landed and the bar disagrees about what is selected".
+        let landed = app.buttons["tab.matches"].isSelected
+        if !landed {
+            attach("matches-tab-tap-missed")
+        }
+        XCTAssertTrue(landed, "the Matches tab did not stay selected after the tap")
     }
 
     /// A member with a match opens the conversation behind it and reads it.
@@ -233,7 +258,7 @@ final class BeenThereIosUITests: XCTestCase {
     /// that the history rendered, and that the composer is offered because the
     /// standing carries `send_message`.
     func testAMemberOpensTheConversationBehindAMatch() throws {
-        try signInAsTheMemberWithAMatch()
+        try signIn(as: MatchedMember.second)
         try tapMatchesTab()
 
         // What is on screen here is the whole answer if the rows never arrive:
@@ -281,21 +306,29 @@ final class BeenThereIosUITests: XCTestCase {
         try signIn(with: credentials)
     }
 
-    /// Signs in as the one member the demo dataset gives a match and a
-    /// conversation, because the matches and chat screens have nothing to show
-    /// for anybody else.
+    /// The two seeded people the demo dataset matches to each other.
     ///
-    /// The scheme points `BEEN_THERE_DEMO_CONTACT` at that member and
-    /// `BEEN_THERE_DEMO_CONTACTS` at all eight, so this uses the first and the
-    /// other tests can take one each rather than all landing on the same account's
-    /// five-sign-in budget.
-    private func signInAsTheMemberWithAMatch() throws {
-        let environment = ProcessInfo.processInfo.environment
-        guard let contact = environment["BEEN_THERE_DEMO_CONTACT"],
-              let password = environment["BEEN_THERE_DEMO_PASSWORD"] else {
-            throw XCTSkip("BEEN_THERE_DEMO_CONTACT and BEEN_THERE_DEMO_PASSWORD are needed; `make demo` prints them")
-        }
-        try signIn(with: (contact: contact, password: password))
+    /// Avery and Blair are the only match in the dataset, and a match is
+    /// symmetrical, so **both** of them can see it — which is what lets the two
+    /// match-dependent tests each own an account instead of sharing one.
+    ///
+    /// They must stay different people. Both tests used to sign in as the same
+    /// member, and `LOGIN_ATTEMPTS_PER_WINDOW` is five per account per fifteen
+    /// minutes, so a suite run plus a few re-runs of one failing test exhausted
+    /// the budget and the service refused with "Too many sign-in attempts".
+    /// The symptom was not a rate limit at all: no session meant no member tabs,
+    /// so XCUITest reported the missing `tab.matches` button as a computed hit
+    /// point of (-1, -1), which reads exactly like a layout bug and sent the
+    /// diagnosis after the client instead of after the fixture.
+    ///
+    /// One sign-in per account per run is what keeps a re-run of a single test
+    /// affordable. Please do not "simplify" these two back into one account.
+    private enum MatchedMember {
+        /// Avery — the first of the pair, and the one the scheme's
+        /// `BEEN_THERE_DEMO_CONTACT` names.
+        static let first = 0
+        /// Blair — the second, who is matched to Avery and so has the same match.
+        static let second = 1
     }
 
     private func signIn(with credentials: (contact: String, password: String)) throws {

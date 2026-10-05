@@ -177,6 +177,13 @@ public struct RootScreen: View {
                     .accessibilityHidden(tab != model.tab)
             }
         }
+        // Pull to refresh, on the gesture and on the VoiceOver action that goes
+        // with it. `.refreshable` publishes `\.refresh` into the environment and
+        // the `ScrollView` inside `Screen` picks it up, so this reaches the
+        // scroll view without `Screen` having to know a refresh exists.
+        //
+        // The named action is not redundant: a pull is a drag, and this package
+        // holds itself to nothing being reachable only by a drag.
         .refreshable { await model.refresh() }
         .accessibilityAction(named: Text("Refresh")) {
             Task { await model.refresh() }
