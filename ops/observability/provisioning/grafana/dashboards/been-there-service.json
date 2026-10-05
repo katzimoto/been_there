@@ -1,7 +1,7 @@
 {
   "uid": "been-there-service",
   "title": "Been There — service",
-  "description": "What the running service is doing, read from the service's own metric catalogue (edge_response_*, served over its authenticated /v1/health/metrics route) and from the request rate and latency the HTTP instrumentation times (http_server_*, pushed as OTLP). Nothing on this dashboard is a placeholder: every panel has a producer, and a panel with no producer is a promise the telemetry does not keep.",
+  "description": "What the running service is doing. Two sources, kept apart on purpose: the request rate and latency the HTTP instrumentation times (http_server_*, pushed as OTLP), and the service's own metric catalogue (edge_response_*, safety_*, verification_*, readiness_probe*, served over its authenticated /v1/health/metrics route and republished by the bridge as exposition text). Nothing here is a placeholder: every panel has a producer, and a panel with no producer is a promise the telemetry does not keep. The one instrument that cannot move — safety.detected_before_first_report — is shown with the reason attached rather than as a bare zero.",
   "tags": ["been-there", "service"],
   "editable": false,
   "schemaVersion": 39,
@@ -271,8 +271,264 @@
     },
     {
       "type": "text",
-      "title": "Log and trace exploration",
+      "title": "Safety — the service's own instruments",
+      "description": "Everything below comes from the service's metric catalogue, served as JSON over its authenticated /v1/health/metrics route and republished by the bridge as Prometheus exposition text. Names are the catalogue's own, with Prometheus's sanitisation: a dot becomes an underscore and a counter gains _total.",
       "gridPos": { "h": 4, "w": 24, "x": 0, "y": 20 },
+      "options": {
+        "mode": "markdown",
+        "content": "These panels read `SAFETY_METRICS` and `HEALTH_METRICS` from `packages/platform/src/safety-metric.ts` and `packages/service/src/health/metrics.ts` — the product's own catalogue, not instrumentation added for the dashboard. **A panel that says *No series* below is telling you the truth: an instrument nothing has recorded yet emits no series at all.** It has not been replaced with a zero, because a fabricated zero on a safety metric is the failure this section exists to avoid."
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Is the safety metric measurable?",
+      "description": "safety_detected_before_first_report_measurable — the reachability verdict, as data rather than as a comment. 1 means some detector both reaches a counted state and can fire without a prior report, so the tile beside it is a real measurement. 0 means the counter's comparison is unsatisfiable by construction, and its zero is arithmetic rather than a failure. Computed by detectionReachability from the detectors this process actually runs, so it moves if the catalogue does. Read this tile first: it is what tells you how to read the one next to it.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "safety_detected_before_first_report_measurable",
+          "legendFormat": "measurable"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "NOT MEASURABLE", "color": "blue", "index": 0 } } },
+            { "type": "value", "options": { "1": { "text": "MEASURABLE", "color": "green", "index": 1 } } }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Detected before first report",
+      "description": "safety.detected_before_first_report. The number here is only a measurement when the tile to its left says MEASURABLE. While it says NOT MEASURABLE this counter is 0 by construction and always will be: every detector able to reach high or critical requires a report already filed naming the account, and this counter counts detection BEFORE that first report. Blue rather than red, because red would assert a failure that is not happening. The reason is quoted from data in the panel below rather than written here, so it cannot go stale.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "safety_detected_before_first_report_total",
+          "legendFormat": "detected"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": { "mode": "fixed", "fixedColor": "blue" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Detection ratio (this process)",
+      "description": "safety.detection_before_report.ratio, the observable gauge: detected before first report over confirmed malicious, for this process only. It is a per-host tile and never a fleet average. Zero here means one of two honest things — an empty cohort, or a cohort with no detectable-before-report case — and the raw counters beside it are what tell those apart.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "safety_detection_before_report_ratio",
+          "legendFormat": "ratio"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "noValue": "no series yet"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "color": { "mode": "fixed", "fixedColor": "blue" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Confirmed malicious accounts",
+      "description": "safety.confirmed_malicious_accounts: the denominator of the primary safety metric — accounts a moderation case was opened about. This is the cohort the ratio is computed over, so it is the panel that makes a zero ratio interpretable. Never labelled by anything unique, by construction.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 29 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "safety_confirmed_malicious_accounts_total",
+          "legendFormat": "confirmed"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "noValue": "no case opened yet"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "unit": "none",
+          "color": { "mode": "fixed", "fixedColor": "purple" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Readiness probes",
+      "description": "readiness.probe by whether the transactional store was reachable when the probe ran. This is the health signal: a rising count of down beside a flat count of up is the shape of a database fault, which is the one thing liveness deliberately does not report. down appears only once it has happened, so an absent down tile is good news rather than missing telemetry.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 29 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "readiness_probe_total{result=\"up\"}",
+          "legendFormat": "up"
+        },
+        {
+          "refId": "B",
+          "expr": "readiness_probe_total{result=\"down\"}",
+          "legendFormat": "down"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "noValue": "no probe answered yet"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "down" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "up" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }]
+          }
+        ]
+      }
+    },
+    {
+      "type": "table",
+      "title": "Why the safety metric reads zero (from the service, not from this file)",
+      "description": "safety_detected_before_first_report_measurable_info, published by the bridge from the `detection` object the service already serves beside its catalogue. The reason, the detectors that cannot reach a counted state, and the detectors that depend on a prior report are all labels on one value-1 series, so this table moves when the detector catalogue moves instead of rotting as dashboard prose. Empty when the tile above says MEASURABLE, because then there is nothing to explain.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 16, "x": 0, "y": 34 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "safety_detected_before_first_report_measurable_info",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true, "Value": true, "__name__": true },
+            "indexByName": {}
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": { "show": false }
+      },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "filterable": false } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "text",
+      "title": "Reading that table",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 34 },
+      "options": {
+        "mode": "markdown",
+        "content": "**This is not a broken panel, a broken detector, or a missing secret.**\n\n`safety.detected_before_first_report` counts an account whose risk first reached `high` or `critical` *before the first report naming it*. Every detector that can reach `high` — `interaction.unmatch_report`, the loudest — fires only *after* such a report already exists. The detection can raise the state but can never be the first thing to have raised it, so the comparison cannot come out true.\n\n`RISK_PAIRING_SECRET` does not change this, and lowering the escalation gate to make the number move would be the wrong fix: a safety metric that reads non-zero because the bar was lowered is indistinguishable from detection working.\n\nWhy this may be the correct policy rather than a defect — every detector is corroboration-only, so one noisy signal never acts alone — is argued in `docs/delivery-state.md`."
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Verification attempts by outcome",
+      "description": "verification.attempt.outcome: a verification attempt resolved, by decision label and nothing else — a confidence score is a per-user value that identifies whoever holds the model, so it is not a metric label. **This panel stays empty in the current build, and that is not a broken panel.** The instrument is declared in SAFETY_METRICS but nothing in production records it yet: the only caller in the repository is a test. Wiring a producer is a product decision, not a dashboard one, so the panel is left honest rather than filled with an invented series.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(verification_attempt_outcome_total[2m]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": ["sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Verification provider calls",
+      "description": "verification.provider.call by uniform outcome and stage. Kept separate from the attempt counter on purpose: read together they tell a broken provider pipeline apart from a change in user behaviour. **Also has no producer in the current build** — declared in SAFETY_METRICS, recorded only by tests — so this stays empty until one exists. Absent rather than zero on purpose: these declare dimensions, and publishing an unlabelled zero would assert a series the product can never legitimately record.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(verification_provider_call_total[2m]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": ["sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "text",
+      "title": "Log and trace exploration",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 48 },
       "options": {
         "mode": "markdown",
         "content": "**Explore → Logs**: `{service_name=\"been-there-service\"}`. Every line carries `trace_id`; click it to open the matching trace. **Explore → Traces**: `{ resource.service.name=\"been-there-service\" }`. Spans name their correlation id, and Tempo links each one back to its logs. The two meet on `trace_id`, which the platform derives as a hash of the request's correlation id — see `docs/observability.md`."
@@ -283,7 +539,7 @@
       "title": "Request log",
       "description": "One line per request, assembled by the platform's own requestLogEntry at a fixed internal clearance. The body is the redacted record and nothing else.",
       "datasource": { "type": "loki", "uid": "loki" },
-      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 24 },
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 52 },
       "targets": [
         {
           "refId": "A",
