@@ -291,13 +291,12 @@ public struct SignInScreen: View {
     /// The field itself, not a labelled column.
     ///
     /// A helper returning `some View` erases its concrete type, so the caller
-    /// cannot attach `.autocapitalization` afterwards. `verbatim` is a plain
-    /// `Bool` rather than `UITextContentType` and
-    /// `TextInputAutocapitalization` on purpose: those live in UIKit, and this
-    /// package imports neither UIKit nor AppKit so the same files build for the
-    /// iOS app later. A contact field that autocorrects or capitalises silently
-    /// refuses a valid address, which is a failure the user cannot see the
-    /// cause of — hence on by default.
+    /// cannot attach `.textInputAutocapitalization` afterwards.
+    /// `verbatim` is a plain `Bool` rather than a UIKit-typed constant on
+    /// purpose: those live in UIKit, and this package imports neither UIKit nor
+    /// AppKit so the same files build for the iOS app later. A contact field
+    /// that autocorrects or capitalises silently refuses a valid address, which
+    /// is a failure the user cannot see the cause of — hence on by default.
     private func field(
         _ placeholder: String,
         _ text: Binding<String>,

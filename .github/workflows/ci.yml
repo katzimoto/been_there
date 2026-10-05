@@ -152,18 +152,14 @@ jobs:
       - name: Test the client safety gate
         run: cd client/BeenThereKit && swift test
 
-      # The package declares iOS 17 as a platform, so compiling for the simulator
-      # is what proves the source is actually iOS-compatible rather than merely
-      # building on the Mac.
+      # The app shell is what this now builds, and it consumes `BeenThereViews`
+      # unchanged, so the whole client source set is compiled rather than one
+      # file of it: `swift build` over the package graph compiles
+      # `BeenThereKit`, `BeenThereViews` and `BeenThereIOS` together, and a new
+      # source file joins the gate by existing.
       #
-      # The whole client source set, not one file. Naming `ClientGate.swift`
-      # compiled a single file of nine and left the other eight — the API client,
-      # the decoding shim and every view model — outside CI entirely, so a client
-      # that did not compile was still green. The glob is what makes a new source
-      # file part of this gate by existing.
+      # It ends in an installable `.app` bundle rather than a bare `.swiftmodule`
+      # because that is what a person can launch: the previous recipe proved the
+      # kit parsed for iOS, which is not the same claim as "there is an app".
       - name: Compile for the iOS simulator
-        env:
-          RUNNER_TEMP: ${{ runner.temp }}
-        run: |
-          export SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
-          xcrun swiftc -sdk "$SDK" -target arm64-apple-ios17.0-simulator -emit-module -module-name BeenThereKit client/BeenThereKit/Sources/BeenThereKit/*.swift -o "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/BeenThereKit.swiftmodule"
+        run: sh scripts/dev/build-ios-app.sh

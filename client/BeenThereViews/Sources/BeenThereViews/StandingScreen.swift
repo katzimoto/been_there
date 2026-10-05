@@ -360,11 +360,18 @@ public struct StandingScreen: View {
 
 /// A wrapping row of chips.
 ///
-/// Written without a custom `Layout` because the only width that has to look
-/// right is 390pt, and this is twenty lines rather than a layout that would then
-/// need its own macOS counterpart. The split is measured rather than counted:
-/// `report` and `delete_account` are very different widths at the same font, and
-/// a character-based split puts one of them on its own line.
+/// Wrapping is done by a `Layout` rather than by measuring the strings here, and
+/// the reason is the platform rather than elegance. An earlier version asked
+/// `NSFont` how wide each chip's text would be and wrapped by that number: it
+/// compiles on the Mac and **fails to compile for iOS**, because `NSFont` is
+/// AppKit and a package that has to build for both platforms cannot ask it. A
+/// `Layout` has each subview measure itself through `sizeThatFits`, so the
+/// chip's own font is the one measured, on either platform, with no font API in
+/// this file at all.
+///
+/// The row also wraps at whatever width it is offered rather than only at the
+/// `phoneWidth` this package is drawn at, so a phone narrower than 390pt wraps
+/// rather than clipping.
 struct FlowChips: View {
     private let values: [String]
     private let tint: Color
@@ -375,78 +382,76 @@ struct FlowChips: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Space.xs) {
-            ForEach(Array(chunked.enumerated()), id: \.offset) { _, row in
-                HStack(alignment: .center, spacing: Space.xs) {
-                    ForEach(row, id: \.self) { value in
-                        ValueChip(value, tint: tint)
-                    }
-                    Spacer(minLength: 0)
-                }
+        FlowRow(spacing: Space.xs) {
+            ForEach(values, id: \.self) { value in
+                ValueChip(value, tint: tint)
             }
         }
     }
+}
 
-    /// The usable width inside a `Card` at the phone width: 390 less the frame,
-    /// less the scroll view's padding, less the card's own padding on both sides.
-    private var limit: CGFloat { phoneWidth - (Space.md * 4) }
+/// Lays subviews out left to right in rows, wrapping at the width offered.
+///
+/// A `Layout` rather than a `GeometryReader` and arithmetic: SwiftUI already
+/// knows how wide each subview wants to be, and asking it is better than this
+/// file carrying a second copy of the type scale.
+private struct FlowRow: Layout {
+    var spacing: CGFloat = 0
 
-    private var chunked: [[String]] {
-        var rows: [[String]] = []
-        var row: [String] = []
-        var used: CGFloat = 0
-        for value in values {
-            let width = FlowChips.width(of: value, size: chipSize) + (Space.sm * 2)
-            if !row.isEmpty, used + width > limit {
-                rows.append(row)
-                row = []
-                used = 0
-            }
-            row.append(value)
-            used += width + Space.xs
-        }
-        if !row.isEmpty { rows.append(row) }
-        return rows
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = arrange(subviews, in: proposal.width ?? .infinity)
+        let widest = rows.map(\.width).max() ?? 0
+        let gaps = spacing * CGFloat(max(rows.count - 1, 0))
+        return CGSize(
+            width: proposal.width ?? widest,
+            height: rows.reduce(CGFloat(0)) { $0 + $1.height } + gaps
+        )
     }
 
-    /// The size the chips are drawn at, which is the caption size the member
-    /// has set.
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        var y = bounds.minY
+        for row in arrange(subviews, in: bounds.width) {
+            var x = bounds.minX
+            for view in row.views {
+                view.place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: .unspecified)
+                x += view.sizeThatFits(.unspecified).width + spacing
+            }
+            y += row.height + spacing
+        }
+    }
+
+    /// One laid-out row: the subviews it holds and the box they occupy.
     ///
-    /// `ValueChip` still draws `Typeface.mono`, a fixed 12pt, so this reads 12
-    /// today and the layout is unchanged. It is resolved from the text size
-    /// rather than written into the measurement below, because the one thing a
-    /// wrapping row must never do is lay itself out against a font size other
-    /// than the one it is about to draw.
-    @ScaledMetric(relativeTo: .caption) private var chipSize: CGFloat = 12
+    /// `LayoutSubview` is named in full rather than as `Subviews.View`: inside
+    /// a `View` conformer, `View` means `SwiftUI.View`, so the shorter spelling
+    /// resolves to the wrong type entirely.
+    private struct Row {
+        var views: [LayoutSubview]
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
 
-    /// Measured with the font that actually draws the chip, so a chip never
-    /// clips its own text. `ValueChip` draws `.system(size: 12, weight: .medium,
-    /// design: .monospaced)`; CoreText derives the same monospaced system font
-    /// from the system UI font by symbolic trait, and `CTLineGetTypographicBounds`
-    /// measures it. Chosen over `NSFont.monospacedSystemFont` — which measured
-    /// to the same number on the Mac — because the views package imports neither
-    /// UIKit nor AppKit, and CoreText is the one text engine that compiles for
-    /// both platforms from one source file. Measured 163.195 on macOS against
-    /// the AppKit call's 163.195 before the swap.
-    private static func width(of text: String, size: CGFloat) -> CGFloat {
-        // A font that cannot be created means this measurement is wrong, and a
-        // width that under-reports is worse than one that over-reports: it puts
-        // two chips on a line that cannot hold them. An infinite width puts each
-        // chip on its own line, which is wrong but never overlaps.
-        guard let system = CTFontCreateUIFontForLanguage(.system, size, nil) else { return .infinity }
-        let monospaced = CTFontCreateCopyWithSymbolicTraits(
-            system,
-            size,
-            nil,
-            CTFontSymbolicTraits.traitMonoSpace,
-            CTFontSymbolicTraits.traitMonoSpace
-        )
-        let line = CTLineCreateWithAttributedString(
-            NSAttributedString(
-                string: text,
-                attributes: [NSAttributedString.Key(kCTFontAttributeName as String): monospaced]
-            )
-        )
-        return CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+    private func arrange(_ subviews: Subviews, in limit: CGFloat) -> [Row] {
+        var rows: [Row] = []
+        var row = Row(views: [])
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            let width = row.width == 0 ? size.width : row.width + spacing + size.width
+            if row.width > 0, width > limit {
+                rows.append(row)
+                row = Row(views: [subview], width: size.width, height: size.height)
+                continue
+            }
+            row.views.append(subview)
+            row.width = width
+            row.height = max(row.height, size.height)
+        }
+        if !row.views.isEmpty { rows.append(row) }
+        return rows
     }
 }
