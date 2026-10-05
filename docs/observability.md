@@ -161,7 +161,78 @@ Three details worth knowing before reading a trace:
 | **Refusals by domain code** | same, sliced by `code` | The domain's own error code rather than the HTTP status. A flat count with a moving mix is a behaviour change. |
 | **Latency quantiles** | the histogram, p50/p90/p99 | The service records no duration of its own; this is the boundary's measurement. |
 | **Requests by route** | `http_server_requests_total` by `route` | Route *templates*. Every path segment that is not a route word is reduced to `{id}` before it leaves the process, so this panel cannot become a list of account identifiers. |
+| **Is the safety metric measurable?** | `safety_detected_before_first_report_measurable` | **Read this first.** `MEASURABLE` means the tile beside it is a real measurement. `NOT MEASURABLE` means that counter's zero is arithmetic, not a failure — see §4.1. |
+| **Detected before first report** | `safety_detected_before_first_report_total` | A measurement only while the tile to its left says `MEASURABLE`. While it says `NOT MEASURABLE` this is 0 by construction and always will be. Deliberately blue, never red: red would assert a failure that is not happening. |
+| **Why the safety metric reads zero** | `safety_detected_before_first_report_measurable_info` | The service's own reason, as a table of labels rather than prose written into the dashboard — so the explanation moves with the detector catalogue instead of rotting. Empty when the metric is measurable, because then there is nothing to explain. |
+| **Detection ratio (this process)** | `safety.detection_before_report.ratio` | Detected-before-report over confirmed malicious, for this process only — never a fleet average. Zero means an empty cohort or a cohort with no detectable case; the two counters beside it tell those apart. |
+| **Confirmed malicious accounts** | `safety.confirmed_malicious_accounts_total` | The denominator of the primary safety metric. This is what makes a zero ratio interpretable. |
+| **Readiness probes** | `readiness.probe` by `result` | The health signal. A rising `down` beside a flat `up` is the shape of a database fault — the one thing liveness deliberately does not report. `down` appears only once it has happened, so its absence is good news, not missing telemetry. |
+| **Verification attempts by outcome** | `verification.attempt.outcome` | **Empty in the current build, and that is not a broken panel.** The instrument is declared in `SAFETY_METRICS` but nothing in production records it — the only caller in the repository is a test. Wiring a producer is a product decision, so the panel is left honest rather than filled with an invented series. |
+| **Verification provider calls** | `verification.provider.call` | The same: declared, but with no producer yet. Kept separate from the attempt counter deliberately — read together they separate a broken provider pipeline from a change in user behaviour. Absent rather than zero on purpose, since it declares dimensions and an unlabelled zero would assert a series the product can never legitimately record. |
 | **Request log** | Loki, `{service_name="been-there-service"}` | One line per request. Click the `trace_id` in a line to open its trace. |
+
+### 4.1 The safety metric that cannot move
+
+`safety.detected_before_first_report` counts an account whose risk first
+reached `high` or `critical` **before the first report naming it**. Every
+detector in the current catalogue that can reach `high` —
+`interaction.unmatch_report`, the loudest — fires only *after* such a report
+already exists. The detection can therefore raise the state but can never be
+the first thing to have raised it, so the comparison the counter is built on
+cannot come out true.
+
+**The zero is honest; showing it alone would not be.** A tile reading `0` with
+nothing attached is indistinguishable from "detection is broken" — the opposite
+of the truth. So the dashboard never lets the number stand by itself. Three
+panels carry it:
+
+1. **`..._measurable`** — the verdict as a number, `1` or `0`.
+2. **`..._total`** — the counter, subordinate, coloured blue rather than red so
+   nobody learns to ignore it as an alarm.
+3. **`..._measurable_info`** — the reason, the detectors that cannot reach a
+   counted state, and the detectors that depend on a prior report, as labels on
+   a value-1 series.
+
+The bridge derives all three from the `detection` object
+`GET /v1/health/metrics` already serves beside the catalogue, and
+`detectionReachability` computes it from the detectors this process actually
+runs. **So the explanation tracks the catalogue instead of the file.** Add a
+self-escalating detector and `measurable` flips to `1`, the reason table
+empties, and the counter becomes an ordinary measurement — with no dashboard
+edit. Writing that explanation as dashboard prose would have outlived the fact
+it explained.
+
+`RISK_PAIRING_SECRET` does not change the answer, and lowering the escalation
+gate to make the number move would be the wrong fix: a safety metric that reads
+non-zero because the bar was lowered is indistinguishable from detection
+working. Full reasoning, including why this may be the correct policy rather
+than a defect: [`delivery-state.md`](delivery-state.md), *"Why the safety metric
+is stuck, and why that may be correct"*.
+
+### 4.2 The dashboard cannot quietly lie
+
+`packages/service/test/observability-dashboard.test.ts` parses this dashboard's
+JSON and fails the suite when:
+
+- a panel's PromQL names a metric the service's catalogue does not publish
+  (an empty graph in the same colour as a working one is how a dashboard lies
+  without asserting anything false);
+- a product instrument is wrapped in `absent()`, `vector(0)` or `or 0`;
+- a label selector names a value the product does not declare, as
+  `readiness_probe_total{result="degraded"}` would;
+- the unreachable safety metric loses its flag panel, its reason table or the
+  prose beside it, or is coloured as a failure;
+- two panels overlap, so one is silently hidden;
+- a Prometheus panel has no title or no description.
+
+Each of those was checked by mutating the dashboard and watching the suite
+fail, rather than by reading the assertions and deciding they looked right.
+
+So a panel for a metric that does not exist is a failing test rather than an
+empty rectangle. Editing the dashboard by hand in the browser is not possible
+either: `allowUiUpdates: false` in `dashboards.yml` and `editable: false` in the
+JSON mean a click-made change lives only in the Grafana volume and is lost on
+the next `reset`.
 
 ## 5. Log and trace exploration
 
