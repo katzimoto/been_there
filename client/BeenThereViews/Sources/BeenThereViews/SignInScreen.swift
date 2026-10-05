@@ -100,6 +100,20 @@ public struct SignInScreen: View {
                     }
                 }
 
+                // On a phone, the default address is wrong and the failure is
+                // silent: `127.0.0.1` on an iPhone is the iPhone, so the app
+                // reports a service that is not ready and the member has no idea
+                // why. This is the one screen in the app that may contain
+                // developer instructions, because the address field is itself a
+                // developer affordance — and a person on a phone needs to be told
+                // what to type instead.
+                if model.serviceReady != true {
+                    Text("On a phone, 127.0.0.1 is the phone itself. Type your Mac's address instead — `ipconfig getifaddr en0` on the Mac, or whatever `node scripts/dev/lan-forward.mjs` printed.")
+                        .font(ScaledTypeface.caption)
+                        .foregroundStyle(palette.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 // The checks are a developer's answer, so they are one tap away
                 // rather than the first screen's furniture: expanded, they pushed
                 // "Sign in" and "Create account" below the fold on a 390pt phone,
